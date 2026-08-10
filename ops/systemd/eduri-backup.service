@@ -1,0 +1,37 @@
+[Unit]
+Description=Create and verify an Eduri data backup
+Documentation=file:/home/user1/eduri/docs/OPERATIONS.md
+Requires=docker.service
+After=docker.service network-online.target
+ConditionPathExists=/home/user1/eduri/docker-compose.yml
+ConditionPathExists=/home/user1/eduri/.env
+
+[Service]
+Type=oneshot
+User=user1
+Group=user1
+WorkingDirectory=/home/user1/eduri
+UMask=0077
+ExecStart=/usr/bin/bash /home/user1/eduri/ops/scripts/backup.sh
+ExecStart=/usr/bin/bash /home/user1/eduri/ops/scripts/prune-backups.sh --keep 14
+TimeoutStartSec=30min
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/user1/eduri/data
+ReadWritePaths=/home/user1/eduri/backups
+ReadWritePaths=/home/user1/eduri/.maintenance.lock
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,43 @@
+port: 7880
+bind_addresses:
+  - 127.0.0.1
+  - 10.253.0.1
+
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: true
+  allow_tcp_fallback: true
+  congestion_control:
+    enabled: true
+    allow_pause: true
+
+room:
+  auto_create: false
+  max_participants: 2
+  empty_timeout: 300
+  departure_timeout: 60
+
+turn:
+  enabled: true
+  bind_addresses:
+    - 0.0.0.0
+  domain: eduri.ru
+  cert_file: /etc/letsencrypt/live/eduri.ru/fullchain.pem
+  key_file: /etc/letsencrypt/live/eduri.ru/privkey.pem
+  udp_port: 3478
+  tls_port: 5349
+  relay_range_start: 35000
+  relay_range_end: 35049
+  ttl_seconds: 300
+
+logging:
+  level: info
+  pion_level: error
+  json: true
+
+limit:
+  num_tracks: 64
+  bytes_per_sec: 32000000
+  subscription_limit_video: 4
+  subscription_limit_audio: 2

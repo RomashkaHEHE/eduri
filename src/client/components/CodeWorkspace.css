@@ -1,0 +1,701 @@
+.full-code-workspace[data-code-theme="light"],
+.lesson-code-workspace[data-code-theme="light"],
+:root[data-theme="light"] .full-code-workspace,
+:root[data-theme="light"] .lesson-code-workspace {
+  --code-workspace-bg: #ffffff;
+  --code-explorer-bg: #f4f6f8;
+  --code-console-bg: #f7f9fb;
+  --code-surface: #ffffff;
+  --code-surface-muted: #edf2f6;
+  --code-surface-hover: #e4eaf0;
+  --code-surface-active: #dce8f8;
+  --code-border: #d5dde5;
+  --code-border-strong: #8291a1;
+  --code-text: #263442;
+  --code-text-strong: #17212b;
+  --code-muted: #5b6d7e;
+  --code-accent: #2459d6;
+  --code-accent-soft: #e7effd;
+  --code-drop-bg: #d9e8fb;
+  --code-button-bg: #e1e7ed;
+  --code-button-hover: #d2dce5;
+  --code-danger: #b42318;
+  --code-danger-soft: #fce8e7;
+  --code-success: #087a55;
+  --code-waiting: #255cba;
+  --code-shadow: 0 12px 30px rgb(38 52 66 / 18%);
+  color-scheme: light;
+}
+
+.full-code-workspace[data-code-theme="dark"],
+.lesson-code-workspace[data-code-theme="dark"],
+:root[data-theme="dark"] .full-code-workspace,
+:root[data-theme="dark"] .lesson-code-workspace {
+  --code-workspace-bg: #171a1f;
+  --code-explorer-bg: #1d252d;
+  --code-console-bg: #17212b;
+  --code-surface: #202a33;
+  --code-surface-muted: #101820;
+  --code-surface-hover: #29343e;
+  --code-surface-active: #34424e;
+  --code-border: #2e3944;
+  --code-border-strong: #667686;
+  --code-text: #d6dee7;
+  --code-text-strong: #ffffff;
+  --code-muted: #9eafbd;
+  --code-accent: #8fb5ff;
+  --code-accent-soft: #243443;
+  --code-drop-bg: #38516a;
+  --code-button-bg: #344553;
+  --code-button-hover: #405565;
+  --code-danger: #ff9b96;
+  --code-danger-soft: #4a2a2a;
+  --code-success: #63d5a8;
+  --code-waiting: #8fb5ff;
+  --code-shadow: 0 12px 30px rgb(0 0 0 / 34%);
+  color-scheme: dark;
+}
+
+.full-code-workspace .code-explorer__head > button {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  color: var(--code-muted, #aebbc7);
+  background: transparent;
+  cursor: pointer;
+}
+
+.full-code-workspace .code-explorer__head > button:hover {
+  color: var(--code-text-strong, #ffffff);
+  background: var(--code-surface-hover, #34414d);
+}
+
+.full-code-workspace .code-explorer__tree {
+  position: relative;
+  flex: 1;
+  outline: 0;
+}
+
+.full-code-workspace .code-explorer__tree.is-drop-target {
+  box-shadow: inset 0 0 0 1px var(--code-accent, #6d98e8);
+}
+
+.full-code-workspace .code-tree-entry {
+  padding-right: 4px;
+  transition: opacity 100ms ease;
+}
+
+.full-code-workspace .code-tree-entry.is-dragging {
+  opacity: 0.42;
+}
+
+.full-code-workspace .code-tree-entry.is-drop-target {
+  color: var(--code-text-strong, #ffffff);
+  background: var(--code-drop-bg, #38516a);
+  box-shadow: inset 0 0 0 1px var(--code-accent, #6d98e8);
+}
+
+.full-code-workspace .code-tree-entry > .code-tree-entry__main,
+.full-code-workspace .code-tree-entry > .code-tree-entry__rename {
+  width: 100%;
+  min-width: 0;
+  height: 29px;
+  padding: 0 3px 0 0;
+  display: grid;
+  grid-template-columns: 15px 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 1px;
+  color: inherit;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.full-code-workspace .code-tree-entry > .code-tree-entry__rename {
+  cursor: default;
+}
+
+.full-code-workspace .code-tree-entry__main > span:last-child {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.full-code-workspace .code-tree-entry__chevron,
+.full-code-workspace .code-tree-entry__icon {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  overflow: visible;
+}
+
+.full-code-workspace .code-tree-entry__chevron {
+  color: var(--code-muted, #8e9ba7);
+}
+
+.full-code-workspace .code-tree-entry__rename > input {
+  width: 100%;
+  min-width: 0;
+  height: 23px;
+  padding: 0 4px;
+  color: var(--code-text-strong, #ffffff);
+  border: 1px solid var(--code-accent, #6d98e8);
+  border-radius: 3px;
+  outline: 0;
+  background: var(--code-surface, #17212b);
+  font-size: 12px;
+}
+
+.code-explorer-menu {
+  position: fixed;
+  z-index: 120;
+  width: 210px;
+  padding: 5px;
+  display: grid;
+  gap: 1px;
+  color: var(--code-text, #dce7f1);
+  border: 1px solid var(--code-border-strong, #44515e);
+  border-radius: 5px;
+  background: var(--code-surface, #202a33);
+  box-shadow: var(--code-shadow, 0 12px 30px rgb(0 0 0 / 34%));
+}
+
+.code-explorer-menu > button {
+  width: 100%;
+  min-height: 34px;
+  padding: 0 9px;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  color: inherit;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  text-align: left;
+}
+
+.code-explorer-menu > button:hover,
+.code-explorer-menu > button:focus-visible {
+  color: var(--code-text-strong, #ffffff);
+  background: var(--code-surface-hover, #334252);
+}
+
+.code-explorer-menu > button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.code-explorer-menu > button.is-danger {
+  color: var(--code-danger, #ff9b96);
+}
+
+.code-explorer-menu > button.is-danger:hover,
+.code-explorer-menu > button.is-danger:focus-visible {
+  background: var(--code-danger-soft, #4a2a2a);
+}
+
+.code-explorer-menu__separator {
+  height: 1px;
+  margin: 4px 3px;
+  background: var(--code-border-strong, #44515e);
+}
+
+.full-code-workspace .code-tests-toggle {
+  min-height: 32px;
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--code-muted, var(--muted));
+  border: 1px solid var(--code-border, var(--line));
+  border-radius: 5px;
+  background: var(--code-surface, var(--surface));
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.full-code-workspace .code-tests-toggle:hover,
+.full-code-workspace .code-tests-toggle.is-active {
+  color: var(--code-accent, var(--blue));
+  border-color: color-mix(in srgb, var(--code-accent, var(--blue)) 48%, var(--code-border, var(--line)));
+  background: var(--code-accent-soft, color-mix(in srgb, var(--blue) 9%, var(--surface)));
+}
+
+.code-tests-toggle__count {
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 4px;
+  color: inherit;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  font-size: 9px;
+}
+
+.full-code-workspace .code-console {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.full-code-workspace .code-console.is-tests-open {
+  grid-template-columns: minmax(300px, 0.9fr) minmax(340px, 1.1fr);
+}
+
+.full-code-workspace .code-console__output {
+  grid-template-rows: 34px minmax(0, 1fr);
+}
+
+.full-code-workspace .code-console__output.has-prompt {
+  grid-template-rows: 34px minmax(0, 1fr) 38px;
+}
+
+.full-code-workspace .code-console__output header > div {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.full-code-workspace .code-console__waiting {
+  color: var(--code-waiting, #8fb5ff);
+}
+
+.full-code-workspace .code-console__output pre {
+  grid-row: 2;
+}
+
+.code-console__prompt {
+  min-width: 0;
+  height: 38px;
+  padding: 5px 7px 5px 11px;
+  display: grid;
+  grid-template-columns: 13px minmax(0, 1fr) 30px;
+  align-items: center;
+  gap: 4px;
+  color: var(--code-muted, #6f7f8e);
+  border-top: 1px solid var(--code-border, #2b3946);
+  background: var(--code-surface-muted, #121b23);
+}
+
+.code-console__prompt.is-waiting {
+  color: var(--code-waiting, #8fb5ff);
+}
+
+.code-console__prompt > input {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  padding: 0 6px;
+  color: var(--code-text, #e4ebf1);
+  border: 0;
+  outline: 0;
+  background: transparent;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 11px;
+}
+
+.code-console__prompt > input::placeholder {
+  color: var(--code-muted, #71808d);
+}
+
+.code-console__prompt > input:disabled {
+  cursor: default;
+}
+
+.code-console__prompt > button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  color: var(--code-text, #dce7f1);
+  border: 0;
+  border-radius: 4px;
+  background: var(--code-button-bg, #334553);
+  cursor: pointer;
+}
+
+.code-console__prompt > button:hover:not(:disabled) {
+  background: var(--code-button-hover, #48637a);
+}
+
+.code-console__prompt > button:disabled {
+  cursor: default;
+  opacity: 0.35;
+}
+
+/* Code Workspace owns a complete palette so Explorer, Monaco chrome, tests,
+   and the terminal share one synchronously applied document theme. */
+.full-code-workspace[data-code-theme] {
+  color: var(--code-text);
+  background: var(--code-workspace-bg);
+}
+
+.full-code-workspace[data-code-theme] .code-explorer {
+  color: var(--code-text);
+  border-color: var(--code-border);
+  background: var(--code-explorer-bg);
+}
+
+.full-code-workspace[data-code-theme] .code-explorer__head {
+  color: var(--code-text-strong);
+  border-color: var(--code-border);
+  background: var(--code-explorer-bg);
+}
+
+.full-code-workspace[data-code-theme] .code-tree-entry {
+  color: var(--code-text);
+}
+
+.full-code-workspace[data-code-theme] .code-tree-entry:hover {
+  background: var(--code-surface-hover);
+}
+
+.full-code-workspace[data-code-theme] .code-tree-entry.is-active {
+  color: var(--code-text-strong);
+  background: var(--code-surface-active);
+}
+
+.full-code-workspace[data-code-theme] .code-tree-entry.is-drop-target {
+  color: var(--code-text-strong);
+  background: var(--code-drop-bg);
+}
+
+.full-code-workspace[data-code-theme] .code-main,
+.full-code-workspace[data-code-theme] .code-main__editor {
+  color: var(--code-text);
+  background: var(--code-workspace-bg);
+}
+
+.full-code-workspace[data-code-theme] .code-main__toolbar {
+  color: var(--code-text-strong);
+  border-color: var(--code-border);
+  background: var(--code-surface);
+}
+
+.full-code-workspace[data-code-theme] .code-main__toolbar .code-icon-command,
+.full-code-workspace[data-code-theme] .code-move-control,
+.full-code-workspace[data-code-theme] .code-move-control select {
+  color: var(--code-muted);
+}
+
+.full-code-workspace[data-code-theme] .code-main__toolbar .code-icon-command:hover {
+  color: var(--code-danger);
+  background: var(--code-danger-soft);
+}
+
+.full-code-workspace[data-code-theme] .code-move-control {
+  border-color: var(--code-border);
+  background: var(--code-surface);
+}
+
+.full-code-workspace[data-code-theme] .code-binary-preview {
+  color: var(--code-muted);
+  background: var(--code-console-bg);
+}
+
+.full-code-workspace[data-code-theme] .code-binary-preview strong {
+  color: var(--code-text-strong);
+}
+
+.full-code-workspace .code-folder-actions {
+  width: 100%;
+  height: 100%;
+  padding: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  align-content: center;
+  gap: 10px;
+}
+
+.full-code-workspace .code-folder-actions > button {
+  min-height: 40px;
+  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: var(--code-text-strong);
+  border: 1px solid var(--code-border);
+  border-radius: 6px;
+  background: var(--code-surface);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.full-code-workspace .code-folder-actions > button:hover:not(:disabled),
+.full-code-workspace .code-folder-actions > button:focus-visible {
+  border-color: var(--code-accent);
+  outline: 0;
+  background: var(--code-accent-soft);
+}
+
+.full-code-workspace .code-folder-actions > button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.full-code-workspace[data-code-theme] .code-workspace-error {
+  color: var(--code-danger);
+  border-color: color-mix(in srgb, var(--code-danger) 42%, var(--code-border));
+  background: var(--code-danger-soft);
+}
+
+.full-code-workspace[data-code-theme] .code-console {
+  color: var(--code-text);
+  border-color: var(--code-border);
+  background: var(--code-console-bg);
+}
+
+.full-code-workspace[data-code-theme] .code-console__inputs {
+  border-color: var(--code-border);
+}
+
+.full-code-workspace[data-code-theme] .code-tests__tabs button,
+.full-code-workspace[data-code-theme] .code-test__meta input,
+.full-code-workspace[data-code-theme] .code-test__meta select,
+.full-code-workspace[data-code-theme] .code-console__inputs textarea {
+  color: var(--code-text);
+  border-color: var(--code-border-strong);
+  background: var(--code-surface);
+}
+
+.full-code-workspace[data-code-theme] .code-tests__tabs button {
+  color: var(--code-muted);
+}
+
+.full-code-workspace[data-code-theme] .code-tests__tabs button:hover {
+  color: var(--code-text-strong);
+  background: var(--code-surface-hover);
+}
+
+.full-code-workspace[data-code-theme] .code-tests__tabs button.is-active {
+  color: var(--code-text-strong);
+  border-color: var(--code-accent);
+  background: var(--code-accent-soft);
+}
+
+.full-code-workspace[data-code-theme] .code-tests-empty button {
+  color: var(--code-text-strong);
+  background: var(--code-button-bg);
+}
+
+.full-code-workspace[data-code-theme] .code-tests-empty button:hover:not(:disabled) {
+  background: var(--code-button-hover);
+}
+
+.full-code-workspace[data-code-theme] .code-test__meta button {
+  color: var(--code-danger);
+  background: var(--code-button-bg);
+}
+
+.full-code-workspace[data-code-theme] .code-test__meta button:hover:not(:disabled) {
+  background: var(--code-danger-soft);
+}
+
+.full-code-workspace[data-code-theme] .code-console__inputs label > span {
+  color: var(--code-muted);
+}
+
+.full-code-workspace[data-code-theme] .code-console__inputs textarea:focus,
+.full-code-workspace[data-code-theme] .code-test__meta input:focus,
+.full-code-workspace[data-code-theme] .code-test__meta select:focus {
+  border-color: var(--code-accent);
+}
+
+.full-code-workspace[data-code-theme] .code-console__inputs > button {
+  color: var(--code-text-strong);
+  background: var(--code-button-bg);
+}
+
+.full-code-workspace[data-code-theme] .code-console__inputs > button:hover:not(:disabled) {
+  background: var(--code-button-hover);
+}
+
+.full-code-workspace[data-code-theme] .code-console__inputs > button:disabled,
+.full-code-workspace[data-code-theme] .code-test__meta button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.full-code-workspace[data-code-theme] .code-console__output {
+  color: var(--code-text);
+  background: var(--code-console-bg);
+}
+
+.full-code-workspace[data-code-theme] .code-console__output header {
+  color: var(--code-muted);
+  border-color: var(--code-border);
+  background: var(--code-console-bg);
+}
+
+.full-code-workspace[data-code-theme] .code-console__output header span.is-passed {
+  color: var(--code-success);
+}
+
+.full-code-workspace[data-code-theme] .code-console__output header span.is-failed {
+  color: var(--code-danger);
+}
+
+.full-code-workspace[data-code-theme] .code-console__output pre {
+  color: var(--code-text);
+  background: var(--code-console-bg);
+  scrollbar-color: var(--code-border-strong) var(--code-console-bg);
+}
+
+.full-code-workspace[data-code-theme] .code-console__prompt {
+  color: var(--code-muted);
+  border-color: var(--code-border);
+  background: var(--code-surface-muted);
+}
+
+.full-code-workspace[data-code-theme] .code-console__prompt.is-waiting,
+.full-code-workspace[data-code-theme] .code-console__waiting {
+  color: var(--code-waiting);
+}
+
+.full-code-workspace[data-code-theme] .code-console__prompt > input {
+  color: var(--code-text);
+  caret-color: var(--code-accent);
+}
+
+.full-code-workspace[data-code-theme] .code-console__prompt > input::placeholder {
+  color: var(--code-muted);
+}
+
+.full-code-workspace[data-code-theme] .code-console__prompt > button {
+  color: var(--code-text-strong);
+  background: var(--code-button-bg);
+}
+
+.full-code-workspace[data-code-theme] .code-console__prompt > button:hover:not(:disabled) {
+  background: var(--code-button-hover);
+}
+
+.full-code-workspace[data-code-theme] .code-explorer-menu {
+  color: var(--code-text);
+  border-color: var(--code-border-strong);
+  background: var(--code-surface);
+  box-shadow: var(--code-shadow);
+}
+
+.full-code-workspace[data-code-theme] .code-explorer-menu > button:hover,
+.full-code-workspace[data-code-theme] .code-explorer-menu > button:focus-visible {
+  color: var(--code-text-strong);
+  background: var(--code-surface-hover);
+}
+
+.full-code-workspace[data-code-theme] .code-explorer-menu > button.is-danger {
+  color: var(--code-danger);
+}
+
+.full-code-workspace[data-code-theme] .code-explorer-menu > button.is-danger:hover,
+.full-code-workspace[data-code-theme] .code-explorer-menu > button.is-danger:focus-visible {
+  background: var(--code-danger-soft);
+}
+
+.full-code-workspace[data-code-theme] .code-explorer-menu__separator {
+  background: var(--code-border-strong);
+}
+
+/* Keep the lesson workspace's existing parent grid while providing a palette
+   boundary for its toolbar, Monaco surface, and output terminal. */
+.lesson-code-workspace {
+  display: contents;
+}
+
+.lesson-code-workspace[data-code-theme] > .code-toolbar {
+  color: var(--code-text);
+  border-color: var(--code-border);
+  background: var(--code-surface);
+}
+
+.lesson-code-workspace[data-code-theme] .language-switch {
+  background: var(--code-surface-muted);
+}
+
+.lesson-code-workspace[data-code-theme] .language-switch button {
+  color: var(--code-muted);
+}
+
+.lesson-code-workspace[data-code-theme] .language-switch button.is-active {
+  color: var(--code-text-strong);
+  background: var(--code-surface);
+  box-shadow: 0 1px 3px color-mix(in srgb, var(--code-text-strong) 13%, transparent);
+}
+
+.lesson-code-workspace[data-code-theme] > .code-editor {
+  color: var(--code-text);
+  background: var(--code-workspace-bg);
+}
+
+.lesson-code-workspace[data-code-theme] > .code-output {
+  color: var(--code-text);
+  border-color: var(--code-border);
+  background: var(--code-console-bg);
+}
+
+.lesson-code-workspace[data-code-theme] .code-output__head {
+  color: var(--code-muted);
+  border-color: var(--code-border);
+  background: var(--code-console-bg);
+}
+
+.lesson-code-workspace[data-code-theme] .code-output__head button {
+  color: var(--code-muted);
+}
+
+.lesson-code-workspace[data-code-theme] .code-output__head button:hover,
+.lesson-code-workspace[data-code-theme] .code-output__head button:focus-visible {
+  color: var(--code-text-strong);
+}
+
+.lesson-code-workspace[data-code-theme] .code-output pre {
+  color: var(--code-text);
+  background: var(--code-console-bg);
+  scrollbar-color: var(--code-border-strong) var(--code-console-bg);
+}
+
+@media (max-width: 900px) {
+  .full-code-workspace .code-console.is-tests-open {
+    grid-template-columns: minmax(0, 1fr);
+    overflow-y: auto;
+  }
+
+  .full-code-workspace .code-console.is-tests-open .code-console__inputs {
+    min-height: 190px;
+    border-right: 0;
+    border-bottom: 1px solid var(--code-border, #2b3946);
+  }
+}
+
+@media (max-width: 620px) {
+  .full-code-workspace .code-explorer__tree {
+    display: block;
+    overflow: auto;
+  }
+
+  .full-code-workspace .code-tree-entry {
+    width: 100%;
+    flex: none;
+  }
+
+  .full-code-workspace .code-tests-toggle > span:not(.code-tests-toggle__count) {
+    display: none;
+  }
+}

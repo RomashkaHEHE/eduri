@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the Eduri backup every day
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+RandomizedDelaySec=45m
+Persistent=true
+Unit=eduri-backup.service
+
+[Install]
+WantedBy=timers.target

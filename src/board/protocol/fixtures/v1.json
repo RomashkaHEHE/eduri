@@ -1,0 +1,85 @@
+{
+  "fixtureFormat": "eduri.board.protocol.golden",
+  "fixtureVersion": 1,
+  "protocolVersion": 1,
+  "binaryConventions": {
+    "magicHex": "45444232",
+    "magicEndian": "big",
+    "varUint": "unsigned-base128-little-endian-groups-canonical",
+    "lengthPrefix": "canonical-varuint-byte-length",
+    "text": "utf-8"
+  },
+  "crdt": {
+    "updateEncoding": "yjs-update-v1",
+    "stateVectorEncoding": "yjs-state-vector-v1",
+    "clientId": 42,
+    "stateVectorHex": "012a01",
+    "fullUpdateHex": "01012a002801076669787475726506616e73776572017d2a00",
+    "expectedRoot": "fixture",
+    "expectedKey": "answer",
+    "expectedNumber": 42,
+    "verifiedWith": {
+      "implementation": "ywasm",
+      "yrsVersion": "0.27.3",
+      "decodedStateVectorHex": "012a01",
+      "reencodedUpdateHex": "01012a002801076669787475726506616e73776572017d2a00"
+    }
+  },
+  "frames": [
+    {
+      "name": "AUTH",
+      "type": 1,
+      "hex": "4544423201010701031f0a7469636b65742e414243"
+    },
+    {
+      "name": "READY",
+      "type": 2,
+      "hex": "454442320102070203d6e84803"
+    },
+    {
+      "name": "SYNC_STEP1",
+      "type": 3,
+      "hex": "45444232010307086d616e69666573740500017f80ff"
+    },
+    {
+      "name": "SYNC_STEP2",
+      "type": 4,
+      "hex": "4544423201040708706167653a6162630401020304"
+    },
+    {
+      "name": "UPDATE",
+      "type": 5,
+      "hex": "4544423201050708706167653a61626300112233445566778899aabbccddeeff03090807"
+    },
+    {
+      "name": "ACK",
+      "type": 6,
+      "hex": "4544423201060708706167653a61626300112233445566778899aabbccddeeffac02"
+    },
+    {
+      "name": "AWARENESS",
+      "type": 7,
+      "hex": "4544423201070708706167653a6162632a0301002a"
+    },
+    {
+      "name": "CONTROL",
+      "type": 8,
+      "hex": "45444232010807040308706167653a61626300112233445566778899aabbccddeeff0a7065726d697373696f6e"
+    },
+    {
+      "name": "CHUNK",
+      "type": 9,
+      "hex": "45444232010900112233445566778899aabbccddeeff0501020a03aabbcc"
+    },
+    {
+      "name": "YJS_SYNC_STEP1",
+      "type": 3,
+      "hex": "45444232010307086d616e696665737403012a01"
+    },
+    {
+      "name": "YJS_SYNC_STEP2",
+      "type": 4,
+      "hex": "454442320104070c706167653a666978747572651901012a002801076669787475726506616e73776572017d2a00"
+    }
+  ]
+}

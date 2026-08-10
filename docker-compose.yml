@@ -1,0 +1,134 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      TRUST_PROXY: "10.253.0.1"
+      LIVEKIT_API_URL: "http://10.253.0.1:7880"
+      PORT: 3020
+      DATA_DIR: /app/data
+      CODE_BLOB_CLAMD_HOST: clamav
+      CODE_BLOB_CLAMD_PORT: 3310
+      CODE_BLOB_SCAN_TIMEOUT_MS: "${CODE_BLOB_SCAN_TIMEOUT_MS:-30000}"
+      CODE_BLOB_SCAN_MAX_BYTES: "${CODE_BLOB_SCAN_MAX_BYTES:-33554432}"
+    depends_on:
+      clamav:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "127.0.0.1:3020:3020"
+    networks:
+      eduri_backend:
+        ipv4_address: 10.253.0.2
+    cpus: "1.0"
+    mem_limit: 768m
+    pids_limit: 256
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3020/api/health').then(r=>{if(!r.ok)process.exit(1)})"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  clamav:
+    image: clamav/clamav:1.4.5@sha256:4de20bd9ab45a4b763c5412b769217ef5082572ebc8a63aff1a77943419e5dd8
+    restart: unless-stopped
+    user: clamav
+    entrypoint: ["/init-unprivileged"]
+    environment:
+      FRESHCLAM_CHECKS: 24
+    volumes:
+      - clamav-db:/var/lib/clamav
+      - ./ops/clamav/clamd.conf:/etc/clamav/clamd.conf:ro
+      - ./ops/clamav/freshclam.conf:/etc/clamav/freshclam.conf:ro
+    networks:
+      eduri_backend:
+        ipv4_address: 10.253.0.3
+    cpus: "0.75"
+    mem_limit: 1024m
+    pids_limit: 128
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777,noexec,nosuid,nodev
+      - /run/clamav:size=4m,uid=100,gid=101,mode=0755,noexec,nosuid,nodev
+      - /var/log/clamav:size=16m,uid=100,gid=101,mode=0755,noexec,nosuid,nodev
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "clamdcheck.sh"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 6m
+
+  livekit:
+    image: livekit/livekit-server:v1.13.4@sha256:189f7c81b704a36642bc5c7e2d3e1ae83744627c11978a23a251bf19fbec64e0
+    restart: unless-stopped
+    network_mode: host
+    command: ["--config", "/etc/livekit/livekit.yaml"]
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    volumes:
+      - ./ops/livekit/livekit.yaml:/etc/livekit/livekit.yaml:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+    cpus: "1.5"
+    mem_limit: 1536m
+    pids_limit: 256
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:7880/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  clamav-db:
+
+networks:
+  eduri_backend:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.253.0.0/24
+          gateway: 10.253.0.1

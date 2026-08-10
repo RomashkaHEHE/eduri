@@ -1,0 +1,2 @@
+# Deterministic unit-test fixture in the initial public commit, never a runtime credential.
+2eea54cb55ef3ff5c11419571d9c046a57a1d524:src/server/server.test.ts:generic-api-key:27

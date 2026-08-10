@@ -24,7 +24,7 @@ describe("server lifecycle", () => {
         dataDir,
         databasePath: path.join(dataDir, "test.sqlite"),
         uploadDir: path.join(dataDir, "uploads"),
-        authLookupKey: "isolation-test-key-at-least-32-bytes",
+        authLookupKey: "x".repeat(32),
         adminPassword: "test-admin-password",
       },
     });

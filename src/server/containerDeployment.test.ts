@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const NODE_IMAGE = "node:22-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436";
-const CLAMAV_IMAGE = "clamav/clamav:1.4.5@sha256:4de20bd9ab45a4b763c5412b769217ef5082572ebc8a63aff1a77943419e5dd8";
+const CLAMAV_IMAGE = "clamav/clamav:1.4.6@sha256:7173cd3d57a839c6fee673b07246301e0d1f68f5a14a5ca063f502323bf1cc61";
 const LIVEKIT_IMAGE = "livekit/livekit-server:v1.13.4@sha256:189f7c81b704a36642bc5c7e2d3e1ae83744627c11978a23a251bf19fbec64e0";
 
 const dockerfile = readFileSync(new URL("../../Dockerfile", import.meta.url), "utf8");
@@ -67,10 +67,20 @@ describe("container deployment contract", () => {
     expect(clamav).toMatch(/cap_drop:\n\s+- ALL/u);
     expect(clamav).toContain("- ./ops/clamav/clamd.conf:/etc/clamav/clamd.conf:ro");
     expect(clamav).toContain("- ./ops/clamav/freshclam.conf:/etc/clamav/freshclam.conf:ro");
+    expect(clamav).toContain("- clamav-db-v2:/var/lib/clamav");
+    expect(compose).toMatch(/^\s{2}clamav-db-v2:\s*$/mu);
+    expect(compose).not.toMatch(/^\s{2}clamav-db:\s*$/mu);
     expect(clamav).toContain("- /tmp:size=128m,mode=1777,noexec,nosuid,nodev");
     expect(clamav).toContain("- /run/clamav:size=4m,uid=100,gid=101,mode=0755,noexec,nosuid,nodev");
     expect(clamav).toContain("- /var/log/clamav:size=16m,uid=100,gid=101,mode=0755,noexec,nosuid,nodev");
+    expect(clamav).not.toMatch(/^\s+ports:/mu);
+    expect(clamav).toContain(
+      'test: ["CMD-SHELL", "echo PING | nc -w 3 127.0.0.1 3310 | grep -qx PONG"]',
+    );
+    expect(clamav).not.toContain('test: ["CMD", "clamdcheck.sh"]');
     expect(clamdConfig).toMatch(/^User clamav$/mu);
+    expect(clamdConfig).toMatch(/^TCPSocket 3310$/mu);
+    expect(clamdConfig).toMatch(/^TCPAddr 0\.0\.0\.0$/mu);
     expect(clamdConfig).toMatch(/^MaxThreads 2$/mu);
     expect(clamdConfig).toMatch(/^MaxQueue 4$/mu);
     expect(clamdConfig).toMatch(/^MaxScanTime 25000$/mu);

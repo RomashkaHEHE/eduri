@@ -47,14 +47,14 @@ services:
       start_period: 20s
 
   clamav:
-    image: clamav/clamav:1.4.5@sha256:4de20bd9ab45a4b763c5412b769217ef5082572ebc8a63aff1a77943419e5dd8
+    image: clamav/clamav:1.4.6@sha256:7173cd3d57a839c6fee673b07246301e0d1f68f5a14a5ca063f502323bf1cc61
     restart: unless-stopped
     user: clamav
     entrypoint: ["/init-unprivileged"]
     environment:
       FRESHCLAM_CHECKS: 24
     volumes:
-      - clamav-db:/var/lib/clamav
+      - clamav-db-v2:/var/lib/clamav
       - ./ops/clamav/clamd.conf:/etc/clamav/clamd.conf:ro
       - ./ops/clamav/freshclam.conf:/etc/clamav/freshclam.conf:ro
     networks:
@@ -79,7 +79,7 @@ services:
         max-size: "10m"
         max-file: "3"
     healthcheck:
-      test: ["CMD", "clamdcheck.sh"]
+      test: ["CMD-SHELL", "echo PING | nc -w 3 127.0.0.1 3310 | grep -qx PONG"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -123,7 +123,7 @@ services:
       start_period: 15s
 
 volumes:
-  clamav-db:
+  clamav-db-v2:
 
 networks:
   eduri_backend:

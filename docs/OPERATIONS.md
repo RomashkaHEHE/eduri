@@ -214,8 +214,8 @@ sudo sysctl --system
 
 ## Malware scanner для Code blobs и materials
 
-Compose запускает pinned `clamav/clamav:1.4.5` по OCI digest, сохраняет базы
-сигнатур в Docker volume `clamav-db` и не публикует clamd port `3310` на host.
+Compose запускает pinned `clamav/clamav:1.4.6` по OCI digest, сохраняет базы
+сигнатур в Docker volume `clamav-db-v2` и не публикует clamd port `3310` на host.
 App передает bytes только по `INSTREAM`; ClamAV не монтирует `data/`. Production
 config требует `CODE_BLOB_CLAMD_HOST`, а Compose задает внутреннее имя `clamav`
 и не запускает app до healthy scanner. Тот же scanner является обязательной
@@ -228,6 +228,13 @@ read-only root filesystem, `cap_drop: ALL`, no-new-privileges и только bo
 tmpfs для `/tmp`, `/run/clamav`, `/var/log/clamav`; writable persistent volume
 оставлен только для сигнатур. Версионированные `ops/clamav/*.conf` заменяют
 root-entrypoint mutation конфигурации и фиксируют scan/thread/queue limits.
+Compose healthcheck отправляет `PING` на явный IPv4 loopback `127.0.0.1:3310`:
+`clamd` намеренно слушает IPv4, поэтому image helper с `localhost`, который
+может разрешиться в `::1`, не является корректной проверкой этой конфигурации.
+Переход на `clamav-db-v2` намеренно создаёт volume из подписанной базы,
+встроенной в pinned image, вместо повторного использования устаревшей базы из
+прежнего `clamav-db`. Старый volume не удаляется автоматически и остаётся
+доступен для расследования до успешных health/EICAR/clean-file smoke tests.
 
 Clamd ограничен двумя scan threads, очередью, 25-секундным scan time, 40 MiB
 stream/file и 96 MiB aggregate unpacked scan. Превышение лимитов и encrypted
@@ -571,6 +578,11 @@ bash ops/scripts/restore.sh \
 - Проверяйте FreshClam update errors и возраст signature database. Pinned ClamAV
   digest обновляется вручную после проверки новой patch image и EICAR/clean/
   outage smoke tests; старый engine нельзя оставлять после security advisory.
+  Если CDN продолжает отвечать `403`, каждое проверенное обновление official
+  non-base image должно использовать новый versioned DB volume (либо отдельный
+  аудитируемый reseed): одна смена tag/digest не заменяет базу в уже смонтированном
+  persistent volume. После deploy проверяйте активный ответ `VERSION`, возраст и
+  подпись CVD; предыдущий volume сохраняйте до завершения smoke tests.
 - Не логируйте cookie, Authorization, invite tokens, code words, `.env` или
   request bodies auth endpoints. Ограничьте retention логов.
 - Обновления base image и npm dependencies сначала проверяйте на staging или

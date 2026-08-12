@@ -96,6 +96,7 @@ import type {
   BoardPresence,
   BoardRenderer,
   BoardRendererFactory,
+  BoardShapeKind,
   BoardTheme,
   BoardTool,
 } from "./rendering/types";
@@ -252,7 +253,7 @@ const FREE_DRAWING_PRESET_PERSIST_DELAY_MS = 180;
 const STYLE_SETTINGS_PERSIST_DELAY_MS = 180;
 const ZOOM_STEP_FACTOR = 1.1;
 const CAMERA_CENTER_EPSILON_PX = 0.5;
-type BoardToolDigit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9";
+type BoardToolDigit = "1" | "2" | "3" | "4" | "5" | "6" | "7";
 const LETTER_TOOL_SHORTCUTS: ReadonlyArray<
   readonly [tool: BoardTool, letter: string]
 > = [
@@ -263,10 +264,7 @@ const LETTER_TOOL_SHORTCUTS: ReadonlyArray<
   ["text", "T"],
   ["line", "L"],
   ["arrow", "A"],
-  ["rectangle", "R"],
-  ["ellipse", "O"],
-  ["diamond", "D"],
-  ["frame", "F"],
+  ["shape", "R"],
 ];
 const NUMERIC_TOOL_SHORTCUTS: ReadonlyArray<
   readonly [tool: BoardTool, digit: BoardToolDigit]
@@ -277,10 +275,7 @@ const NUMERIC_TOOL_SHORTCUTS: ReadonlyArray<
   ["text", "4"],
   ["line", "5"],
   ["arrow", "6"],
-  ["rectangle", "7"],
-  ["ellipse", "8"],
-  ["diamond", "9"],
-  ["frame", "0"],
+  ["shape", "7"],
 ];
 const BOARD_TOOL_SHORTCUTS: Readonly<Record<string, BoardTool>> = {
   ...Object.fromEntries(
@@ -1394,6 +1389,7 @@ export function BoardSurface({
     readonly count: number;
   } | null>(null);
   const [tool, setTool] = useState<BoardTool>("select");
+  const [shapeKind, setShapeKind] = useState<BoardShapeKind>("rectangle");
   const [toolbarPreferences, setToolbarPreferences] =
     useState<BoardToolbarPreferences>(loadBoardToolbarPreferences);
   const [penLaserActive, setPenLaserActive] = useState(false);
@@ -1447,11 +1443,12 @@ export function BoardSurface({
     ) ?? freeDrawingPresets[0] ?? DEFAULT_FREE_DRAWING_PRESETS[0],
     [activeFreeDrawingPresetId, freeDrawingPresets],
   );
+  const currentStyleTool = tool === "shape" ? shapeKind : tool;
   const currentToolStyle = useMemo(
     () => tool === "pen"
       ? freeDrawingPresetStyle(activeFreeDrawingPreset)
-      : toolStyles[tool] ?? defaultBoardToolStyle(tool),
-    [activeFreeDrawingPreset, tool, toolStyles],
+      : toolStyles[currentStyleTool] ?? defaultBoardToolStyle(currentStyleTool),
+    [activeFreeDrawingPreset, currentStyleTool, tool, toolStyles],
   );
   const currentConnectorCurvature =
     tool === "line" || tool === "arrow" ? connectorCurvatures[tool] : 0;
@@ -1880,8 +1877,8 @@ export function BoardSurface({
   }, [selectedObjects]);
 
   const toolStyleAvailable = useMemo(
-    () => new Set<string>(boardToolStyleKeys(tool)),
-    [tool],
+    () => new Set<string>(boardToolStyleKeys(currentStyleTool)),
+    [currentStyleTool],
   );
   const hasSelection = selectedObjects.length > 0;
   const editingSelectionStyle = hasSelection && tool !== "pen";
@@ -1941,8 +1938,8 @@ export function BoardSurface({
     }
     setToolStyles((current) => ({
       ...current,
-      [tool]: {
-        ...(current[tool] ?? defaultBoardToolStyle(tool)),
+      [currentStyleTool]: {
+        ...(current[currentStyleTool] ?? defaultBoardToolStyle(currentStyleTool)),
         [property]: value,
       },
     }));
@@ -1952,6 +1949,7 @@ export function BoardSurface({
     editingSelectionStyle,
     localOrigin,
     selectionStyle,
+    currentStyleTool,
     tool,
     toolStyleAvailable,
     undo,
@@ -1988,8 +1986,8 @@ export function BoardSurface({
     if (styleValueEqual(currentToolStyle.fontStyle, next)) return;
     setToolStyles((current) => ({
       ...current,
-      [tool]: {
-        ...(current[tool] ?? defaultBoardToolStyle(tool)),
+      [currentStyleTool]: {
+        ...(current[currentStyleTool] ?? defaultBoardToolStyle(currentStyleTool)),
         fontStyle: next,
       },
     }));
@@ -1999,6 +1997,7 @@ export function BoardSurface({
     editingSelectionStyle,
     localOrigin,
     selectionStyle.fontStyleTargets,
+    currentStyleTool,
     tool,
     toolStyleAvailable,
     undo,
@@ -3062,6 +3061,7 @@ export function BoardSurface({
     });
     rendererRef.current = renderer;
     renderer.setTool(tool);
+    renderer.setShapeKind(shapeKind);
     renderer.setTheme(theme);
     renderer.setCreationStyle(currentToolStyle);
     renderer.setConnectorCurvature(currentConnectorCurvature);
@@ -3203,6 +3203,10 @@ export function BoardSurface({
     undo.toolBoundary();
     onAwarenessChangeRef.current?.({ activeTool: tool });
   }, [tool, undo]);
+
+  useEffect(() => {
+    rendererRef.current?.setShapeKind(shapeKind);
+  }, [shapeKind]);
 
   useEffect(() => {
     editorCompositionTargetRef.current = null;
@@ -4039,6 +4043,10 @@ export function BoardSurface({
                 }
               : undefined
           }
+          shapeKind={tool === "shape" ? {
+            value: shapeKind,
+            onChange: setShapeKind,
+          } : undefined}
           freeDrawingPalette={tool === "pen" ? {
             presets: freeDrawingPresets,
             activePresetId: activeFreeDrawingPreset.id,

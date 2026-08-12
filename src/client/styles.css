@@ -919,20 +919,12 @@ h1, h2, h3, p { margin-top: 0; }
 .board-tool:hover { color: #17212b; background: #edf1f5; }
 .board-tool.is-active { color: #174cc9; background: #e4edff; box-shadow: inset 0 0 0 1px #b7caf7; }
 .board-v2__tool-separator { width: 1px; height: 24px; margin: 0 3px; flex: 0 0 1px; background: #dce3ea; }
-.board-toolbar__split-tool,
 .board-toolbar__overflow { position: relative; height: 34px; display: flex; flex: 0 0 auto; }
-.board-toolbar__split-tool { width: 48px; border-radius: 5px; }
-.board-toolbar__split-tool .board-toolbar__tool { width: 33px; flex-basis: 33px; border-radius: 5px 0 0 5px !important; }
-.board-toolbar__split-trigger { width: 15px; height: 34px; padding: 0; display: grid; place-items: center; flex: 0 0 15px; border-radius: 0 5px 5px 0 !important; }
-.board-toolbar__split-trigger:hover,
 .board-toolbar__overflow-trigger:hover { color: #17212b; background: #edf1f5; }
-.board-toolbar__split-tool:has(.board-toolbar__tool.is-active) { background: #e4edff; box-shadow: inset 0 0 0 1px #b7caf7; }
-.board-toolbar__split-tool:has(.board-toolbar__tool.is-active) .board-toolbar__tool { box-shadow: none; }
 .board-toolbar__overflow { width: 34px; }
 .board-toolbar__overflow-trigger { width: 34px; height: 34px; padding: 0; display: grid; place-items: center; border-radius: 5px !important; }
 .board-toolbar__overflow-trigger.is-active { color: #174cc9; background: #e4edff; box-shadow: inset 0 0 0 1px #b7caf7; }
 .board-toolbar__menu { position: absolute; z-index: 18; top: calc(100% + 8px); width: 224px; max-height: min(440px, calc(100dvh - 82px)); padding: 5px; overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--board-style-border); border-radius: 7px; color: var(--board-style-text); background: var(--board-style-panel); box-shadow: var(--board-style-shadow); scrollbar-gutter: stable; }
-.board-toolbar__shape-menu { right: 0; }
 .board-toolbar__overflow-menu { right: 0; }
 .board-toolbar__menu button { width: 100%; min-height: 34px; padding: 0 8px; display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 7px; color: var(--board-style-text); border-radius: 5px !important; text-align: left; }
 .board-toolbar__menu button:hover,
@@ -941,7 +933,6 @@ h1, h2, h3, p { margin-top: 0; }
 .board-toolbar__menu button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; font-weight: 650; }
 .board-toolbar__menu kbd { min-width: 16px; color: var(--board-style-muted); background: transparent; font-family: inherit; font-size: 9px; font-weight: 700; text-align: right; }
 .board-toolbar__menu [aria-current="true"] { color: var(--board-style-accent); background: var(--board-style-accent-soft); }
-.board-toolbar__menu .board-toolbar__nested-menuitem { min-height: 31px; padding-left: 26px; color: var(--board-style-muted); }
 .board-toolbar__menu .board-toolbar__configure { margin-top: 5px; padding-top: 1px; border-top: 1px solid var(--board-style-divider); border-radius: 0 0 5px 5px !important; }
 .board-toolbar-config__backdrop { position: absolute; z-index: 30; inset: 0; padding: 18px; display: grid; place-items: center; background: rgb(17 25 34 / 34%); backdrop-filter: blur(1.5px); }
 .board-toolbar-config { width: min(520px, 100%); max-height: min(680px, calc(100% - 12px)); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--board-style-border); border-radius: 8px; color: var(--board-style-text); background: var(--board-style-panel); box-shadow: 0 22px 60px rgb(10 18 27 / 30%); }
@@ -1010,6 +1001,8 @@ h1, h2, h3, p { margin-top: 0; }
 .board-stylebar__segments { padding: 2px; border-radius: 5px; background: #eef2f5; }
 .board-stylebar__segments button { width: 27px; height: 27px; padding: 0; display: grid; place-items: center; border-radius: 4px; }
 .board-stylebar__segments button:hover, .board-stylebar__segments button[aria-pressed="true"] { color: #17212b; background: white; box-shadow: 0 1px 4px rgb(24 38 52 / 14%); }
+.board-stylebar__shape-kind button { color: #657384; }
+.board-stylebar__shape-kind button:focus-visible { outline: 2px solid #7ea1eb; outline-offset: 1px; }
 .board-stylebar__segments button > span { width: 17px; max-height: 8px; display: block; border-radius: 4px; background: currentColor; }
 .board-stylebar__segments button > span.is-solid, .board-stylebar__segments button > span.is-dashed, .board-stylebar__segments button > span.is-dotted { height: 2px !important; border-radius: 0; background: currentColor; }
 .board-stylebar__segments button > span.is-dashed { background: repeating-linear-gradient(90deg, currentColor 0 5px, transparent 5px 8px); }
@@ -1339,7 +1332,6 @@ h1, h2, h3, p { margin-top: 0; }
   box-shadow: 0 5px 18px rgb(0 0 0 / 30%);
 }
 .board-v2--dark .board-tool:hover,
-.board-v2--dark .board-toolbar__split-trigger:hover,
 .board-v2--dark .board-toolbar__overflow-trigger:hover,
 .board-v2--dark .board-v2__history button:hover,
 .board-v2--dark .board-v2__zoom button:hover,
@@ -1351,10 +1343,6 @@ h1, h2, h3, p { margin-top: 0; }
 }
 .board-v2--dark .board-tool.is-active {
   color: #9bbcff;
-  background: #26395f;
-  box-shadow: inset 0 0 0 1px #496da8;
-}
-.board-v2--dark .board-toolbar__split-tool:has(.board-toolbar__tool.is-active) {
   background: #26395f;
   box-shadow: inset 0 0 0 1px #496da8;
 }
@@ -1371,6 +1359,7 @@ h1, h2, h3, p { margin-top: 0; }
 .board-v2--dark .board-v2__zoom-separator { background: #4a525c; }
 .board-v2--dark .board-stylebar__group > svg,
 .board-v2--dark .board-v2__zoom .board-v2__zoom-value { color: #b7c1cc; }
+.board-v2--dark .board-stylebar__shape-kind button { color: #b7c1cc; }
 .board-v2--dark .board-stylebar__segments { background: #191d22; }
 .board-v2--dark .board-stylebar__segments button:hover,
 .board-v2--dark .board-stylebar__segments button[aria-pressed="true"] {
@@ -2079,9 +2068,6 @@ h1, h2, h3, p { margin-top: 0; }
 @media (pointer: coarse) {
   .board-v2__toolbar { height: 52px; }
   .board-tool { width: 42px; height: 42px; flex-basis: 42px; }
-  .board-toolbar__split-tool { width: 59px; height: 42px; }
-  .board-toolbar__split-tool .board-toolbar__tool { width: 42px; flex-basis: 42px; }
-  .board-toolbar__split-trigger { width: 17px; height: 42px; flex-basis: 17px; }
   .board-toolbar__overflow { width: 42px; height: 42px; }
   .board-toolbar__overflow-trigger { width: 42px; height: 42px; }
   .board-tool__shortcut { right: 4px; bottom: 4px; }

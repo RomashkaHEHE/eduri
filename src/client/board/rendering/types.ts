@@ -1,5 +1,11 @@
 import type { AtomicTransform, BoardObjectKind } from "../../../board/core";
 
+export type BoardShapeKind =
+  | "rectangle"
+  | "ellipse"
+  | "diamond"
+  | "frame";
+
 export type BoardTool =
   | "select"
   | "hand"
@@ -9,10 +15,7 @@ export type BoardTool =
   | "text"
   | "line"
   | "arrow"
-  | "rectangle"
-  | "ellipse"
-  | "diamond"
-  | "frame"
+  | "shape"
   | "code"
   | "latex"
   | "image";
@@ -29,10 +32,7 @@ export type BoardGesturePreviewTool =
   | "highlighter"
   | "line"
   | "arrow"
-  | "rectangle"
-  | "ellipse"
-  | "diamond"
-  | "frame";
+  | BoardShapeKind;
 
 export interface BoardGesturePreviewStyle {
   readonly stroke: string;
@@ -287,6 +287,7 @@ export interface BoardRenderer {
   readonly camera: BoardCamera;
   readonly selection: readonly string[];
   setTool(tool: BoardTool): void;
+  setShapeKind(kind: BoardShapeKind): void;
   setCreationStyle(style: Readonly<Record<string, unknown>>): void;
   setConnectorCurvature(curvature: number): void;
   setReadOnly(readOnly: boolean): void;

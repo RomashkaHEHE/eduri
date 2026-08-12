@@ -1,12 +1,12 @@
-import type { BoardTool } from "./rendering/types";
 import {
   boardToolStyleKeys,
   defaultBoardToolStyle,
   type BoardToolStyleKey,
+  type BoardToolStyleTarget,
 } from "./rendering/toolStyles";
 
 export type BoardToolStyles = Partial<
-  Record<BoardTool, Readonly<Record<string, unknown>>>
+  Record<BoardToolStyleTarget, Readonly<Record<string, unknown>>>
 >;
 
 export const TOOL_STYLE_PRESETS_STORAGE_KEY =
@@ -20,7 +20,7 @@ export const PERSISTED_TOOL_STYLE_TOOLS = [
   "ellipse",
   "diamond",
   "frame",
-] as const satisfies readonly BoardTool[];
+] as const satisfies readonly BoardToolStyleTarget[];
 
 export type PersistedToolStyleTool =
   (typeof PERSISTED_TOOL_STYLE_TOOLS)[number];

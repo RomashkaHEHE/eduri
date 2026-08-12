@@ -2,9 +2,13 @@ import {
   Bold,
   Check,
   ChevronDown,
+  Circle,
+  Diamond,
+  Frame,
   Italic,
   Palette,
   Plus,
+  Square,
   Spline,
   X,
 } from "lucide-react";
@@ -43,6 +47,7 @@ import {
   BOARD_CONNECTOR_CURVATURE_STEP,
   clampBoardConnectorCurvature,
 } from "./connectorCurvature";
+import type { BoardShapeKind } from "./rendering/types";
 
 export type BoardLayerDirection = "front" | "forward" | "backward" | "back";
 export type BoardFontStyleToken = "bold" | "italic";
@@ -86,6 +91,10 @@ export interface BoardStyleBarProps {
     readonly value: number;
     readonly onChange: (value: number) => void;
   };
+  readonly shapeKind?: {
+    readonly value: BoardShapeKind;
+    readonly onChange: (value: BoardShapeKind) => void;
+  };
   readonly hideOpacity?: boolean;
   readonly showFillPropertyIcon?: boolean;
   readonly onStyleChange: (property: string, value: unknown) => void;
@@ -127,6 +136,16 @@ const FONT_FAMILY_SUGGESTIONS = [
   { value: "Courier New, monospace", label: "Courier New" },
 ] as const;
 const FONT_SIZE_SUGGESTIONS = [8, 10, 12, 14, 16, 18, 20, 24, 28, 32, 40, 48, 64, 96, 128, 192, 256] as const;
+const SHAPE_KIND_OPTIONS = Object.freeze([
+  { value: "rectangle", label: "Прямоугольник", icon: Square },
+  { value: "ellipse", label: "Эллипс", icon: Circle },
+  { value: "diamond", label: "Ромб", icon: Diamond },
+  { value: "frame", label: "Область", icon: Frame },
+] as const satisfies readonly {
+  readonly value: BoardShapeKind;
+  readonly label: string;
+  readonly icon: typeof Square;
+}[]);
 const GENERIC_STROKE_WIDTH_MIN = 0.5;
 const GENERIC_STROKE_WIDTH_MAX = 96;
 const GENERIC_STROKE_WIDTH_STEP = 0.5;
@@ -553,6 +572,7 @@ export function BoardStyleBar({
   allowTransparentFill = true,
   fillColorLabel = "Цвет заливки",
   connectorCurvature,
+  shapeKind,
   hideOpacity = false,
   showFillPropertyIcon = true,
   onStyleChange,
@@ -1251,6 +1271,34 @@ export function BoardStyleBar({
         role="toolbar"
         aria-label="Оформление"
       >
+      {shapeKind && (
+        <div
+          className="board-stylebar__group board-stylebar__segments board-stylebar__shape-kind"
+          role="group"
+          aria-label="Форма"
+        >
+          {SHAPE_KIND_OPTIONS.map((option) => {
+            const Icon = option.icon;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                aria-label={option.label}
+                title={option.label}
+                aria-pressed={shapeKind.value === option.value}
+                onClick={() => {
+                  if (shapeKind.value !== option.value) {
+                    shapeKind.onChange(option.value);
+                  }
+                }}
+              >
+                <Icon size={16} strokeWidth={1.8} aria-hidden="true" />
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       {available.has("stroke") && freeDrawingPalette && (
         <div
           className="board-stylebar__group board-stylebar__colors board-stylebar__free-drawing"

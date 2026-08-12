@@ -56,6 +56,7 @@ import type {
   BoardRenderer,
   BoardRendererCallbacks,
   BoardRendererFactory,
+  BoardShapeKind,
   BoardTheme,
   BoardTool,
 } from "./types";
@@ -1117,7 +1118,9 @@ function isFinitePoint(point: BoardPoint): boolean {
   return Number.isFinite(point.x) && Number.isFinite(point.y);
 }
 
-function isGesturePreviewTool(tool: BoardTool): tool is BoardGesturePreviewTool {
+function isGesturePreviewTool(
+  tool: BoardTool | BoardGesturePreviewTool,
+): tool is BoardGesturePreviewTool {
   return tool === "pen"
     || tool === "highlighter"
     || tool === "line"
@@ -2010,6 +2013,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
   };
   private readonly decodedImages: DecodedImageCache | null;
   private currentTool: BoardTool = "select";
+  private currentShapeKind: BoardShapeKind = "rectangle";
   private currentCreationStyle: Readonly<Record<string, unknown>> = {};
   private currentConnectorCurvature = 0;
   private currentCamera: BoardCamera = { x: 0, y: 0, zoom: 1 };
@@ -2335,6 +2339,10 @@ export class KonvaBoardRenderer implements BoardRenderer {
     this.updateCursor();
     this.updateDraggable();
     this.updateTransformer();
+  }
+
+  setShapeKind(kind: BoardShapeKind): void {
+    this.currentShapeKind = kind;
   }
 
   setCreationStyle(style: Readonly<Record<string, unknown>>): void {
@@ -3237,9 +3245,12 @@ export class KonvaBoardRenderer implements BoardRenderer {
       return;
     }
 
-    const style = drawingStyle(this.currentTool, this.currentCreationStyle);
+    const drawingTool = this.currentTool === "shape"
+      ? this.currentShapeKind
+      : this.currentTool;
+    const style = drawingStyle(drawingTool, this.currentCreationStyle);
     const preview = makeDrawingPreview(
-      this.currentTool,
+      drawingTool,
       point,
       style,
       this.currentTheme,
@@ -3249,7 +3260,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
       kind: "drawing",
       pointerId: nativeEvent.pointerId,
       pointerType,
-      tool: this.currentTool,
+      tool: drawingTool,
       style,
       start: point,
       points: [{ ...point, pressure: pointerPressure(nativeEvent) }],

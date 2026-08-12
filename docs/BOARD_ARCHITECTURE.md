@@ -963,16 +963,22 @@ gesture owner.
 The web toolbar is a device-customizable view over stable tool identities.
 Select is outside customization and remains visible in the first position.
 The complete ordered customizable registry is Drawing, Eraser, Text, Line,
-Arrow, Shapes, Code, LaTeX, and Image. A fresh profile places the first six on
+Arrow, Shape, Code, LaTeX, and Image. A fresh profile places the first six on
 the main toolbar and the final three in overflow. An unchecked item is hidden
 from the main strip but remains available in overflow; visibility is not
 feature enablement. Code, LaTeX, and Image use ordinary ordered tool slots
-rather than a fixed special-tools group or visual separator. The Shapes entry
-is one layout item whose adapter-local last-used member starts as Rectangle and
-may be Rectangle, Ellipse, Diamond, or Frame. Shape grouping never merges their
-object kinds or commands. A missing durable-image host capability disables
-Image wherever it is rendered without removing its registry row or rewriting
-the preference.
+rather than a fixed special-tools group or visual separator. Shape is one
+stable tool identity and one layout item. Its toolbar and overflow entries are
+ordinary single actions with no split button, arrow, shape menu, or nested
+shape list. Rectangle, Ellipse, Diamond, and Frame remain distinct canonical
+object kinds and creation commands; the active Shape tool chooses among them
+through an adapter-local segmented setting in its style bar. That setting
+starts as Rectangle after a surface remount, emits no awareness active-tool
+change, CRDT transaction, or undo item, and is snapshotted together with the
+selected kind's independent creation style at pointer-down. Changing it cannot
+retarget an in-progress gesture. A missing durable-image host capability
+disables Image wherever it is rendered without removing its registry row or
+rewriting the preference.
 
 Laser is not a stable tool identity or configurable registry row. While the
 stable Drawing tool is active, a pre-gesture standalone `Alt` hold temporarily
@@ -1013,9 +1019,10 @@ awareness, undo, and board recovery data. A native client may provide a
 different toolbar while retaining the same stable tool and object identities.
 
 Plain numeric tool aliases are also stable identities, not toolbar positions:
-`1` Select, `2` Drawing, `3` Eraser, `4` Text, `5` Line, `6` Arrow,
-`7` Rectangle, `8` Ellipse, `9` Diamond, and `0` Frame. Reordering, hiding,
-overflow placement, and the Shapes group's current member never renumber them.
+`1` Select, `2` Drawing, `3` Eraser, `4` Text, `5` Line, `6` Arrow, and `7`
+Shape. Shape also retains the letter alias `R`; the former shape-specific
+`O`/`D`/`F` and `8`/`9`/`0` inputs are not intercepted. Reordering, hiding,
+overflow placement, and the selected concrete shape never renumber the tools.
 Visible buttons surface the corresponding alias as faint lower-right adapter
 chrome; overflow rows may show it as a compact key label. The indicators have
 no backing, border, or shadow, remain outside the centered icon footprint, and
@@ -2039,8 +2046,11 @@ cover:
   level-scoped keyboard navigation, outside-pointer ownership, right/left edge
   placement and resize clamping, local grid visibility, and light/dark contrast;
 - fixed-first Select, nine-item customizable registry without standalone Laser,
-  default main/overflow split, grouped shape last-use behavior, arbitrary
-  visible/hidden ordering, drag/button/keyboard toolbar configuration,
+  default main/overflow split, one stable Shape button and overflow row without
+  a split action or nested menu, four inline segmented shape-kind settings,
+  per-kind creation-style restoration, pointer-down kind snapshots, and only
+  `R`/`7` activating Shape while former shape-specific aliases remain
+  unconsumed, arbitrary visible/hidden ordering, drag/button/keyboard toolbar configuration,
   focus/dismissal/read-only behavior, strict v2 preference parsing and reset,
   v1 migration which removes only the former `laser` row while preserving
   remaining order/visibility, malformed-v2 precedence, storage failure, remount

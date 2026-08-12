@@ -307,6 +307,7 @@ interface RendererInternals {
     }[];
     readonly trailAnimationFrame?: number | null;
     readonly points?: readonly (BoardPoint & { readonly pressure: number })[];
+    readonly tool?: string;
     readonly previewAwarenessPoints?: readonly BoardPoint[];
     readonly previewPoints?: readonly number[];
     readonly style?: Readonly<Record<string, unknown>>;
@@ -1736,6 +1737,101 @@ describe("Konva board view controls", () => {
 });
 
 describe("Konva pointer gesture input", () => {
+  it("creates every concrete shape through the one stable Shape tool", () => {
+    const { callbacks, renderer, internals } = rendererHarness();
+    const cases = [
+      ["rectangle", BUILTIN_OBJECT_KINDS.rectangle],
+      ["ellipse", BUILTIN_OBJECT_KINDS.ellipse],
+      ["diamond", BUILTIN_OBJECT_KINDS.diamond],
+      ["frame", BUILTIN_OBJECT_KINDS.frame],
+    ] as const;
+    renderer.setTool("shape");
+
+    cases.forEach(([shapeKind, objectKind], index) => {
+      const pointerId = 280 + index;
+      const start = 20 + index * 30;
+      renderer.setShapeKind(shapeKind);
+      vi.mocked(callbacks.onCreateObject).mockClear();
+      vi.mocked(callbacks.onGesturePreviewChange!).mockClear();
+
+      internals.onPointerDown(konvaPointerEvent(
+        internals,
+        "pointerdown",
+        pointerEvent(pointerId, start, start, { type: "pointerdown" }),
+      ));
+      expect(internals.activeGesture?.tool).toBe(shapeKind);
+      expect(callbacks.onGesturePreviewChange).toHaveBeenLastCalledWith(
+        expect.objectContaining({ kind: shapeKind }),
+      );
+
+      internals.onPointerMove(konvaPointerEvent(
+        internals,
+        "pointermove",
+        pointerEvent(pointerId, start + 80, start + 50),
+      ));
+      internals.onPointerUp(konvaPointerEvent(
+        internals,
+        "pointerup",
+        pointerEvent(pointerId, start + 80, start + 50, {
+          buttons: 0,
+          type: "pointerup",
+        }),
+      ));
+
+      expect(callbacks.onCreateObject).toHaveBeenCalledOnce();
+      expect(vi.mocked(callbacks.onCreateObject).mock.calls[0]?.[0].kind)
+        .toBe(objectKind);
+    });
+    renderer.destroy();
+  });
+
+  it("snapshots the configured shape kind at pointer-down", () => {
+    const { callbacks, renderer, internals } = rendererHarness();
+    renderer.setTool("shape");
+    renderer.setShapeKind("ellipse");
+
+    internals.onPointerDown(konvaPointerEvent(
+      internals,
+      "pointerdown",
+      pointerEvent(284, 40, 50, { type: "pointerdown" }),
+    ));
+    expect(internals.activeGesture?.tool).toBe("ellipse");
+
+    renderer.setShapeKind("diamond");
+    expect(internals.activeGesture?.tool).toBe("ellipse");
+    internals.onPointerMove(konvaPointerEvent(
+      internals,
+      "pointermove",
+      pointerEvent(284, 140, 120),
+    ));
+    expect(callbacks.onGesturePreviewChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ kind: "ellipse" }),
+    );
+    internals.onPointerUp(konvaPointerEvent(
+      internals,
+      "pointerup",
+      pointerEvent(284, 140, 120, { buttons: 0, type: "pointerup" }),
+    ));
+    expect(vi.mocked(callbacks.onCreateObject).mock.calls[0]?.[0].kind)
+      .toBe(BUILTIN_OBJECT_KINDS.ellipse);
+
+    vi.mocked(callbacks.onCreateObject).mockClear();
+    internals.onPointerDown(konvaPointerEvent(
+      internals,
+      "pointerdown",
+      pointerEvent(285, 60, 70, { type: "pointerdown" }),
+    ));
+    expect(internals.activeGesture?.tool).toBe("diamond");
+    internals.onPointerUp(konvaPointerEvent(
+      internals,
+      "pointerup",
+      pointerEvent(285, 150, 130, { buttons: 0, type: "pointerup" }),
+    ));
+    expect(vi.mocked(callbacks.onCreateObject).mock.calls[0]?.[0].kind)
+      .toBe(BUILTIN_OBJECT_KINDS.diamond);
+    renderer.destroy();
+  });
+
   it("places ordinary click tools at pointer-down world coordinates with small input drift", () => {
     const { callbacks, renderer, internals } = rendererHarness();
     renderer.setCamera({ x: 40, y: 20, zoom: 2 });

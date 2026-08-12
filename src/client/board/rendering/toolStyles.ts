@@ -1,4 +1,6 @@
-import type { BoardTool } from "./types";
+import type { BoardShapeKind, BoardTool } from "./types";
+
+export type BoardToolStyleTarget = BoardTool | BoardShapeKind;
 
 export type BoardToolStyleKey =
   | "stroke"
@@ -36,7 +38,10 @@ const TEXT_STYLE_KEYS: readonly BoardToolStyleKey[] = [
   "fontStyle",
 ];
 
-const STYLE_KEYS: Partial<Record<BoardTool, readonly BoardToolStyleKey[]>> = {
+const STYLE_KEYS: Partial<Record<
+  BoardToolStyleTarget,
+  readonly BoardToolStyleKey[]
+>> = {
   pen: STROKE_STYLE_KEYS,
   highlighter: STROKE_STYLE_KEYS,
   text: TEXT_STYLE_KEYS,
@@ -48,7 +53,10 @@ const STYLE_KEYS: Partial<Record<BoardTool, readonly BoardToolStyleKey[]>> = {
   frame: SHAPE_STYLE_KEYS,
 };
 
-const DEFAULTS: Partial<Record<BoardTool, Readonly<Record<string, unknown>>>> = {
+const DEFAULTS: Partial<Record<
+  BoardToolStyleTarget,
+  Readonly<Record<string, unknown>>
+>> = {
   pen: {
     stroke: "#17212b",
     strokeWidth: 2.5,
@@ -109,12 +117,14 @@ const DEFAULTS: Partial<Record<BoardTool, Readonly<Record<string, unknown>>>> = 
   },
 };
 
-export function boardToolStyleKeys(tool: BoardTool): readonly BoardToolStyleKey[] {
+export function boardToolStyleKeys(
+  tool: BoardToolStyleTarget,
+): readonly BoardToolStyleKey[] {
   return STYLE_KEYS[tool] ?? [];
 }
 
 export function defaultBoardToolStyle(
-  tool: BoardTool,
+  tool: BoardToolStyleTarget,
 ): Readonly<Record<string, unknown>> {
   return { ...(DEFAULTS[tool] ?? {}) };
 }

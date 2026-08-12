@@ -31,12 +31,12 @@ locally first, queued durably, and synchronized in the background.
 - Tool shortcuts require no `Ctrl`/`Cmd`, `Alt`, or `Shift`, and ignore key
   auto-repeat. Other commands accept only the modifier restrictions stated in
   their own definitions.
-- Ten creation/selection tools have stable numeric aliases: `1` Select,
-  `2` Drawing, `3` Eraser, `4` Text, `5` Line, `6` Arrow, `7` Rectangle,
-  `8` Ellipse, `9` Diamond, and `0` Frame/Area. The mapping never follows a
-  customized toolbar order or visibility, and grouping the four shapes does
-  not change it. Both the top number row and the numeric keypad work; keypad
-  aliases require Num Lock so keypad navigation keys are not stolen.
+- Seven creation/selection tools have stable numeric aliases: `1` Select,
+  `2` Drawing, `3` Eraser, `4` Text, `5` Line, `6` Arrow, and `7` Shape.
+  The mapping never follows a customized toolbar order or visibility. Both the
+  top number row and the numeric keypad work; keypad aliases require Num Lock
+  so keypad navigation keys are not stolen. Plain `8`, `9`, and `0` are not
+  tool shortcuts.
 - `Ctrl`/`Cmd+1` and `Ctrl`/`Cmd+0` keep their camera meanings and take
   precedence over the plain numeric tool aliases. Modified `2`-`9` events are
   not consumed as tool shortcuts.
@@ -51,8 +51,8 @@ locally first, queued durably, and synchronized in the background.
   picker's focusable controls keep their documented keyboard behavior.
   `Tab`/`Shift+Tab` follows DOM order, focused buttons
   activate with `Enter` or Space, and focused native inputs are not commandeered
-  by board shortcuts. Shape and overflow menus, like the board context menu,
-  add explicit Up/Down/Home/End navigation. `Alt+ArrowLeft`/
+  by board shortcuts. The overflow menu, like the board context menu, adds
+  explicit Up/Down/Home/End navigation. `Alt+ArrowLeft`/
   `Alt+ArrowRight` on a Drawing preset and `Alt+ArrowUp`/`Alt+ArrowDown` on a
   toolbar-configuration row are documented reordering exceptions; they move
   the focused item rather than selecting another tool.
@@ -76,7 +76,7 @@ locally first, queued durably, and synchronized in the background.
 - Site theme, grid visibility, toolbar item order/visibility, line and arrow
   creation curvature, ordinary creation styles, and the free-drawing palette's
   ordered slots and values persist best-effort on the current device. Camera,
-  selection, current tool, the shape group's last-used shape, active Drawing
+  selection, current tool, the current shape kind, active Drawing
   slot, either palette/toolbar configuration mode, open tool/preset popups, the
   open size panel, and the open context menu do not.
 - Replacing the active board document recreates the renderer, returning the
@@ -95,7 +95,7 @@ locally first, queued durably, and synchronized in the background.
 
 Select is permanently visible in the first toolbar position. It is outside the
 customizable item list, so it cannot be hidden or moved. A fresh profile shows
-Drawing, Eraser, Text, Line, Arrow, and the Shapes group after Select. Code,
+Drawing, Eraser, Text, Line, Arrow, and Shape after Select. Code,
 LaTeX, and Image start in the overflow menu opened by the ellipsis. A hidden
 tool remains fully available in overflow; hiding is placement, not feature
 disabling. Code, LaTeX, and Image have no separate toolbar section or divider:
@@ -110,18 +110,20 @@ active/disabled treatment as its peers.
 | Text | `T` or `4` | Open a provisional 240 x 52 text editor; create on first input | Main toolbar | Disabled |
 | Line | `L` or `5` | Drag a straight or quadratic curved line | Main toolbar | Disabled |
 | Arrow | `A` or `6` | Drag a straight or quadratic curved arrow | Main toolbar | Disabled |
-| Shapes | `R`/`7`, `O`/`8`, `D`/`9`, `F`/`0` | Drag Rectangle, Ellipse, Diamond, or Frame/Area | Main toolbar; Rectangle initially emphasized | Disabled |
+| Shape | `R` or `7` | Drag the Rectangle, Ellipse, Diamond, or Frame/Area selected in the tool settings | Main toolbar | Disabled |
 | Code block | none | Select the tool, then click the canvas to place and edit a Python block | Overflow | Disabled |
 | LaTeX formula | none | Select the tool, then click the canvas to place and edit LaTeX source | Overflow | Disabled |
 | Image | none | Select the tool, then click the canvas to open the file picker for that location | Overflow | Disabled |
 
-The Shapes item is one visibility/order unit, not four independent toolbar
-items. Its primary split-button action selects the last-used shape; its arrow
-opens Rectangle, Ellipse, Diamond, and Frame/Area. Rectangle is the initial
-last-used shape after a surface remount. Choosing a shape from the menu or with
-its letter/numeric shortcut updates the group icon and primary action for the
-rest of that mount. If Shapes is hidden, overflow exposes the same last-used
-primary action and a nested list of all four shapes.
+Shape is one stable tool and one visibility/order unit. Its toolbar button is
+an ordinary single-action button with no adjacent arrow, split action, or shape
+menu. Activating it keeps the one active-tool identity `shape`; Rectangle,
+Ellipse, Diamond, and Frame/Area are selected through the first segmented
+control in the active tool's style bar. Rectangle is the initial kind after a
+surface remount. The chosen kind remains local for that mount, changes no
+existing object, and emits no CRDT update, awareness tool change, or undo item.
+If Shape is hidden, overflow contains one ordinary Shape row with the same
+`R`/`7` shortcut and no nested shape list.
 
 Visible customizable items retain their relative order from the complete
 stored order. Hidden items appear in overflow in that same relative order.
@@ -148,8 +150,8 @@ than the transient pointer presentation.
 Numerically aliased main-toolbar buttons show their fixed digit as a small
 noninteractive gray hint just beyond the icon's lower-right footprint. It is
 intentionally faint and has no backing, border, shadow, or reserved box; the
-centered primary icon is neither shifted nor covered. The Shapes button shows
-the digit of its current last-used shape. Active tools keep the hint gray
+centered primary icon is neither shifted nor covered. The Shape button always
+shows `7`. Active tools keep the hint gray
 instead of promoting it to the active accent color. The indicator is visual
 only and does not change the hit target, tooltip, or accessible name; the
 owning button includes the fixed digit alongside its letter alias in
@@ -173,7 +175,7 @@ current selection so a selected object's style bar cannot mask the pen presets.
 `Configure toolbar` opens a modal dialog over the board. The locked Select row
 is shown first with an always-checked disabled visibility box. Every other row
 represents exactly one customizable item: Drawing, Eraser, Text, Line, Arrow,
-Shapes, Code, LaTeX, or Image.
+Shape, Code, LaTeX, or Image.
 
 - Each row's checkbox moves that item between the main toolbar and overflow;
   an unchecked item is still available in overflow.
@@ -213,12 +215,11 @@ in-memory layout usable for that mount.
 
 ### Tool menu keyboard and dismissal
 
-Opening either the Shapes or overflow menu focuses its first enabled menu item.
+Opening the overflow menu focuses its first enabled menu item.
 Up/Down cycle enabled items, and Home/End focus the first/last enabled item.
 `Escape` or `Tab` closes and restores focus to the owning trigger.
 Pointer-down outside also closes and schedules the same focus restoration. The
-two menus are mutually exclusive. These menus and their open/last-shape state
-are adapter UI only, not board content or undo history.
+menu and its open state are adapter UI only, not board content or undo history.
 
 While the overflow menu is open, its toolbar enters the top local chrome layer,
 above style, color, and other tool popups. Its entries therefore remain visible
@@ -1014,6 +1015,22 @@ For mixed selections the bar exposes the union of supported properties. A
 property change affects only selected object versions that support it. A mixed
 value remains visibly mixed until a value is chosen.
 
+### Shape kind
+
+While the stable Shape tool is active, the first style-bar group contains four
+icon buttons: Rectangle, Ellipse, Diamond, and Frame/Area. Exactly one is
+pressed. This is an inline segmented control, not a popup or dropdown, and it
+remains visible even when the rest of the style bar is editing a current
+selection.
+
+Changing the kind keeps Shape active and changes only local creation input. It
+does not replace or restyle the selection, mutate an existing object, enter the
+CRDT or awareness, or create an undo item. The renderer snapshots the chosen
+kind and that kind's independent creation style at pointer-down, so changing
+the setting cannot alter a shape gesture already in progress. Switching the
+kind immediately restores its own persisted Rectangle/Ellipse/Diamond/Frame
+style preset for the next gesture.
+
 ### Shared colors and ordinary tool settings
 
 Stroke, shape fill, and text foreground use the same device-local Color
@@ -1762,10 +1779,7 @@ that explicit pre-cancellation.
 | `T` or `4` | Text |
 | `L` or `5` | Line |
 | `A` or `6` | Arrow |
-| `R` or `7` | Rectangle |
-| `O` or `8` | Ellipse |
-| `D` or `9` | Diamond |
-| `F` or `0` | Frame/Area |
+| `R` or `7` | Shape; concrete kind comes from the inline tool setting |
 
 Numeric aliases accept the top number row and the NumPad while Num Lock is on.
 They use the same no-modifier, no-repeat, focus, editor, read-only, awareness,
@@ -1773,9 +1787,10 @@ selection, cancellation, and undo-boundary rules as the corresponding letter
 shortcuts. In particular, repeated `1` has the same Select/Hand toggle behavior
 as repeated `V`. NumPad navigation with Num Lock off is not intercepted.
 `Ctrl`/`Cmd+1` sets 100% zoom and `Ctrl`/`Cmd+0` fits content before numeric
-tool lookup; `Ctrl`/`Cmd+2` through `9` are left to the browser. Toolbar
-reordering, visibility, overflow placement, and the Shapes group's current icon
-never change this table.
+tool lookup; `Ctrl`/`Cmd+2` through `9` are left to the browser. Plain `8`, `9`,
+and `0`, and the former shape-specific `O`, `D`, and `F` aliases, are not
+intercepted. Toolbar reordering, visibility, overflow placement, and the
+selected concrete shape never change this table.
 
 ### Selection and editing
 
@@ -2067,7 +2082,7 @@ Available read-only:
 - Select, implicit Hand, and Drawing only for its pre-held `Alt` laser
   mode; ordinary Drawing pointer input remains non-mutating;
 - numeric `1` follows the same Select/Hand toggle as `V`; `P` or numeric `2`
-  selects Drawing for temporary laser use, while numeric `3`-`0` creation
+  selects Drawing for temporary laser use, while numeric `3`-`7` creation
   aliases are ignored rather than consumed;
 - device-local toolbar configuration; creation tools remain disabled wherever
   they are placed, while Select and Drawing retain their documented read-only

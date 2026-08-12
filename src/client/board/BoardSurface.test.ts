@@ -53,6 +53,7 @@ import type {
   BoardRenderer,
   BoardRendererCallbacks,
   BoardRendererFactory,
+  BoardShapeKind,
   BoardTheme,
   BoardTool,
 } from "./rendering/types";
@@ -151,6 +152,7 @@ class FakeRenderer implements BoardRenderer {
   objects: readonly BoardObjectSnapshot[] = [];
   presences: readonly BoardPresence[] = [];
   tool: BoardTool = "select";
+  shapeKind: BoardShapeKind = "rectangle";
   theme: BoardTheme = "light";
   gridVisible = true;
   creationStyle: Readonly<Record<string, unknown>> = {};
@@ -174,6 +176,10 @@ class FakeRenderer implements BoardRenderer {
 
   setTool(tool: BoardTool): void {
     this.tool = tool;
+  }
+
+  setShapeKind(kind: BoardShapeKind): void {
+    this.shapeKind = kind;
   }
 
   setCreationStyle(style: Readonly<Record<string, unknown>>): void {
@@ -3153,10 +3159,10 @@ describe("BoardSurface style and layer controls", () => {
 
     await act(async () => red?.click());
     expect(container?.querySelector('[role="dialog"]')).not.toBeNull();
-    const rectangle = container?.querySelector<HTMLButtonElement>(
-      '[aria-label="Прямоугольник"]',
+    const shape = container?.querySelector<HTMLButtonElement>(
+      '[data-toolbar-tool="shape"]',
     );
-    await act(async () => rectangle?.click());
+    await act(async () => shape?.click());
     expect(container?.querySelector('[role="dialog"]')).toBeNull();
     await act(async () => container?.querySelector<HTMLButtonElement>(
       '[aria-label^="Цвет заливки:"]',
@@ -3187,7 +3193,7 @@ describe("BoardSurface style and layer controls", () => {
       '[aria-label^="Перо 2,"]',
     )?.getAttribute("aria-pressed")).toBe("true");
 
-    await act(async () => rectangle?.click());
+    await act(async () => shape?.click());
     expect(factory.instances).toHaveLength(1);
     expect(renderer.destroyCount).toBe(0);
     expect(renderer.creationStyle).toMatchObject({
@@ -3380,7 +3386,7 @@ describe("BoardSurface style and layer controls", () => {
       ));
     });
     await act(async () => container?.querySelector<HTMLButtonElement>(
-      '[aria-label="Прямоугольник"]',
+      '[data-toolbar-tool="shape"]',
     )?.click());
     const renderer = firstFactory.instances[0];
 
@@ -3545,7 +3551,7 @@ describe("BoardSurface style and layer controls", () => {
       ));
     });
     await act(async () => container?.querySelector<HTMLButtonElement>(
-      '[aria-label="Прямоугольник"]',
+      '[data-toolbar-tool="shape"]',
     )?.click());
     expect(secondFactory.instances[0].creationStyle).toMatchObject({
       fill: "#12abef",
@@ -4484,16 +4490,14 @@ describe("BoardSurface theme and standard controls", () => {
         .toContain(indicator.textContent);
       expect(button?.getAttribute("aria-label")).toBeTruthy();
     }
-    const shapeTrigger = toolbar?.querySelector<HTMLButtonElement>(
-      '[aria-label="Выбрать фигуру"]',
+    const shapeButton = toolbar?.querySelector<HTMLButtonElement>(
+      '[data-toolbar-item="shapes"]',
     );
-    await act(async () => shapeTrigger?.click());
-    expect([
-      ...(container?.querySelectorAll<HTMLElement>(
-        '[data-toolbar-menu="shapes"] kbd',
-      ) ?? []),
-    ].map((indicator) => indicator.textContent)).toEqual(["7", "8", "9", "0"]);
-    await act(async () => shapeTrigger?.click());
+    expect(shapeButton?.dataset.toolbarTool).toBe("shape");
+    expect(shapeButton?.getAttribute("aria-keyshortcuts")?.split(" "))
+      .toEqual(["R", "7"]);
+    expect(container?.querySelector('[aria-label="Выбрать фигуру"]')).toBeNull();
+    expect(container?.querySelector('[data-toolbar-menu="shapes"]')).toBeNull();
 
     await act(async () => {
       root?.render(createElement(BoardSurface, surfaceProps(context, factory, {
@@ -4651,7 +4655,7 @@ describe("BoardSurface theme and standard controls", () => {
       "text",
       "line",
       "arrow",
-      "rectangle",
+      "shape",
     ]) {
       expect(visibleTool(tool)?.disabled, tool).toBe(true);
     }
@@ -4709,7 +4713,7 @@ describe("BoardSurface theme and standard controls", () => {
     }
   });
 
-  it("selects toolbar tools with number-row and NumPad digits", async () => {
+  it("selects the seven toolbar tools with number-row and NumPad digits", async () => {
     const context = createBoardContext(PAGE_ONE);
     contexts.push(context);
     const factory = new FakeRendererFactory();
@@ -4730,10 +4734,7 @@ describe("BoardSurface theme and standard controls", () => {
       ["4", "text"],
       ["5", "line"],
       ["6", "arrow"],
-      ["7", "rectangle"],
-      ["8", "ellipse"],
-      ["9", "diamond"],
-      ["0", "frame"],
+      ["7", "shape"],
     ];
 
     for (const prefix of ["Digit", "Numpad"] as const) {
@@ -4776,7 +4777,114 @@ describe("BoardSurface theme and standard controls", () => {
       })) ?? false;
     });
     expect(inputAccepted).toBe(true);
-    expect(renderer.tool).toBe("frame");
+    expect(renderer.tool).toBe("shape");
+  });
+
+  it("configures concrete shapes inside the stable Shapes tool", async () => {
+    const context = createBoardContext(PAGE_ONE);
+    contexts.push(context);
+    const factory = new FakeRendererFactory();
+    const onAwarenessChange = vi.fn();
+    const updates = vi.fn();
+    context.document.on("update", updates);
+
+    await act(async () => {
+      root?.render(createElement(BoardSurface, surfaceProps(context, factory, {
+        onAwarenessChange,
+      })));
+    });
+    const renderer = factory.instances[0];
+    focusBoard();
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        code: "Digit7",
+        key: "7",
+      }));
+    });
+
+    expect(renderer.tool).toBe("shape");
+    expect(renderer.shapeKind).toBe("rectangle");
+    expect(container?.querySelector('[data-toolbar-item="shapes"]')
+      ?.getAttribute("aria-pressed")).toBe("true");
+    expect(onAwarenessChange).toHaveBeenLastCalledWith({ activeTool: "shape" });
+
+    const shapeGroup = container?.querySelector<HTMLElement>(
+      '[role="group"][aria-label="Форма"]',
+    );
+    expect(shapeGroup).not.toBeNull();
+    expect(shapeGroup?.querySelectorAll("button")).toHaveLength(4);
+    expect(shapeGroup?.querySelector('[aria-label="Прямоугольник"]')
+      ?.getAttribute("aria-pressed")).toBe("true");
+
+    const strokeWidth = container?.querySelector<HTMLInputElement>(
+      '[aria-label="Толщина линии"]',
+    );
+    expect(strokeWidth).not.toBeNull();
+    await act(async () => setRangeValue(strokeWidth!, "5"));
+    expect(renderer.creationStyle.strokeWidth).toBe(5);
+
+    onAwarenessChange.mockClear();
+    await act(async () => shapeGroup?.querySelector<HTMLButtonElement>(
+      '[aria-label="Эллипс"]',
+    )?.click());
+    expect(renderer.tool).toBe("shape");
+    expect(renderer.shapeKind).toBe("ellipse");
+    expect(renderer.creationStyle.strokeWidth).toBe(2);
+    expect(onAwarenessChange).not.toHaveBeenCalled();
+
+    await act(async () => shapeGroup?.querySelector<HTMLButtonElement>(
+      '[aria-label="Прямоугольник"]',
+    )?.click());
+    expect(renderer.shapeKind).toBe("rectangle");
+    expect(renderer.creationStyle.strokeWidth).toBe(5);
+    expect(updates).not.toHaveBeenCalled();
+    expect(context.undo.canUndo).toBe(false);
+  });
+
+  it("does not intercept former shape aliases", async () => {
+    const context = createBoardContext(PAGE_ONE);
+    contexts.push(context);
+    const factory = new FakeRendererFactory();
+
+    await act(async () => {
+      root?.render(createElement(BoardSurface, surfaceProps(context, factory)));
+    });
+    const renderer = factory.instances[0];
+    focusBoard();
+
+    for (const init of [
+      { code: "Digit8", key: "8" },
+      { code: "Digit9", key: "9" },
+      { code: "Digit0", key: "0" },
+      { code: "Numpad8", key: "8" },
+      { code: "Numpad9", key: "9" },
+      { code: "Numpad0", key: "0" },
+      { code: "KeyO", key: "o" },
+      { code: "KeyD", key: "d" },
+      { code: "KeyF", key: "f" },
+    ] as const) {
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          code: "KeyH",
+          key: "h",
+        }));
+      });
+      expect(renderer.tool, `before ${init.code}`).toBe("hand");
+      let accepted = false;
+      await act(async () => {
+        accepted = window.dispatchEvent(new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          ...init,
+        }));
+      });
+      expect(accepted, init.code).toBe(true);
+      expect(renderer.tool, init.code).toBe("hand");
+    }
   });
 
   it("does not consume modified, repeated, or NumLock-off digit keys", async () => {

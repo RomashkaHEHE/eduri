@@ -144,7 +144,7 @@ describe("BoardToolbar", () => {
       .textContent).toBe("2");
     expect(button('[data-toolbar-item="line"] .board-toolbar__shortcut')
       .textContent).toBe("5");
-    expect(button('[data-toolbar-item="shapes"] [data-toolbar-tool="rectangle"] .board-toolbar__shortcut')
+    expect(button('[data-toolbar-item="shapes"] .board-toolbar__shortcut')
       .textContent).toBe("7");
 
     const overflow = await openOverflow();
@@ -242,26 +242,46 @@ describe("BoardToolbar", () => {
     expect(dialog.querySelector('[data-toolbar-config-item="laser"]')).toBeNull();
   });
 
-  it("uses a split Shapes slot and remembers its last selected shape", async () => {
+  it("uses one Shapes button without a shape dropdown", async () => {
     const events = createEvents();
     await renderHarness({ events });
 
-    await click(button('[aria-label="Выбрать фигуру"]'));
-    const shapeMenu = container.querySelector<HTMLElement>(
-      '[data-toolbar-menu="shapes"]',
-    );
-    expect(shapeMenu?.getAttribute("role")).toBe("menu");
-    await click(button('[data-toolbar-menu="shapes"] [data-toolbar-tool="ellipse"]'));
-    expect(events.chooseTool).toHaveBeenLastCalledWith("ellipse");
+    const shape = button('[data-toolbar-item="shapes"]');
+    expect(shape.dataset.toolbarTool).toBe("shape");
+    expect(shape.getAttribute("aria-label")).toBe("Форма");
+    expect(shape.getAttribute("aria-keyshortcuts")?.split(" "))
+      .toEqual(["R", "7"]);
+    expect(shape.querySelector(".board-toolbar__shortcut")?.textContent)
+      .toBe("7");
+    expect(container.querySelector('[aria-label="Выбрать фигуру"]')).toBeNull();
+    expect(container.querySelector('[data-toolbar-menu="shapes"]')).toBeNull();
 
-    const mainShape = button(
-      '[data-toolbar-item="shapes"] > [data-toolbar-tool="ellipse"]',
+    await click(shape);
+    expect(events.chooseTool).toHaveBeenLastCalledWith("shape");
+    expect(shape.getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("renders hidden Shapes as one ordinary overflow row", async () => {
+    const events = createEvents();
+    const initialPreferences: BoardToolbarPreferences = {
+      ...defaultBoardToolbarPreferences(),
+      visible: ["pen", "eraser", "text", "line", "arrow"],
+    };
+    await renderHarness({ events, initialPreferences });
+
+    const overflow = await openOverflow();
+    const shapeRows = overflow.querySelectorAll<HTMLElement>(
+      '[data-overflow-item="shapes"]',
     );
-    expect(mainShape.getAttribute("aria-label")).toBe("Эллипс");
-    expect(mainShape.querySelector(".board-toolbar__shortcut")?.textContent)
-      .toBe("8");
-    await click(mainShape);
-    expect(events.chooseTool).toHaveBeenLastCalledWith("ellipse");
+    expect(shapeRows).toHaveLength(1);
+    expect(shapeRows[0].dataset.toolbarTool).toBe("shape");
+    expect(shapeRows[0].textContent).toContain("Форма");
+    expect(shapeRows[0].querySelector("kbd")?.textContent).toBe("7");
+    expect(overflow.querySelector('[aria-label="Выбрать другую фигуру"]'))
+      .toBeNull();
+
+    await click(shapeRows[0]);
+    expect(events.chooseTool).toHaveBeenLastCalledWith("shape");
   });
 
   it("keeps unavailable Image and editing tools disabled in read-only mode", async () => {

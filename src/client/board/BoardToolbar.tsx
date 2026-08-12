@@ -3,12 +3,7 @@ import {
   ArrowUp,
   ArrowUpRight,
   Braces,
-  Check,
-  ChevronDown,
-  Circle,
-  Diamond,
   Eraser,
-  Frame,
   GripVertical,
   ImagePlus,
   LockKeyhole,
@@ -43,8 +38,6 @@ import {
 } from "./toolbarPreferences";
 import type { BoardTool } from "./rendering/types";
 
-type BoardShapeTool = "rectangle" | "ellipse" | "diamond" | "frame";
-
 export interface BoardToolbarProps {
   readonly activeTool: BoardTool;
   readonly penLaserActive?: boolean;
@@ -66,33 +59,17 @@ interface ToolShortcut {
   readonly numeric?: string;
 }
 
-const ITEM_DESCRIPTORS: Readonly<Record<
-  Exclude<BoardToolbarItemId, "shapes">,
-  ToolDescriptor
->> = {
+const ITEM_DESCRIPTORS: Readonly<Record<BoardToolbarItemId, ToolDescriptor>> = {
   pen: { tool: "pen", label: "Рисование", icon: Pencil },
   eraser: { tool: "eraser", label: "Ластик", icon: Eraser },
   text: { tool: "text", label: "Текст", icon: Type },
   line: { tool: "line", label: "Линия", icon: Minus },
   arrow: { tool: "arrow", label: "Стрелка", icon: ArrowUpRight },
+  shapes: { tool: "shape", label: "Форма", icon: Square },
   code: { tool: "code", label: "Код", icon: Braces },
   latex: { tool: "latex", label: "LaTeX", icon: Sigma },
   image: { tool: "image", label: "Изображение", icon: ImagePlus },
 };
-
-const SHAPE_DESCRIPTORS: Readonly<Record<BoardShapeTool, ToolDescriptor>> = {
-  rectangle: { tool: "rectangle", label: "Прямоугольник", icon: Square },
-  ellipse: { tool: "ellipse", label: "Эллипс", icon: Circle },
-  diamond: { tool: "diamond", label: "Ромб", icon: Diamond },
-  frame: { tool: "frame", label: "Область", icon: Frame },
-};
-
-const SHAPE_TOOLS = Object.freeze([
-  "rectangle",
-  "ellipse",
-  "diamond",
-  "frame",
-] as const satisfies readonly BoardShapeTool[]);
 
 const TOOL_SHORTCUTS: Readonly<Partial<Record<BoardTool, ToolShortcut>>> = {
   select: { letter: "V", numeric: "1" },
@@ -101,15 +78,8 @@ const TOOL_SHORTCUTS: Readonly<Partial<Record<BoardTool, ToolShortcut>>> = {
   text: { letter: "T", numeric: "4" },
   line: { letter: "L", numeric: "5" },
   arrow: { letter: "A", numeric: "6" },
-  rectangle: { letter: "R", numeric: "7" },
-  ellipse: { letter: "O", numeric: "8" },
-  diamond: { letter: "D", numeric: "9" },
-  frame: { letter: "F", numeric: "0" },
+  shape: { letter: "R", numeric: "7" },
 };
-
-function isShapeTool(tool: BoardTool): tool is BoardShapeTool {
-  return SHAPE_TOOLS.includes(tool as BoardShapeTool);
-}
 
 function shortcutLabel(tool: BoardTool): string | undefined {
   const shortcut = TOOL_SHORTCUTS[tool];
@@ -255,16 +225,11 @@ export function BoardToolbar({
   chooseTool,
   changePreferences,
 }: BoardToolbarProps) {
-  const [lastShape, setLastShape] = useState<BoardShapeTool>("rectangle");
-  const [shapeMenuOpen, setShapeMenuOpen] = useState(false);
   const [overflowOpen, setOverflowOpen] = useState(false);
-  const [overflowShapesOpen, setOverflowShapesOpen] = useState(false);
   const [configurationOpen, setConfigurationOpen] = useState(false);
   const [draggedItem, setDraggedItem] = useState<BoardToolbarItemId | null>(null);
   const draggedItemRef = useRef<BoardToolbarItemId | null>(null);
 
-  const shapeTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const shapeMenuRef = useRef<HTMLDivElement | null>(null);
   const overflowTriggerRef = useRef<HTMLButtonElement | null>(null);
   const overflowMenuRef = useRef<HTMLDivElement | null>(null);
   const configurationDialogRef = useRef<HTMLElement | null>(null);
@@ -278,22 +243,12 @@ export function BoardToolbar({
     const visible = new Set(preferences.visible);
     return preferences.order.filter((item) => !visible.has(item));
   }, [preferences]);
-  const hiddenToolIsActive = hiddenItems.some((itemId) => itemId === "shapes"
-    ? isShapeTool(activeTool)
-    : ITEM_DESCRIPTORS[itemId].tool === activeTool);
-
-  useEffect(() => {
-    if (isShapeTool(activeTool)) setLastShape(activeTool);
-  }, [activeTool]);
-
-  const closeShapeMenu = useCallback((focusTrigger = true) => {
-    setShapeMenuOpen(false);
-    if (focusTrigger) restoreFocus(shapeTriggerRef);
-  }, []);
+  const hiddenToolIsActive = hiddenItems.some(
+    (itemId) => ITEM_DESCRIPTORS[itemId].tool === activeTool,
+  );
 
   const closeOverflow = useCallback((focusTrigger = true) => {
     setOverflowOpen(false);
-    setOverflowShapesOpen(false);
     if (focusTrigger) restoreFocus(overflowTriggerRef);
   }, []);
 
@@ -303,22 +258,6 @@ export function BoardToolbar({
     draggedItemRef.current = null;
     restoreFocus(overflowTriggerRef);
   }, []);
-
-  useEffect(() => {
-    if (!shapeMenuOpen) return;
-    const dismiss = (event: PointerEvent) => {
-      const target = event.target as Node | null;
-      if (
-        target
-        && !shapeMenuRef.current?.contains(target)
-        && !shapeTriggerRef.current?.contains(target)
-      ) {
-        closeShapeMenu();
-      }
-    };
-    document.addEventListener("pointerdown", dismiss);
-    return () => document.removeEventListener("pointerdown", dismiss);
-  }, [closeShapeMenu, shapeMenuOpen]);
 
   useEffect(() => {
     if (!overflowOpen) return;
@@ -359,14 +298,6 @@ export function BoardToolbar({
   }, [closeConfiguration, configurationOpen]);
 
   useLayoutEffect(() => {
-    if (shapeMenuOpen) {
-      shapeMenuRef.current?.querySelector<HTMLButtonElement>(
-        '[role="menuitem"]:not(:disabled)',
-      )?.focus({ preventScroll: true });
-    }
-  }, [shapeMenuOpen]);
-
-  useLayoutEffect(() => {
     if (overflowOpen) {
       overflowMenuRef.current?.querySelector<HTMLButtonElement>(
         '[role="menuitem"]:not(:disabled)',
@@ -380,18 +311,7 @@ export function BoardToolbar({
     }
   }, [configurationOpen]);
 
-  const selectShape = (shape: BoardShapeTool, fromOverflow = false) => {
-    setLastShape(shape);
-    if (fromOverflow) closeOverflow();
-    else closeShapeMenu();
-    chooseTool(shape);
-  };
-
   const selectItem = (itemId: BoardToolbarItemId, fromOverflow = false) => {
-    if (itemId === "shapes") {
-      selectShape(lastShape, fromOverflow);
-      return;
-    }
     if (fromOverflow) closeOverflow();
     chooseTool(ITEM_DESCRIPTORS[itemId].tool);
   };
@@ -448,10 +368,8 @@ export function BoardToolbar({
     setDraggedItem(null);
   };
 
-  const shapeDescriptor = SHAPE_DESCRIPTORS[lastShape];
-  const ShapeIcon = shapeDescriptor.icon;
   const descriptorForItem = (
-    itemId: Exclude<BoardToolbarItemId, "shapes">,
+    itemId: BoardToolbarItemId,
   ): ToolDescriptor => itemId === "pen" && activeTool === "pen" && penLaserActive
     ? {
         tool: "pen",
@@ -463,7 +381,7 @@ export function BoardToolbar({
   return (
     <>
       <div
-        className={`board-v2__toolbar board-toolbar${shapeMenuOpen || overflowOpen ? " is-popup-open" : ""}${overflowOpen ? " board-toolbar--overflow-open" : ""}`}
+        className={`board-v2__toolbar board-toolbar${overflowOpen ? " is-popup-open board-toolbar--overflow-open" : ""}`}
         role="toolbar"
         aria-label="Инструменты доски"
       >
@@ -475,78 +393,7 @@ export function BoardToolbar({
           onClick={() => chooseTool("select")}
         />
 
-        {visibleItems.map((itemId) => itemId === "shapes" ? (
-          <div
-            key={itemId}
-            className="board-toolbar__split-tool"
-            data-toolbar-item="shapes"
-          >
-            <button
-              type="button"
-              className={`board-tool board-toolbar__tool board-tool--numbered${isShapeTool(activeTool) ? " is-active" : ""}`}
-              data-toolbar-tool={lastShape}
-              aria-label={shapeDescriptor.label}
-              aria-keyshortcuts={shortcutLabel(lastShape)}
-              aria-pressed={isShapeTool(activeTool)}
-              title={shapeDescriptor.label}
-              disabled={itemIsDisabled("shapes", readOnly, imageAvailable)}
-              onClick={() => selectShape(lastShape)}
-            >
-              <ShapeIcon size={19} strokeWidth={1.9} aria-hidden="true" />
-              <ShortcutIndicator tool={lastShape} />
-            </button>
-            <button
-              ref={shapeTriggerRef}
-              type="button"
-              className="board-toolbar__split-trigger"
-              aria-label="Выбрать фигуру"
-              aria-haspopup="menu"
-              aria-expanded={shapeMenuOpen}
-              disabled={itemIsDisabled("shapes", readOnly, imageAvailable)}
-              onClick={() => {
-                setOverflowOpen(false);
-                setShapeMenuOpen((open) => !open);
-              }}
-            >
-              <ChevronDown size={13} aria-hidden="true" />
-            </button>
-            {shapeMenuOpen && (
-              <div
-                ref={shapeMenuRef}
-                className="board-toolbar__menu board-toolbar__shape-menu"
-                data-toolbar-menu="shapes"
-                role="menu"
-                aria-label="Фигуры"
-                onKeyDown={(event) => menuKeyboardNavigation(
-                  event,
-                  () => closeShapeMenu(),
-                )}
-              >
-                {SHAPE_TOOLS.map((shape) => {
-                  const descriptor = SHAPE_DESCRIPTORS[shape];
-                  const Icon = descriptor.icon;
-                  return (
-                    <button
-                      key={shape}
-                      type="button"
-                      role="menuitem"
-                      data-toolbar-tool={shape}
-                      aria-current={lastShape === shape ? "true" : undefined}
-                      onClick={() => selectShape(shape)}
-                    >
-                      <Icon size={17} aria-hidden="true" />
-                      <span>{descriptor.label}</span>
-                      {lastShape === shape && <Check size={15} aria-hidden="true" />}
-                      {TOOL_SHORTCUTS[shape]?.numeric && (
-                        <kbd aria-hidden="true">{TOOL_SHORTCUTS[shape]?.numeric}</kbd>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        ) : (
+        {visibleItems.map((itemId) => (
           <ToolIconButton
             key={itemId}
             descriptor={descriptorForItem(itemId)}
@@ -568,7 +415,6 @@ export function BoardToolbar({
             aria-pressed={hiddenToolIsActive}
             title="Ещё инструменты"
             onClick={() => {
-              setShapeMenuOpen(false);
               setOverflowOpen((open) => !open);
             }}
           >
@@ -587,57 +433,7 @@ export function BoardToolbar({
                 () => closeOverflow(),
               )}
             >
-              {hiddenItems.map((itemId) => itemId === "shapes" ? (
-                <div key={itemId} role="none" data-overflow-item="shapes">
-                  <button
-                    type="button"
-                    role="menuitem"
-                    data-toolbar-tool={lastShape}
-                    aria-current={activeTool === lastShape ? "true" : undefined}
-                    disabled={itemIsDisabled(itemId, readOnly, imageAvailable)}
-                    onClick={() => selectShape(lastShape, true)}
-                  >
-                    <ShapeIcon size={17} aria-hidden="true" />
-                    <span>{shapeDescriptor.label}</span>
-                    {TOOL_SHORTCUTS[lastShape]?.numeric && (
-                      <kbd aria-hidden="true">{TOOL_SHORTCUTS[lastShape]?.numeric}</kbd>
-                    )}
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    aria-haspopup="menu"
-                    aria-expanded={overflowShapesOpen}
-                    aria-label="Выбрать другую фигуру"
-                    disabled={itemIsDisabled(itemId, readOnly, imageAvailable)}
-                    onClick={() => setOverflowShapesOpen((open) => !open)}
-                  >
-                    <ChevronDown size={15} aria-hidden="true" />
-                    <span>Другие фигуры</span>
-                  </button>
-                  {overflowShapesOpen && SHAPE_TOOLS.map((shape) => {
-                    const descriptor = SHAPE_DESCRIPTORS[shape];
-                    const Icon = descriptor.icon;
-                    return (
-                      <button
-                        key={shape}
-                        type="button"
-                        role="menuitem"
-                        className="board-toolbar__nested-menuitem"
-                        data-toolbar-tool={shape}
-                        aria-current={activeTool === shape ? "true" : undefined}
-                        onClick={() => selectShape(shape, true)}
-                      >
-                        <Icon size={16} aria-hidden="true" />
-                        <span>{descriptor.label}</span>
-                        {TOOL_SHORTCUTS[shape]?.numeric && (
-                          <kbd aria-hidden="true">{TOOL_SHORTCUTS[shape]?.numeric}</kbd>
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              ) : (() => {
+              {hiddenItems.map((itemId) => (() => {
                 const descriptor = descriptorForItem(itemId);
                 const Icon = descriptor.icon;
                 return (
@@ -717,10 +513,7 @@ export function BoardToolbar({
               </li>
 
               {preferences.order.map((itemId, index) => {
-                const isShapes = itemId === "shapes";
-                const descriptor = isShapes
-                  ? { ...shapeDescriptor, label: "Фигуры" }
-                  : ITEM_DESCRIPTORS[itemId];
+                const descriptor = ITEM_DESCRIPTORS[itemId];
                 const Icon = descriptor.icon;
                 const visible = preferences.visible.includes(itemId);
                 return (

@@ -27,6 +27,7 @@ import {
   type FreeDrawingPreset,
 } from "./freeDrawingPresets";
 import { BoardStyleBar } from "./BoardStyleBar";
+import type { BoardShapeKind } from "./rendering/types";
 
 interface PaletteState {
   readonly presets: readonly FreeDrawingPreset[];
@@ -164,6 +165,26 @@ function FontFamilyHarness({
         setFontFamily(value);
       }
     },
+    onFontStyleToggle: vi.fn(),
+  });
+}
+
+function ShapeKindHarness({ changes }: { readonly changes: Mock }) {
+  const [shapeKind, setShapeKind] = useState<BoardShapeKind>("rectangle");
+
+  return createElement(BoardStyleBar, {
+    available: new Set<string>(),
+    values: {},
+    mixed: new Set<string>(),
+    fontStyleState: { bold: false, italic: false },
+    shapeKind: {
+      value: shapeKind,
+      onChange: (nextShapeKind) => {
+        changes(nextShapeKind);
+        setShapeKind(nextShapeKind);
+      },
+    },
+    onStyleChange: vi.fn(),
     onFontStyleToggle: vi.fn(),
   });
 }
@@ -326,6 +347,81 @@ async function openFontFamilyMenu(): Promise<HTMLElement> {
   expect(listbox).not.toBeNull();
   return listbox!;
 }
+
+describe("BoardStyleBar shape kind control", () => {
+  it("renders one inline four-shape control and switches its pressed option", async () => {
+    const changes = vi.fn();
+    await act(async () => {
+      root.render(createElement(ShapeKindHarness, { changes }));
+    });
+
+    const group = container.querySelector<HTMLElement>(
+      '[role="group"][aria-label="Форма"]',
+    );
+    expect(group).not.toBeNull();
+    expect(container.querySelector(".board-stylebar__strip")?.firstElementChild)
+      .toBe(group);
+    const buttons = [...group!.querySelectorAll<HTMLButtonElement>("button")];
+    expect(buttons.map((button) => button.getAttribute("aria-label"))).toEqual([
+      "Прямоугольник",
+      "Эллипс",
+      "Ромб",
+      "Область",
+    ]);
+    expect(buttons.map((button) => button.querySelector("svg")?.classList[1]))
+      .toEqual([
+        "lucide-square",
+        "lucide-circle",
+        "lucide-diamond",
+        "lucide-frame",
+      ]);
+    expect(buttons.map((button) => button.title)).toEqual([
+      "Прямоугольник",
+      "Эллипс",
+      "Ромб",
+      "Область",
+    ]);
+    expect(buttons.map((button) => button.getAttribute("aria-pressed"))).toEqual([
+      "true",
+      "false",
+      "false",
+      "false",
+    ]);
+    expect(buttons.every((button) => !button.hasAttribute("aria-haspopup")))
+      .toBe(true);
+    expect(group?.querySelector("[role=menu]")).toBeNull();
+
+    await act(async () => buttons[0].click());
+    expect(changes).not.toHaveBeenCalled();
+
+    await act(async () => buttons[1].click());
+    expect(changes).toHaveBeenCalledTimes(1);
+    expect(changes).toHaveBeenLastCalledWith("ellipse");
+    expect(buttons.map((button) => button.getAttribute("aria-pressed"))).toEqual([
+      "false",
+      "true",
+      "false",
+      "false",
+    ]);
+    expect(container.querySelector("[role=menu]")).toBeNull();
+  });
+
+  it("omits the shape control when no creation setting is supplied", async () => {
+    await act(async () => {
+      root.render(createElement(BoardStyleBar, {
+        available: new Set<string>(),
+        values: {},
+        mixed: new Set<string>(),
+        fontStyleState: { bold: false, italic: false },
+        onStyleChange: vi.fn(),
+        onFontStyleToggle: vi.fn(),
+      }));
+    });
+
+    expect(container.querySelector('[role="group"][aria-label="Форма"]'))
+      .toBeNull();
+  });
+});
 
 describe("BoardStyleBar font family menu", () => {
   const expectedOptions = [

@@ -32,6 +32,7 @@ interface FakeAwarenessState {
   readonly displayName?: string;
   readonly color?: string;
   readonly pageId?: string | null;
+  readonly activeTool?: string;
   readonly laserPointer?: BoardPoint | null;
   readonly laserClearMode?: BoardLaserClearMode | null;
   readonly gesturePreview?: {
@@ -916,6 +917,26 @@ describe("LessonBoard laser awareness", () => {
       kind: "pen",
       points: [points[0], points.at(-1)],
     });
+
+    provider.awareness.states.set(89, {
+      userId: "student-2",
+      displayName: "Ученик",
+      color: "#2a9d5b",
+      pageId: CATALOG.pageId,
+      activeTool: "shape",
+    });
+    await act(async () => provider.awareness.emitChange());
+    expect(mocks.surfaceProps?.presences?.[0]?.activeTool).toBe("shape");
+
+    provider.awareness.states.set(89, {
+      userId: "student-2",
+      displayName: "Ученик",
+      color: "#2a9d5b",
+      pageId: CATALOG.pageId,
+      activeTool: "ellipse",
+    });
+    await act(async () => provider.awareness.emitChange());
+    expect(mocks.surfaceProps?.presences?.[0]?.activeTool).toBeUndefined();
 
     await act(async () => {
       mocks.surfaceProps?.onAwarenessChange?.({ gesturePreview: null });

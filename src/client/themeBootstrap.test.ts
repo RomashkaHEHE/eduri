@@ -118,9 +118,9 @@ describe("inline theme bootstrap", () => {
 
     expect(result.root.dataset.theme).toBe("dark");
     expect(result.root.style.colorScheme).toBe("dark");
-    expect(result.root.style.backgroundColor).toBe("#161819");
+    expect(result.root.style.backgroundColor).toBe("#171816");
     expect(result.themeColor.name).toBe("theme-color");
-    expect(result.themeColor.content).toBe("#161819");
+    expect(result.themeColor.content).toBe("#171816");
     expect(result.createElement).toHaveBeenCalledWith("meta");
     expect(result.appendChild).toHaveBeenCalledWith(result.themeColor);
     expect(result.matchMedia).not.toHaveBeenCalled();
@@ -156,7 +156,7 @@ describe("inline theme bootstrap", () => {
 
     expect(result.root.dataset.theme).toBe("dark");
     expect(result.root.style.colorScheme).toBe("dark");
-    expect(result.themeColor.content).toBe("#161819");
+    expect(result.themeColor.content).toBe("#171816");
     expect(result.matchMedia).toHaveBeenCalledWith(
       "(prefers-color-scheme: dark)",
     );
@@ -200,7 +200,7 @@ describe("inline theme bootstrap", () => {
 
     expect(result.root.dataset.theme).toBe("dark");
     expect(result.root.style.colorScheme).toBe("dark");
-    expect(result.themeColor.content).toBe("#161819");
+    expect(result.themeColor.content).toBe("#171816");
   });
 
   it.each([

@@ -1,9 +1,10 @@
 # Eduri Code Workspace Architecture
 
-Status: multi-file web workspace and guest collaboration implemented; isolated
-server execution and lazy per-file CRDT documents remain pending.
+Status: multi-file web workspace, guest and lesson collaboration, relative
+presence, and one ordered shared browser terminal implemented; isolated server
+execution and lazy per-file CRDT documents remain pending.
 
-Date: 2026-08-09.
+Date: 2026-08-12.
 
 ## Product contract
 
@@ -61,20 +62,33 @@ duplicate/reordered remote Yjs updates are idempotent. A server-confirmed ACK
 removes the outbox record; merely opening the workspace creates no room
 mutation.
 
-Guest awareness sends cursor/selection coordinates plus bounded ephemeral
-terminal input requests and submitted lines. Terminal lines contain no CR/LF,
-are capped at 1,024 UTF-16 code units, and never enter the Y.Doc, update log,
-files, tests, or history. Participant ID, display name, and color come from the
-authenticated server session and are never accepted from the client awareness
-payload. Remote code updates and terminal awareness update the UI but never
-start execution. Local undo/redo tracks only the stable local command origin.
+Awareness protocol v3 advertises exactly one focused editing target. File text
+and test stdin/expected-output selections use encoded Yjs relative positions
+bound to the exact `Y.Text`. Test name/timeout and Explorer rename inputs use a
+bounded ephemeral draft plus UTF-16 selection; terminal presence identifies the
+shared input surface but carries no terminal state. Focus ownership is tokened,
+so cleanup from an unmounted field cannot clear a newer focused field. Every
+awareness state is bounded and ephemeral. Participant ID, display name, and
+color come from the authenticated server session and are never accepted from
+the client payload.
 
-The React adapter materializes the complete entry/test snapshots on hydration
-and structural changes. A deep change confined to collaborative file or test
-text patches only the affected snapshot; typing in one file therefore does not
-convert every other workspace file to a JavaScript string or rebuild all test
-text on each keystroke. Full workspace materialization remains explicit for
-validation, promotion, and Run/Test snapshots.
+Monaco is not a controlled React text input. An exact `Y.Text` is bound directly
+to its model: local Monaco changes become granular Yjs operations and remote
+Yjs deltas become granular model edits. Monaco therefore retains its model,
+tokenization, scroll, selection, and undo chrome instead of replacing the full
+model and repainting syntax on every remote character. Remote selections are
+tracked decorations and remote carets are zero-width content widgets in the
+authenticated participant color; no `|` or other cursor glyph is inserted into
+the document or inline text layout. Native collaborative inputs use absolute
+overlay carets and selections over their bounded remote drafts. In both Monaco
+and native inputs, caret lines and selections remain visible while participant
+name labels are hidden by default. A label is absolutely positioned and appears
+only while a hover-capable pointer is over the transparent hit area belonging
+to that caret; pointer exit hides it, and touch or other no-hover input does not
+reveal it. Labels never change document/input values, text layout, scroll, or
+selection. Pure nested `Y.Text` events bypass React entry/test snapshots
+entirely. Structural and metadata changes still refresh those snapshots, while
+Run/Test captures read authoritative data from the Y.Doc.
 
 The current Explorer renders the effective parent forest directly. Folders
 expand/collapse by pointer or arrow key. Create, upload, rename, and delete are
@@ -93,6 +107,21 @@ It verifies the resulting workspace schema, state vector, row count, and byte
 counters on every read used for sync or append. A snapshot is CRDT state
 produced by `Y.encodeStateAsUpdate`; it is never application JSON or a
 last-write-wins scene replacement.
+
+Migration v22 lets a workspace belong to exactly one guest-room resource or
+one lesson. The first lesson access imports retained `lessons.code_state`
+exactly once and records the source JSON, revision, SHA-256, and import time in
+immutable audit history; those legacy columns are recovery data and never an
+active writer. Lesson workspaces use the separate `/lesson-code-sync`
+namespace. Cookie session, active account, role, lesson membership, and lesson
+status are checked at handshake, on every inbound operation, and before
+outbound collaboration data. Scheduled/active lessons are writable;
+completed/cancelled lessons permit cold read-only sync. Code and tests are
+durable, while the shared terminal is intentionally ephemeral after the final
+participant disconnects. Lesson storage retains the same per-workspace guards
+but is not charged to the global guest quota. Until an authenticated lesson
+blob service exists, lesson uploads and binary filesystem deltas fail closed;
+text files, folders, and tests remain fully collaborative.
 
 The default storage policy is:
 
@@ -159,13 +188,10 @@ and never enter repository persistence. The in-memory scope registry is capped
 at 10,000 workspaces and reclaims entries idle for two minutes; a new scope
 fails closed while that bound is full.
 
-The retained whole-state `lesson:code` compatibility event has a separate
-aggregate budget keyed by authenticated user and lesson: 600 events and
-64 MiB of serialized code per minute by default. Its registry has the same
-10,000-scope/two-minute bounds. A rejected write returns an explicit
-`RATE_LIMITED` acknowledgement with `retryAfterMs` before any SQLite update or
-revision increment. Multiple sessions, tabs, sockets, and reconnects for the
-same user/lesson share this budget.
+The legacy whole-state `lesson:code` writer is no longer a compatibility path.
+It rejects writes with `CODE_ENGINE_MISMATCH`; retained lesson code columns are
+an immutable import/rollback source. Live lessons use the same granular Code
+workspace model over the authenticated `/lesson-code-sync` namespace.
 
 These registries are process-local. A future multi-instance deployment must
 move the counters to a shared rate store or enforce an equivalent authenticated
@@ -291,15 +317,32 @@ per-file scaling gate can be considered complete.
 
 ### Browser profile
 
-Pyodide runs in a dedicated disposable Worker. Every explicit run creates a
-new Worker at the query-versioned `/python-runner.worker.js?protocol=3` URL,
-sends one tagged protocol-v3 request, may receive bounded output chunks and
-input-request messages, and terminates that Worker after the terminal result,
-runtime/worker/protocol error, cancellation, or its bounded timeout. Ordinary
-Run uses the 45-second client ceiling. Test uses the test case's `250..45000`
-ms timeout, defaulting to 5,000 ms for new and legacy cases. The Worker also
-closes itself after posting its one terminal response. Python interpreter state
-and virtual files therefore cannot survive into the next run.
+Pyodide runs behind an opaque-origin sandboxed iframe. The iframe has
+`sandbox="allow-scripts"` without `allow-same-origin`, applies a network-denying
+CSP, and creates the disposable Blob Worker itself. The application fetches
+and verifies the exact same-origin runtime assets and versioned
+`/python-runner.worker.js?protocol=4&revision=2` source before transferring only those
+bytes through a private `MessageChannel`; the sandbox exposes no privileged
+parent RPC. Every explicit run sends one tagged protocol-v4 request, may
+receive bounded output chunks and input-request messages, and destroys the
+Worker, channel, and iframe after the terminal result, runtime/worker/protocol
+error, cancellation, or its bounded timeout. Ordinary Run uses the 45-second
+client ceiling. Test uses the test case's `250..45000` ms timeout, defaulting to
+5,000 ms for new and legacy cases. The Worker also closes itself after posting
+its one terminal response. Python interpreter state and virtual files therefore
+cannot survive into the next run.
+
+The interactive xterm surface uses the separately versioned protocol-v3
+`/python-terminal.worker.js?protocol=3&revision=3` source through the same opaque broker.
+Each shell `py path.py` command receives a fresh
+workspace snapshot and disposable interpreter, so imports, globals, and stale
+MEMFS do not leak into the next shell command. Bare `py` starts an explicit
+interactive Python session whose interpreter persists only until `exit()`,
+`quit()`, EOF, interruption, timeout, read-only transition, session change, or
+unmount. Its cumulative filesystem delta is checked and applied once on exit.
+The safe virtual shell implements only bounded workspace commands (`help`,
+`pwd`, `ls`/`dir`, `cat`/`type`, `clear`/`cls`, and `py`/`python`); it is not an
+OS or server shell.
 
 Each multi-file run receives a bounded immutable workspace snapshot, creates a
 fresh `/workspace`, changes to it, and invokes the selected Python entry point.
@@ -323,17 +366,24 @@ CSS theme source, so those surfaces change in the same pre-paint update as
 Monaco without remounting the workspace, replacing its Y.Doc, or cancelling a
 run.
 
-The blacklist remains defense in depth rather than a complete boundary for
-browser secrets. Only the pinned same-origin loader runs before capabilities
-are removed, but a separate credential-free runner origin would still be the
-stronger browser isolation boundary.
+The opaque origin is the browser credential boundary: it cannot read the
+application DOM, cookies, local/session storage, or IndexedDB. Exact-key broker
+validation permits only run/terminal requests, bounded input/EOF/interrupt
+controls, bounded output, and validated filesystem deltas. There is no generic
+object bridge back into the application realm. The capability blacklist inside
+the Worker remains defense in depth, while `connect-src 'none'` blocks iframe
+and Worker network egress.
 
 Output, wall time, source length, stdin, file count, and aggregate workspace
 characters are bounded. Interactive input uses per-run shared control/data
-buffers so Pyodide's synchronous stdin callback can block without blocking the
-page. The site is served with `Cross-Origin-Opener-Policy: same-origin` and
-`Cross-Origin-Embedder-Policy: require-corp`, which makes those
-`SharedArrayBuffer` instances available. This profile is suitable for ordinary
+buffers created inside the opaque iframe so Pyodide's synchronous stdin
+callback can block without blocking the page. The privileged parent never
+creates or transfers those buffers; it sends bounded input, EOF, and interrupt
+control envelopes to the broker. The site is served with
+`Cross-Origin-Opener-Policy: same-origin`,
+`Cross-Origin-Embedder-Policy: require-corp`, and an explicit
+`cross-origin-isolated` iframe permission so `SharedArrayBuffer` is available
+inside the sandbox. This profile is suitable for ordinary
 algorithms; its first uncached use downloads the pinned runtime from the Eduri
 origin. It does not install packages from PyPI at run time and cannot provide
 native extensions, unrestricted packages, processes, memory/disk cgroups, or
@@ -345,9 +395,14 @@ endings and a genuinely empty stdout. The terminal may style an empty
 successful run in the UI, but the execution result and test-case comparison
 never substitute explanatory text for program output.
 
+The initiating client takes a local Run/Test request lock before awaiting its
+durable document outbox. It releases that lock only on rejection, a connection
+or permission transition, or authoritative terminal progress. Repeated Run and
+Test clicks during synchronization therefore cannot enqueue competing starts.
+
 After an ordinary successful execution or Python runtime error, the Worker
 recursively snapshots `/workspace` and returns version-1 file changes inside
-the protocol-v3 terminal response. A change is either a deterministic byte
+the protocol-v4 runner response. A change is either a deterministic byte
 write with its optional baseline identity or a delete with its required
 baseline identity. The snapshot rejects unsafe, non-normalized, duplicate or
 case-colliding paths; excessive depth, count, per-file or aggregate bytes;
@@ -406,19 +461,49 @@ Results are ephemeral unless the user explicitly saves a bounded run summary.
 
 The test panel is closed by default and mounted only when explicitly expanded.
 A Test consumes its bounded stored stdin snapshot line by line and receives EOF
-after the final line. An ordinary Run has no advance stdin snapshot: when
-Python calls `input()`, the Worker emits a request and waits on its per-run
-shared buffer. The terminal then exposes one focused line control; submission
-resumes execution. A line is capped at 64 KiB of UTF-8 and total interactive
-input at 1 MiB, while the shared-room awareness UI applies the stricter 1,024
-UTF-16-code-unit/no-newline bound. Requests and submissions are ephemeral
-awareness so another active room participant can answer and observers see the
-submitted line without creating a durable code update. An active run can be
-terminated from the Run command, which also revokes its pending input stream.
+after the final line. Test names/timeouts expose bounded live draft/caret
+presence; stdin and expected output use collaborative `Y.Text` and relative
+selections without remounting focused editors.
+
+One server-ordered state machine owns each active workspace terminal. It grants
+one input lease, elects one authorized browser execution host, assigns run IDs,
+and broadcasts ordered bounded deltas for prompt, input, output, mode, host,
+run, and test result. Full bounded snapshots are reserved for connect, explicit
+sync/gap recovery, and `clear`/`cls` generation changes. ACKs cover accepted,
+unchanged, duplicate, and rejected actions. Output and run lifecycle never use
+lossy awareness. All participants therefore see one terminal and one run;
+receiving a remote update alone never starts a second local execution.
+
+The xterm input is the active terminal row, not a detached HTML input. Editing,
+caret motion, program `input()`, Ctrl-C, Ctrl-D, shell/REPL prompts, and
+`clear`/`cls` are reflected through the shared state machine. A command line is
+capped at 1,024 UTF-16 code units with control characters removed. Python stdin
+also retains its 64 KiB per-line, 1 MiB total, bounded-request guards. The
+terminal transcript is bounded to 256 KiB, host output actions to 64 KiB, and
+small stdout writes are batched before transport. Terminal state is ephemeral
+when the room becomes empty and is disabled while collaboration is offline;
+source editing remains local-first and available offline. The header does not
+render a persistent terminal input-owner name. The xterm caret stays visible in
+the authenticated owner's color; for a remote owner, its absolutely positioned
+name label is hidden by default and appears only while a hover-capable pointer
+is within the transparent 18-pixel geometric area around that caret. The area
+and label never intercept pointer events, focus, selection, or input, and never
+change the terminal buffer or layout. Touch and other no-hover input leave the
+label collapsed. The overlay derives its position from the public xterm buffer
+cursor after parse, render, resize, and scroll changes and hides whenever that
+buffer position falls outside the rendered viewport.
+
+Terminal actions retain compact SHA-256 idempotency fingerprints and retry with
+their original action ID. Identical retries do not consume the action budget a
+second time; conflicting payload reuse is rejected. Every provider socket
+transition advances a monotonic execution epoch, so a Worker started before a
+disconnect cannot publish output or a filesystem delta after a rapid reconnect.
+Within bare-`py`, Ctrl-C resets the `InteractiveConsole` buffer and returns to
+the primary prompt instead of closing the REPL.
 
 This browser mechanism provides prompt-by-prompt stdin and streamed combined
-stdout/stderr, but not a true PTY. A future isolated server runner protocol must
-distinguish stdout, stderr, prompts, exit status, timeout, truncation, and
+stdout/stderr but not a server PTY. A future isolated server runner protocol
+must distinguish stdout, stderr, prompts, exit status, timeout, truncation, and
 sandbox failure independently, and killing a run must revoke its input stream
 and sandbox immediately.
 
@@ -427,8 +512,8 @@ and sandbox immediately.
 - concurrent file content and tree operations converge under duplicate,
   delayed, and reordered updates;
 - offline edits survive reload and merge on reconnect;
-- cursors, selections, and terminal input remain awareness-only, bounded, and
-  authenticated;
+- cursors and selections remain bounded authenticated awareness, while terminal
+  input/output/run lifecycle remains bounded, server-ordered, and ephemeral;
 - uploaded trees cannot escape the workspace through names, archives, links,
   Unicode ambiguity, or case collisions;
 - arbitrary binary blobs cannot become ready, deduplicated, or downloadable

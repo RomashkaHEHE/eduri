@@ -123,10 +123,10 @@ describe("LessonCall", () => {
 
     document.documentElement.dataset.theme = "dark";
     expect(container.querySelector(".lesson-call--lobby")).toBe(lobby);
-    expect(callToken(lobby!, "--call-shell-bg")).toBe("#111921");
-    expect(callToken(lobby!, "--call-control-bg")).toBe("#293640");
+    expect(callToken(lobby!, "--call-shell-bg")).toBe("#171816");
+    expect(callToken(lobby!, "--call-control-bg")).toBe("#30312e");
     expect(callToken(lobby!, "--call-error-bg")).toBe("#3c2929");
-    expect(callToken(guestCall, "--call-shell-bg")).toBe("#111921");
+    expect(callToken(guestCall, "--call-shell-bg")).toBe("#171816");
 
     await act(async () => {
       container?.querySelector<HTMLButtonElement>(".call-join-button")?.click();
@@ -135,7 +135,7 @@ describe("LessonCall", () => {
 
     const room = container.querySelector(".call-room");
     expect(room).not.toBeNull();
-    expect(callToken(room!, "--call-shell-bg")).toBe("#111921");
+    expect(callToken(room!, "--call-shell-bg")).toBe("#171816");
     expect(callToken(room!, "--lk-bg")).toBe("var(--call-shell-bg)");
 
     document.documentElement.dataset.theme = "light";

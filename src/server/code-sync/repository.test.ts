@@ -85,6 +85,45 @@ function createHarness(
   return { db, repository, workspaceId: workspace.id, document };
 }
 
+function seedLesson(db: Database.Database, codeState: string, revision = 0): {
+  lessonId: string;
+  tutorId: string;
+  studentId: string;
+} {
+  const tutorId = crypto.randomUUID();
+  const studentId = crypto.randomUUID();
+  const lessonId = crypto.randomUUID();
+  const timestamp = new Date(NOW).toISOString();
+  db.prepare(`
+    INSERT INTO users (
+      id, role, status, display_name, created_at, updated_at
+    ) VALUES (?, 'tutor', 'active', 'Tutor', ?, ?)
+  `).run(tutorId, timestamp, timestamp);
+  db.prepare(`
+    INSERT INTO users (
+      id, role, status, display_name, tutor_id, created_at, updated_at
+    ) VALUES (?, 'student', 'active', 'Student', ?, ?, ?)
+  `).run(studentId, tutorId, timestamp, timestamp);
+  db.prepare(`
+    INSERT INTO lessons (
+      id, tutor_id, student_id, title, meeting_key, scheduled_at,
+      duration_minutes, status, code_state, code_revision,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, 'Lesson', ?, ?, 60, 'active', ?, ?, ?, ?)
+  `).run(
+    lessonId,
+    tutorId,
+    studentId,
+    "m".repeat(32),
+    timestamp,
+    codeState,
+    revision,
+    timestamp,
+    timestamp,
+  );
+  return { lessonId, tutorId, studentId };
+}
+
 function insertTextUpdate(document: Y.Doc, value: string): Uint8Array {
   const before = Y.encodeStateVector(document);
   const text = codeWorkspaceText(document, "main-py");
@@ -202,6 +241,78 @@ function expectGuestStorageUsageConsistent(db: Database.Database): void {
 
 afterEach(() => {
   for (const db of openDatabases) closeDatabase(db);
+});
+
+describe("CodeSyncRepository lesson ownership", () => {
+  it("imports a lesson legacy source exactly once without changing rollback data", () => {
+    const db = createDatabase();
+    const legacyJson = JSON.stringify({
+      language: "python",
+      value: "print('legacy lesson')\n",
+    });
+    const { lessonId } = seedLesson(db, legacyJson, 7);
+    const repository = new CodeSyncRepository(db, () => NOW);
+    try {
+      const beforeGuest = guestStorageUsage(db);
+      const workspace = repository.ensureLessonWorkspace(lessonId);
+      expect(workspace).toMatchObject({ roomResourceId: null, lessonId });
+      expect(repository.ensureLessonWorkspace(lessonId)).toEqual(workspace);
+
+      const document = new Y.Doc();
+      Y.applyUpdate(document, repository.readDocumentState(workspace.id).update);
+      expect(codeWorkspaceText(document, "main-py")?.toString())
+        .toBe("print('legacy lesson')\n");
+      document.destroy();
+
+      expect(db.prepare(`
+        SELECT code_state, code_revision FROM lessons WHERE id = ?
+      `).get(lessonId)).toEqual({ code_state: legacyJson, code_revision: 7 });
+      const audit = db.prepare(`
+        SELECT source_revision, source_json, source_sha256
+        FROM lesson_code_legacy_imports WHERE lesson_id = ?
+      `).get(lessonId) as Record<string, unknown>;
+      expect(audit).toMatchObject({
+        source_revision: 7,
+        source_json: legacyJson,
+      });
+      expect(audit.source_sha256).toMatch(/^[0-9a-f]{64}$/u);
+      expect(db.prepare(`
+        SELECT is_guest FROM code_storage_usage WHERE workspace_id = ?
+      `).get(workspace.id)).toEqual({ is_guest: 0 });
+      expect(guestStorageUsage(db)).toEqual(beforeGuest);
+      expect(() => db.prepare(`
+        UPDATE lesson_code_legacy_imports SET source_revision = 8
+        WHERE lesson_id = ?
+      `).run(lessonId)).toThrow();
+    } finally {
+      closeDatabase(db);
+    }
+  });
+
+  it("keeps lesson updates outside the aggregate guest quota", () => {
+    const db = createDatabase();
+    const { lessonId } = seedLesson(db, "{}", 0);
+    const repository = new CodeSyncRepository(db, () => NOW, {
+      maxGuestStorageBytes: 1,
+    });
+    const workspace = repository.ensureLessonWorkspace(lessonId);
+    const document = new Y.Doc();
+    try {
+      Y.applyUpdate(document, repository.readDocumentState(workspace.id).update);
+      const beforeGuest = guestStorageUsage(db);
+      const update = insertTextUpdate(document, "# lesson edit\n");
+      expect(repository.appendUpdate({
+        workspaceId: workspace.id,
+        deviceId: "lesson-device",
+        updateId: "lesson-update",
+        update,
+      })).toEqual({ status: "committed", sequence: 1 });
+      expect(guestStorageUsage(db)).toEqual(beforeGuest);
+    } finally {
+      document.destroy();
+      closeDatabase(db);
+    }
+  });
 });
 
 describe("CodeSyncRepository bounded compaction", () => {

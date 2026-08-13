@@ -26,13 +26,7 @@ import {
   BoardSurface,
   type BoardSurfaceProps,
 } from "./BoardSurface";
-import {
-  PYTHON_RUNNER_PROTOCOL_VERSION,
-  PYTHON_RUNNER_REQUEST_TYPE,
-  PYTHON_RUNNER_RESULT_TYPE,
-  PYTHON_RUNNER_WORKER_URL,
-  type PythonRunnerRequest,
-} from "../pythonRunner";
+import type { PythonRunHandle, PythonRunResult } from "../pythonRunner";
 import { THEME_STORAGE_KEY, ThemeProvider } from "../theme";
 import {
   BOARD_FRAGMENT_CLIPBOARD_MIME,
@@ -5776,31 +5770,19 @@ describe("BoardSurface mutation guards", () => {
       props: createCodeProps("while True:\n    pass", "python", "browser"),
     }, context.origin);
     const factory = new FakeRendererFactory();
-    const workers: Array<{ terminate: ReturnType<typeof vi.fn> }> = [];
-
-    class WorkerStub {
-      readonly terminate = vi.fn();
-      readonly postMessage = vi.fn();
-      readonly listeners = new Map<string, Set<EventListener>>();
-
-      constructor() {
-        workers.push(this);
-      }
-
-      addEventListener(type: string, listener: EventListener): void {
-        const listeners = this.listeners.get(type) ?? new Set<EventListener>();
-        listeners.add(listener);
-        this.listeners.set(type, listeners);
-      }
-
-      removeEventListener(type: string, listener: EventListener): void {
-        this.listeners.get(type)?.delete(listener);
-      }
-    }
-    vi.stubGlobal("Worker", WorkerStub);
+    const cancel = vi.fn();
+    const startPythonRun = vi.fn((): PythonRunHandle => ({
+      runId: "board-unmount-run",
+      result: new Promise<PythonRunResult>(() => undefined),
+      submitInput: () => false,
+      sendEof: () => false,
+      cancel,
+    }));
 
     await act(async () => {
-      root?.render(createElement(BoardSurface, surfaceProps(context, factory)));
+      root?.render(createElement(BoardSurface, surfaceProps(context, factory, {
+        startPythonRun,
+      })));
     });
     await act(async () => factory.instances[0].callbacks.onEditObject(CODE_OBJECT));
     const runButton = [...(container?.querySelectorAll("button") ?? [])]
@@ -5809,13 +5791,13 @@ describe("BoardSurface mutation guards", () => {
     await act(async () => runButton?.focus());
     expect(container?.querySelector("textarea")).not.toBeNull();
     await act(async () => runButton?.click());
-    expect(workers).toHaveLength(1);
-    expect(workers[0].terminate).not.toHaveBeenCalled();
+    expect(startPythonRun).toHaveBeenCalledOnce();
+    expect(cancel).not.toHaveBeenCalled();
 
     await act(async () => root?.unmount());
     root = undefined;
 
-    expect(workers[0].terminate).toHaveBeenCalledTimes(1);
+    expect(cancel).toHaveBeenCalledTimes(1);
   });
 
   it("runs Python explicitly and terminates the disposable worker on result", async () => {
@@ -5830,61 +5812,40 @@ describe("BoardSurface mutation guards", () => {
       props: createCodeProps("print(2 + 2)", "python", "browser"),
     }, context.origin);
     const factory = new FakeRendererFactory();
-    let worker: WorkerStub | undefined;
-
-    class WorkerStub {
-      readonly terminate = vi.fn();
-      readonly postMessage = vi.fn();
-      readonly listeners = new Map<string, Set<EventListener>>();
-
-      constructor(readonly url: string) {
-        worker = this;
-      }
-
-      addEventListener(type: string, listener: EventListener): void {
-        const listeners = this.listeners.get(type) ?? new Set<EventListener>();
-        listeners.add(listener);
-        this.listeners.set(type, listeners);
-      }
-
-      removeEventListener(type: string, listener: EventListener): void {
-        this.listeners.get(type)?.delete(listener);
-      }
-
-      emit(type: string, event: Event): void {
-        for (const listener of this.listeners.get(type) ?? []) listener(event);
-      }
-    }
-    vi.stubGlobal("Worker", WorkerStub);
+    let resolveRun!: (result: PythonRunResult) => void;
+    const cancel = vi.fn();
+    const startPythonRun = vi.fn((): PythonRunHandle => ({
+      runId: "board-success-run",
+      result: new Promise<PythonRunResult>((resolve) => {
+        resolveRun = resolve;
+      }),
+      submitInput: () => false,
+      sendEof: () => false,
+      cancel,
+    }));
 
     await act(async () => {
-      root?.render(createElement(BoardSurface, surfaceProps(context, factory)));
+      root?.render(createElement(BoardSurface, surfaceProps(context, factory, {
+        startPythonRun,
+      })));
     });
     await act(async () => factory.instances[0].callbacks.onEditObject(CODE_OBJECT));
     const runButton = [...(container?.querySelectorAll("button") ?? [])]
       .find((button) => button.textContent === "Запустить");
 
     await act(async () => runButton?.click());
-    expect(worker?.url).toBe(PYTHON_RUNNER_WORKER_URL);
-    const request = worker?.postMessage.mock.calls[0]?.[0] as PythonRunnerRequest;
-    expect(request).toEqual({
-      type: PYTHON_RUNNER_REQUEST_TYPE,
-      protocolVersion: PYTHON_RUNNER_PROTOCOL_VERSION,
-      runId: expect.any(String),
-      payload: { kind: "script", code: "print(2 + 2)" },
+    expect(startPythonRun).toHaveBeenCalledWith({
+      kind: "script",
+      code: "print(2 + 2)",
     });
 
     await act(async () => {
-      worker?.emit("message", new MessageEvent("message", {
-        data: {
-          type: PYTHON_RUNNER_RESULT_TYPE,
-          protocolVersion: PYTHON_RUNNER_PROTOCOL_VERSION,
-          runId: request.runId,
-          status: "ok",
-          output: "4",
-          truncated: false,
-        },
-      }));
+      resolveRun({
+        runId: "board-success-run",
+        status: "ok",
+        output: "4",
+        truncated: false,
+      });
       await Promise.resolve();
     });
 
@@ -5893,10 +5854,10 @@ describe("BoardSurface mutation guards", () => {
       readBoardObject(getPageObjects(context.document).get(CODE_OBJECT)!)
         .props.get("outputSnapshot"),
     ).toBe("4");
-    expect(worker?.terminate).toHaveBeenCalledTimes(1);
+    expect(cancel).not.toHaveBeenCalled();
 
     await act(async () => root?.unmount());
     root = undefined;
-    expect(worker?.terminate).toHaveBeenCalledTimes(1);
+    expect(cancel).not.toHaveBeenCalled();
   });
 });

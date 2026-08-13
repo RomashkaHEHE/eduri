@@ -1,5 +1,8 @@
 import type Database from "better-sqlite3";
-import { installCodeStorageUsageSchema } from "./storageUsageSchema.js";
+import {
+  installCodeStorageUsageSchema,
+  installLessonCodeStorageUsageSchema,
+} from "./storageUsageSchema.js";
 
 export function installCodeSyncBaseSchema(db: Database.Database): void {
   db.exec(`
@@ -69,6 +72,67 @@ export function installCodeSyncBaseSchema(db: Database.Database): void {
     BEFORE UPDATE OF document_id, device_id, update_id, update_digest, sequence
     ON code_update_receipts
     BEGIN SELECT RAISE(ABORT, 'code update receipt is immutable'); END;
+
+  `);
+}
+
+/**
+ * Migration-v22 installer. Existing guest workspaces keep their identifiers
+ * and payload rows; lesson ownership is additive and the retained lesson
+ * whole-state columns remain untouched as rollback history.
+ *
+ * This function must run with SQLite foreign keys disabled because SQLite
+ * cannot make the historical room_resource_id column nullable in place.
+ */
+export function installLessonCodeWorkspaceSchema(
+  db: Database.Database,
+): void {
+  const workspaceColumns = columnNames(db, "code_workspaces");
+  if (!workspaceColumns.has("lesson_id")) {
+    db.exec(`
+      DROP TRIGGER IF EXISTS code_workspaces_storage_identity_immutable;
+      DROP TRIGGER IF EXISTS code_workspaces_storage_insert;
+
+      CREATE TABLE code_workspaces_v22 (
+        id TEXT PRIMARY KEY CHECK (length(id) = 36),
+        room_resource_id TEXT UNIQUE
+          REFERENCES guest_room_resources(id) ON DELETE CASCADE,
+        lesson_id TEXT UNIQUE REFERENCES lessons(id) ON DELETE CASCADE,
+        schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        CHECK ((room_resource_id IS NOT NULL) != (lesson_id IS NOT NULL))
+      );
+      INSERT INTO code_workspaces_v22 (
+        id, room_resource_id, lesson_id, schema_version, created_at, updated_at
+      )
+      SELECT id, room_resource_id, NULL, schema_version, created_at, updated_at
+      FROM code_workspaces;
+      DROP TABLE code_workspaces;
+      ALTER TABLE code_workspaces_v22 RENAME TO code_workspaces;
+      CREATE INDEX code_workspaces_lesson_idx ON code_workspaces(lesson_id);
+    `);
+  }
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS lesson_code_legacy_imports (
+      workspace_id TEXT PRIMARY KEY
+        REFERENCES code_workspaces(id) ON DELETE CASCADE,
+      lesson_id TEXT NOT NULL UNIQUE REFERENCES lessons(id) ON DELETE CASCADE,
+      source_revision INTEGER NOT NULL CHECK (source_revision >= 0),
+      source_json TEXT NOT NULL,
+      source_sha256 TEXT NOT NULL CHECK (
+        length(source_sha256) = 64
+        AND source_sha256 NOT GLOB '*[^0-9a-f]*'
+      ),
+      imported_at TEXT NOT NULL
+    );
+
+    CREATE TRIGGER IF NOT EXISTS lesson_code_legacy_imports_source_immutable
+    BEFORE UPDATE OF workspace_id, lesson_id, source_revision, source_json,
+      source_sha256, imported_at
+    ON lesson_code_legacy_imports
+    BEGIN SELECT RAISE(ABORT, 'lesson Code legacy import is immutable'); END;
   `);
 }
 
@@ -147,4 +211,16 @@ export function installCodeSyncSchema(db: Database.Database): void {
     WHERE type = 'table' AND name = 'code_storage_usage'
   `).get();
   if (!usageTable) installCodeStorageUsageSchema(db);
+  const foreignKeys = db.pragma("foreign_keys", { simple: true }) === 1;
+  if (foreignKeys) db.pragma("foreign_keys = OFF");
+  try {
+    installLessonCodeWorkspaceSchema(db);
+    installLessonCodeStorageUsageSchema(db);
+    const violations = db.pragma("foreign_key_check") as unknown[];
+    if (violations.length > 0) {
+      throw new Error("Code sync schema installation violated foreign keys");
+    }
+  } finally {
+    if (foreignKeys) db.pragma("foreign_keys = ON");
+  }
 }

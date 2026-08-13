@@ -46,6 +46,7 @@ import {
 import { createGuestRoomsRouter } from "./routes/guestRooms.js";
 import { CodeSyncRepository } from "./code-sync/repository.js";
 import { CodeSyncService } from "./code-sync/service.js";
+import { LessonCodeSyncService } from "./lesson-code-sync/service.js";
 import { CodeBlobService } from "./code-blobs/service.js";
 import { createGuestCodeBlobsRouter } from "./code-blobs/router.js";
 import {
@@ -57,6 +58,10 @@ import {
   MATERIAL_FILE_LIMITS,
   MaterialFileService,
 } from "./material-files/service.js";
+import {
+  isPythonWorkerRequestTarget,
+  PYTHON_WORKER_CONTENT_SECURITY_POLICY,
+} from "../pythonRunnerContract.js";
 
 const FRONTEND_REVALIDATED_FILES = new Set([
   "index.html",
@@ -138,6 +143,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
       ),
     },
   });
+  const codeSyncRepository = new CodeSyncRepository(db);
   context = {
     config,
     db,
@@ -147,9 +153,10 @@ export function createApp(options: CreateAppOptions = {}): Express {
       ?? createLiveKitRoomService(config),
     guestRooms,
     codeSync: new CodeSyncService(
-      new CodeSyncRepository(db),
+      codeSyncRepository,
       guestRooms,
     ),
+    lessonCodeSync: new LessonCodeSyncService(db, codeSyncRepository),
     codeBlobs,
     materialFiles,
   };
@@ -473,6 +480,16 @@ export function createApp(options: CreateAppOptions = {}): Express {
     crossOriginOpenerPolicy: { policy: "same-origin" },
     crossOriginResourcePolicy: { policy: "same-origin" },
   }));
+  app.use((req, res, next) => {
+    res.setHeader("Permissions-Policy", "cross-origin-isolated=*");
+    if (isPythonWorkerRequestTarget(req.path)) {
+      res.setHeader(
+        "Content-Security-Policy",
+        PYTHON_WORKER_CONTENT_SECURITY_POLICY,
+      );
+    }
+    next();
+  });
   app.use(originAndCors(context));
   app.use(express.json({ limit: "2mb" }));
   app.use(express.urlencoded({ extended: false, limit: "256kb" }));

@@ -3,7 +3,7 @@
 import { act, createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { GuestRoom } from "../api";
+import { ApiError, type GuestRoom } from "../api";
 
 const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
@@ -152,5 +152,30 @@ describe("SoloBoardPage session promotion", () => {
         ?.getAttribute("data-read-only"),
     ).toBe("false");
     expect(mocks.navigate).not.toHaveBeenCalled();
+  });
+
+  it("shows a server response instead of masking it as a connection error", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mocks.promote.mockRejectedValue(new ApiError(
+      "Слишком много созданных сеансов",
+      429,
+    ));
+
+    await act(async () => {
+      root?.render(createElement(SoloBoardPage));
+    });
+    const startButton = await vi.waitFor(() => {
+      const button = [...container!.querySelectorAll("button")].find((item) => (
+        item.textContent === "Начать сеанс"
+      ));
+      expect(button).toBeDefined();
+      return button as HTMLButtonElement;
+    });
+    await act(async () => startButton.click());
+
+    await vi.waitFor(() => {
+      expect(container?.querySelector('[role="alert"]')?.textContent)
+        .toContain("Слишком много созданных сеансов");
+    });
   });
 });

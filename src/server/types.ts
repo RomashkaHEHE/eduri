@@ -10,6 +10,7 @@ import type { GuestRoomService } from "./guestRooms.js";
 import type { CodeSyncService } from "./code-sync/service.js";
 import type { CodeBlobService } from "./code-blobs/service.js";
 import type { MaterialFileService } from "./material-files/service.js";
+import type { LessonCodeSyncService } from "./lesson-code-sync/service.js";
 
 export type Role = "admin" | "tutor" | "student";
 export type AccountStatus = "pending" | "active" | "suspended";
@@ -46,6 +47,7 @@ export interface AppContext {
   boardV2Sync?: BoardSyncService;
   boardAssets?: BoardAssetService<BoardAssetPrincipal>;
   codeSync: CodeSyncService;
+  lessonCodeSync: LessonCodeSyncService;
   codeBlobs?: CodeBlobService;
   materialFiles: MaterialFileService;
   guestRooms: GuestRoomService;

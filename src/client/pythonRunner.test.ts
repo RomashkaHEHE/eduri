@@ -8,12 +8,34 @@ import {
   startPythonRun,
   type PythonRunPayload,
 } from "./pythonRunner";
+import {
+  PYTHON_RUNTIME_ASSET_MANIFEST,
+  PYTHON_RUNTIME_ASSET_PROTOCOL_VERSION,
+  type PythonRuntimeAssets,
+} from "../pythonRunnerContract.js";
+import type { OpaquePythonWorkerControl } from "./opaquePythonWorker.js";
+
+function runtimeAssets(): PythonRuntimeAssets {
+  return {
+    version: PYTHON_RUNTIME_ASSET_PROTOCOL_VERSION,
+    pyodideScript: "x".repeat(PYTHON_RUNTIME_ASSET_MANIFEST.pyodideScript.byteLength),
+    pyodideAsmScript: "y".repeat(
+      PYTHON_RUNTIME_ASSET_MANIFEST.pyodideAsmScript.byteLength,
+    ),
+    pyodideLock: new ArrayBuffer(PYTHON_RUNTIME_ASSET_MANIFEST.pyodideLock.byteLength),
+    pyodideWasm: new ArrayBuffer(PYTHON_RUNTIME_ASSET_MANIFEST.pyodideWasm.byteLength),
+    pythonStdlib: new ArrayBuffer(PYTHON_RUNTIME_ASSET_MANIFEST.pythonStdlib.byteLength),
+  };
+}
 
 type WorkerListener = (event: Event | MessageEvent<unknown> | ErrorEvent) => void;
 
 class FakeWorker {
   readonly listeners = new Map<string, Set<WorkerListener>>();
-  readonly postMessage = vi.fn<(message: unknown) => void>();
+  readonly postMessage = vi.fn<(
+    message: unknown,
+    transfer?: Transferable[],
+  ) => void>();
   readonly terminate = vi.fn();
 
   addEventListener(type: string, listener: WorkerListener): void {
@@ -29,6 +51,13 @@ class FakeWorker {
   emit(type: string, event: Event | MessageEvent<unknown> | ErrorEvent): void {
     for (const listener of this.listeners.get(type) ?? []) listener(event);
   }
+}
+
+class FakeOpaqueWorker extends FakeWorker implements OpaquePythonWorkerControl {
+  readonly isOpaquePythonWorker = true as const;
+  readonly submitPythonInput = vi.fn(() => true);
+  readonly sendPythonEof = vi.fn(() => true);
+  readonly interruptPython = vi.fn(() => true);
 }
 
 function response(
@@ -76,17 +105,22 @@ describe("fresh Python runner client", () => {
     const execution = startPythonRun(
       { kind: "script", code: "print(42)" },
       {
+        runtimeAssets: runtimeAssets(),
         createWorker: () => worker as unknown as Worker,
         runId: "run-success",
       },
     );
 
-    expect(worker.postMessage).toHaveBeenCalledWith({
+    expect(worker.postMessage.mock.calls[0]?.[0]).toMatchObject({
       type: PYTHON_RUNNER_REQUEST_TYPE,
       protocolVersion: PYTHON_RUNNER_PROTOCOL_VERSION,
       runId: "run-success",
       payload: { kind: "script", code: "print(42)" },
     });
+    expect((worker.postMessage.mock.calls[0]?.[0] as {
+      runtimeAssets?: PythonRuntimeAssets;
+    }).runtimeAssets?.version).toBe(PYTHON_RUNTIME_ASSET_PROTOCOL_VERSION);
+    expect(worker.postMessage.mock.calls[0]?.[1]).toHaveLength(3);
     worker.emit("message", {
       data: response("run-success"),
     } as MessageEvent<unknown>);
@@ -107,6 +141,7 @@ describe("fresh Python runner client", () => {
     const onInputRequest = vi.fn();
     const payload = { ...workspacePayload(), stdin: null } as const;
     const execution = startPythonRun(payload, {
+      runtimeAssets: runtimeAssets(),
       createWorker: () => worker as unknown as Worker,
       runId: "run-interactive",
       onOutput,
@@ -175,10 +210,46 @@ describe("fresh Python runner client", () => {
     });
   });
 
+  it("keeps shared memory inside the opaque-worker boundary", async () => {
+    const worker = new FakeOpaqueWorker();
+    const execution = startPythonRun(
+      { ...workspacePayload(), stdin: null },
+      {
+        runtimeAssets: runtimeAssets(),
+        createWorker: () => worker as unknown as Worker,
+        runId: "run-opaque-input",
+      },
+    );
+    const request = worker.postMessage.mock.calls[0][0] as Record<string, unknown>;
+    expect(request).not.toHaveProperty("stdinControl");
+    expect(request).not.toHaveProperty("stdinData");
+
+    worker.emit("message", {
+      data: {
+        type: PYTHON_RUNNER_INPUT_REQUEST_TYPE,
+        protocolVersion: PYTHON_RUNNER_PROTOCOL_VERSION,
+        runId: "run-opaque-input",
+        requestId: "stdin-1",
+      },
+    } as MessageEvent<unknown>);
+    expect(execution.submitInput("Ada")).toBe(true);
+    expect(worker.submitPythonInput).toHaveBeenCalledWith("Ada");
+    expect(execution.submitInput("duplicate")).toBe(false);
+
+    worker.emit("message", {
+      data: {
+        ...response("run-opaque-input"),
+        workspaceDelta: { version: 1, changes: [] },
+      },
+    } as MessageEvent<unknown>);
+    await expect(execution.result).resolves.toMatchObject({ status: "ok" });
+  });
+
   it("accepts only a bounded protocol-v3 workspace delta tied to its baseline", async () => {
     const worker = new FakeWorker();
     const payload = workspacePayload();
     const execution = startPythonRun(payload, {
+      runtimeAssets: runtimeAssets(),
       createWorker: () => worker as unknown as Worker,
       runId: "run-workspace-delta",
     });
@@ -213,6 +284,7 @@ describe("fresh Python runner client", () => {
 
     const runtimeWorker = new FakeWorker();
     const runtime = startPythonRun(payload, {
+      runtimeAssets: runtimeAssets(),
       createWorker: () => runtimeWorker as unknown as Worker,
       runId: "run-runtime-delta",
     });
@@ -305,6 +377,7 @@ describe("fresh Python runner client", () => {
     ] as const) {
       const invalidWorker = new FakeWorker();
       const invalid = startPythonRun(payload, {
+        runtimeAssets: runtimeAssets(),
         createWorker: () => invalidWorker as unknown as Worker,
         runId,
       });
@@ -321,6 +394,7 @@ describe("fresh Python runner client", () => {
     const worker = new FakeWorker();
     const payload = workspacePayload();
     const execution = startPythonRun(payload, {
+      runtimeAssets: runtimeAssets(),
       createWorker: () => worker as unknown as Worker,
       runId: "run-path-order",
     });
@@ -363,7 +437,7 @@ describe("fresh Python runner client", () => {
     };
     const first = startPythonRun(
       { kind: "script", code: "print(1)" },
-      { createWorker, runId: "run-one" },
+      { createWorker, runId: "run-one", runtimeAssets: runtimeAssets() },
     );
     workers[0].emit("message", {
       data: response("run-one"),
@@ -372,7 +446,7 @@ describe("fresh Python runner client", () => {
 
     const second = startPythonRun(
       { kind: "script", code: "print(2)" },
-      { createWorker, runId: "run-two" },
+      { createWorker, runId: "run-two", runtimeAssets: runtimeAssets() },
     );
     workers[1].emit("message", {
       data: response("run-two"),
@@ -394,6 +468,7 @@ describe("fresh Python runner client", () => {
       const execution = startPythonRun(
         { kind: "script", code: output ? "print(42)" : "pass" },
         {
+          runtimeAssets: runtimeAssets(),
           createWorker: () => worker as unknown as Worker,
           runId,
         },
@@ -410,6 +485,7 @@ describe("fresh Python runner client", () => {
     const runtime = startPythonRun(
       { kind: "script", code: "broken" },
       {
+        runtimeAssets: runtimeAssets(),
         createWorker: () => runtimeWorker as unknown as Worker,
         runId: "run-runtime-error",
       },
@@ -426,6 +502,7 @@ describe("fresh Python runner client", () => {
     const failed = startPythonRun(
       { kind: "script", code: "print(1)" },
       {
+        runtimeAssets: runtimeAssets(),
         createWorker: () => failedWorker as unknown as Worker,
         runId: "run-worker-error",
       },
@@ -442,6 +519,7 @@ describe("fresh Python runner client", () => {
     const invalid = startPythonRun(
       { kind: "script", code: "print(1)" },
       {
+        runtimeAssets: runtimeAssets(),
         createWorker: () => protocolWorker as unknown as Worker,
         runId: "run-protocol-error",
       },
@@ -464,6 +542,7 @@ describe("fresh Python runner client", () => {
     const timed = startPythonRun(
       { kind: "script", code: "while True: pass" },
       {
+        runtimeAssets: runtimeAssets(),
         createWorker: () => timeoutWorker as unknown as Worker,
         runId: "run-timeout",
         timeoutMs: 25,
@@ -477,6 +556,7 @@ describe("fresh Python runner client", () => {
     const cancelled = startPythonRun(
       { kind: "script", code: "while True: pass" },
       {
+        runtimeAssets: runtimeAssets(),
         createWorker: () => cancelledWorker as unknown as Worker,
         runId: "run-cancelled",
       },

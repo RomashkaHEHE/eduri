@@ -15,6 +15,7 @@ import {
 import { BoardIndexedDbStore } from "../board/localStore";
 import { LocalBoardAssetRepository } from "../board/localBoardAssets";
 import { promoteSoloBoardToGuestRoom } from "../board/promoteSoloBoard";
+import { guestPromotionErrorMessage } from "../promotionFinalization";
 
 const SOLO_BOARD_IDENTITY = Object.freeze({
   userId: "guest-solo",
@@ -219,9 +220,7 @@ export function SoloBoardPage() {
       }
       console.error("Solo Board promotion failed", error);
       if (mountedRef.current) {
-        setPromotionError(
-          "Не удалось начать сеанс. Проверьте соединение и попробуйте ещё раз.",
-        );
+        setPromotionError(guestPromotionErrorMessage(error));
       }
     } finally {
       if (promotionAbortRef.current === abortController) {

@@ -1,126 +1,127 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import Editor, { type OnMount } from "@monaco-editor/react";
-import { LoaderCircle, Play } from "lucide-react";
-import { Button } from "./UI";
+import { Cloud, CloudOff, LoaderCircle } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  startPythonRun,
-  type PythonRunHandle,
-} from "../pythonRunner";
-import { useOptionalTheme } from "../theme";
+  LessonCodeProvider,
+  lessonCodeDatabaseName,
+  type LessonCodeStatus,
+} from "../code/lessonCodeProvider";
+import { guestDeviceId } from "../guestIdentity";
+import {
+  CodeWorkspace,
+  type CodeWorkspaceSessionHandle,
+} from "./CodeWorkspace";
 import "./CodeWorkspace.css";
 
 interface LessonCodeWorkspaceProps {
-  readonly code: string;
-  readonly onCodeChange: (value: string | undefined) => void;
+  readonly lessonId: string;
+  readonly userId: string;
+  readonly readOnly?: boolean;
 }
 
+const INITIAL_STATUS: LessonCodeStatus = {
+  connection: "loading-local",
+  terminalConnectionEpoch: 0,
+  durability: "ready",
+  documentReady: false,
+  pendingUpdates: 0,
+  participant: null,
+  error: null,
+};
+
+const TEXT_ONLY_BLOB_STORE = {
+  async put(): Promise<never> {
+    throw new Error("Binary files are not enabled in lesson Code workspaces");
+  },
+  async get(): Promise<null> {
+    return null;
+  },
+};
+
 export function LessonCodeWorkspace({
-  code,
-  onCodeChange,
+  lessonId,
+  userId,
+  readOnly = false,
 }: LessonCodeWorkspaceProps) {
-  const theme = useOptionalTheme()?.theme ?? "light";
-  const editorTheme = theme === "dark" ? "vs-dark" : "vs";
-  const [output, setOutput] = useState(
-    "Нажмите «Запустить», чтобы увидеть результат.",
-  );
-  const [running, setRunning] = useState(false);
-  const activeRun = useRef<PythonRunHandle | null>(null);
-  const monacoRef = useRef<Parameters<OnMount>[1] | null>(null);
-  const editorThemeRef = useRef(editorTheme);
-  const mounted = useRef(false);
-
-  editorThemeRef.current = editorTheme;
-
-  useLayoutEffect(() => {
-    monacoRef.current?.editor.setTheme(editorTheme);
-  }, [editorTheme]);
-
-  const handleEditorMount: OnMount = (_editor, monaco) => {
-    monacoRef.current = monaco;
-    monaco.editor.setTheme(editorThemeRef.current);
-  };
+  const deviceId = useMemo(guestDeviceId, []);
+  const [status, setStatus] = useState<LessonCodeStatus>(INITIAL_STATUS);
+  const [session, setSession] = useState<CodeWorkspaceSessionHandle | null>(null);
 
   useEffect(() => {
-    mounted.current = true;
-    return () => {
-      mounted.current = false;
-      monacoRef.current = null;
-      activeRun.current?.cancel();
-      activeRun.current = null;
+    let cancelled = false;
+    const databaseName = lessonCodeDatabaseName(userId, lessonId);
+    const provider = new LessonCodeProvider({
+      lessonId,
+      userId,
+      deviceId,
+      databaseName,
+    });
+    const handle: CodeWorkspaceSessionHandle = {
+      document: provider.document,
+      origin: provider.origin,
+      blobStore: TEXT_ONLY_BLOB_STORE,
+      flush: () => provider.flush(),
+      allowBinaryUploads: false,
+      awareness: {
+        setAwareness: (state) => provider.setAwareness(state),
+        subscribeAwareness: (listener) => provider.subscribeAwareness(listener),
+      },
+      terminal: {
+        dispatch: (action) => provider.dispatchTerminal(action),
+        subscribeState: (listener) => provider.subscribeTerminalState(listener),
+        subscribeEffects: (listener) => provider.subscribeTerminalEffects(listener),
+        subscribeAcks: (listener) => provider.subscribeTerminalAcks(listener),
+      },
+      waitUntilSynchronized: (timeoutMs) => (
+        provider.waitUntilSynchronized(timeoutMs)
+      ),
     };
-  }, []);
+    const unsubscribe = provider.subscribeStatus((next) => {
+      if (cancelled) return;
+      setStatus(next);
+      if (next.documentReady) setSession((current) => current ?? handle);
+    });
+    void provider.start().catch(() => undefined);
+    return () => {
+      cancelled = true;
+      unsubscribe();
+      setSession(null);
+      void provider.stop();
+    };
+  }, [deviceId, lessonId, userId]);
 
-  const runCode = async () => {
-    if (running || activeRun.current) return;
-    setRunning(true);
-    setOutput("Загружаем Python и выполняем программу…");
-    const execution = startPythonRun({ kind: "script", code });
-    activeRun.current = execution;
-    try {
-      const result = await execution.result;
-      if (mounted.current && result.status !== "cancelled") {
-        setOutput(result.output);
-      }
-    } finally {
-      if (activeRun.current === execution) activeRun.current = null;
-      if (mounted.current) setRunning(false);
-    }
-  };
+  if (!session) {
+    return (
+      <div className="code-workspace-gate" role="status">
+        {status.error && status.connection === "error"
+          ? status.error
+          : <><LoaderCircle className="spin" size={18} /> Загружаем код урока…</>}
+      </div>
+    );
+  }
 
+  const online = status.connection === "online";
   return (
-    <div className="lesson-code-workspace" data-code-theme={theme}>
-      <div className="code-toolbar">
-        <div
-          className="language-switch"
-          aria-label="Язык программирования: Python"
-        >
-          <button
-            type="button"
-            className="is-active"
-            disabled
-          >
-            Python
-          </button>
-        </div>
-        <Button
-          size="small"
-          icon={
-            running
-              ? <LoaderCircle className="spin" size={16} />
-              : <Play size={16} />
-          }
-          onClick={() => void runCode()}
-          disabled={running}
-        >
-          {running ? "Выполняется" : "Запустить"}
-        </Button>
+    <div className="lesson-code-workspace full-code-workspace">
+      <div className={`code-sync-status code-sync-status--${status.connection}`}>
+        {online ? <Cloud size={15} /> : <CloudOff size={15} />}
+        <span>
+          {online
+            ? status.pendingUpdates > 0
+              ? `Синхронизация: ${status.pendingUpdates}`
+              : "Код синхронизирован"
+            : status.connection === "offline"
+              ? "Офлайн — правки сохраняются на устройстве"
+              : "Подключаем совместный редактор…"}
+        </span>
+        {status.error && <span className="code-sync-status__error">{status.error}</span>}
       </div>
-      <div className="code-editor">
-        <Editor
-          onMount={handleEditorMount}
-          language="python"
-          value={code}
-          onChange={onCodeChange}
-          theme={editorTheme}
-          options={{
-            automaticLayout: true,
-            minimap: { enabled: false },
-            fontSize: 14,
-            lineHeight: 22,
-            tabSize: 2,
-            scrollBeyondLastLine: false,
-            padding: { top: 14 },
-            ariaLabel: "Совместный редактор кода",
-          }}
-        />
-      </div>
-      <div className="code-output">
-        <div className="code-output__head">
-          <strong>Результат</strong>
-          {output && <button onClick={() => setOutput("")}>Очистить</button>}
-        </div>
-        <pre>{output || "Результат выполнения появится здесь."}</pre>
-      </div>
+      <CodeWorkspace
+        session={session}
+        participantId={status.participant?.participantId ?? null}
+        readOnly={readOnly}
+        terminalReadOnly={readOnly || status.connection !== "online"}
+        terminalConnectionEpoch={status.terminalConnectionEpoch}
+      />
     </div>
   );
 }

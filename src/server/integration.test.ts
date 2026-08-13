@@ -1436,19 +1436,23 @@ describe("realtime lesson membership revocation", () => {
         resolve(false);
       }, 150);
     });
-    const replacementEvent = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("Replacement student did not receive the lesson event")), 2_000);
-      replacementStudentSocket!.once("lesson:code", () => {
-        clearTimeout(timer);
-        resolve();
-      });
+    const replacementEvent = new Promise<boolean>((resolve) => {
+      const received = () => resolve(true);
+      replacementStudentSocket!.once("lesson:code", received);
+      setTimeout(() => {
+        replacementStudentSocket!.off("lesson:code", received);
+        resolve(false);
+      }, 150);
     });
     const code = await tutorSocket.timeout(2_000).emitWithAck("lesson:code", {
       lessonId,
       code: { language: "python", value: "print('after reassignment')" },
-    }) as { ok: boolean };
-    expect(code.ok).toBe(true);
-    await replacementEvent;
+    }) as { ok: boolean; code?: string };
+    expect(code).toMatchObject({
+      ok: false,
+      code: "CODE_ENGINE_MISMATCH",
+    });
+    expect(await replacementEvent).toBe(false);
     expect(await staleEvent).toBe(false);
 
     const completedEvent = new Promise<{ lessonId: string; status: string }>((resolve, reject) => {

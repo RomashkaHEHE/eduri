@@ -6,7 +6,7 @@ import {
   type Socket as ClientSocket,
 } from "socket.io-client";
 import * as Y from "yjs";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   CODE_SYNC_MESSAGE_EVENT,
   CODE_SYNC_NAMESPACE,
@@ -15,6 +15,19 @@ import {
   CODE_SYNC_UPDATE_ENCODING,
   type CodeSyncServerMessage,
 } from "../../code/protocol/index.js";
+import {
+  SHARED_TERMINAL_ACK_EVENT,
+  SHARED_TERMINAL_ACTION_EVENT,
+  SHARED_TERMINAL_DELTA_EVENT,
+  SHARED_TERMINAL_EFFECT_EVENT,
+  SHARED_TERMINAL_PROTOCOL_VERSION,
+  SHARED_TERMINAL_STATE_EVENT,
+  applySharedTerminalDelta,
+  type SharedTerminalAck,
+  type SharedTerminalClientEffect,
+  type SharedTerminalDelta,
+  type SharedTerminalState,
+} from "../../code/terminal/index.js";
 import { codeWorkspaceText } from "../../code/core/index.js";
 import { migrate } from "../db.js";
 import {
@@ -23,7 +36,7 @@ import {
 } from "../guestRooms.js";
 import { CodeSyncRepository } from "./repository.js";
 import { installCodeSyncSchema } from "./schema.js";
-import { CodeSyncService } from "./service.js";
+import { CodeSyncService, CodeSyncServiceError } from "./service.js";
 import { attachCodeSyncNamespace } from "./transport.js";
 
 function nextMessage(
@@ -42,6 +55,37 @@ function nextMessage(
       resolve(message);
     };
     socket.on(CODE_SYNC_MESSAGE_EVENT, handler);
+  });
+}
+
+function encodedCaret(offset = 0): Uint8Array {
+  const document = new Y.Doc();
+  const text = document.getText("presence");
+  text.insert(0, "cursor");
+  const encoded = Y.encodeRelativePosition(
+    Y.createRelativePositionFromTypeIndex(text, offset),
+  );
+  document.destroy();
+  return encoded;
+}
+
+function nextSocketEvent<T>(
+  socket: ClientSocket,
+  event: string,
+  predicate: (value: T) => boolean = () => true,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      socket.off(event, handler);
+      reject(new Error(`Timed out waiting for ${event}`));
+    }, 2_000);
+    const handler = (value: T) => {
+      if (!predicate(value)) return;
+      clearTimeout(timer);
+      socket.off(event, handler);
+      resolve(value);
+    };
+    socket.on(event, handler);
   });
 }
 
@@ -357,22 +401,49 @@ describe("Code sync Socket.IO namespace", () => {
           && message.state !== null
         ),
       );
+      const caret = encodedCaret(4);
       left.emit(CODE_SYNC_MESSAGE_EVENT, {
         type: CODE_SYNC_TAGS.awareness,
         protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
-        state: { cursor: { entryId: "main-py", offset: 4 } },
+        state: {
+          target: { kind: "file", entryId: "main-py", field: "text" },
+          selection: { anchor: caret, head: caret },
+        },
       });
-      await expect(awarenessPromise).resolves.toMatchObject({
+      const awarenessMessage = await awarenessPromise;
+      expect(awarenessMessage).toMatchObject({
         participant: ready.participant,
-        state: { cursor: { entryId: "main-py", offset: 4 } },
+        state: {
+          target: { kind: "file", entryId: "main-py", field: "text" },
+          selection: {
+            anchor: expect.any(Uint8Array),
+            head: expect.any(Uint8Array),
+          },
+        },
       });
+      if (
+        awarenessMessage.type !== CODE_SYNC_TAGS.awareness
+        || awarenessMessage.state === null
+        || !awarenessMessage.state.selection
+      ) throw new Error("Expected awareness selection");
+      expect(Uint8Array.from(awarenessMessage.state.selection.anchor))
+        .toEqual(caret);
+      expect(Uint8Array.from(awarenessMessage.state.selection.head))
+        .toEqual(caret);
 
+      const limitedCaret = encodedCaret(5);
       const limited = await left.timeout(2_000).emitWithAck(
         CODE_SYNC_MESSAGE_EVENT,
         {
           type: CODE_SYNC_TAGS.awareness,
           protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
-          state: { cursor: { entryId: "main-py", offset: 5 } },
+          state: {
+            target: { kind: "file", entryId: "main-py", field: "text" },
+            selection: {
+              anchor: limitedCaret,
+              head: limitedCaret,
+            },
+          },
         },
       ) as CodeSyncServerMessage;
       expect(limited).toMatchObject({
@@ -384,6 +455,102 @@ describe("Code sync Socket.IO namespace", () => {
       leftDocument.destroy();
       rightDocument.destroy();
     }
+  });
+
+  it("orders one shared terminal state and routes execution to its selected host", async () => {
+    const host = await connect("terminal-host");
+    const observer = await connect("terminal-observer");
+    const hostInitialEvent = nextSocketEvent<SharedTerminalState>(
+      host,
+      SHARED_TERMINAL_STATE_EVENT,
+    );
+    host.emit(SHARED_TERMINAL_ACTION_EVENT, {
+      protocolVersion: SHARED_TERMINAL_PROTOCOL_VERSION,
+      action: { type: "sync", actionId: "host-initial-sync" },
+    });
+    const hostInitial = await hostInitialEvent;
+    const observerInitialEvent = nextSocketEvent<SharedTerminalState>(
+      observer,
+      SHARED_TERMINAL_STATE_EVENT,
+    );
+    observer.emit(SHARED_TERMINAL_ACTION_EVENT, {
+      protocolVersion: SHARED_TERMINAL_PROTOCOL_VERSION,
+      action: { type: "sync", actionId: "observer-initial-sync" },
+    });
+    const observerInitial = await observerInitialEvent;
+    const hostDelta = nextSocketEvent<SharedTerminalDelta>(
+      host,
+      SHARED_TERMINAL_DELTA_EVENT,
+    );
+    const observerDelta = nextSocketEvent<SharedTerminalDelta>(
+      observer,
+      SHARED_TERMINAL_DELTA_EVENT,
+    );
+    const hostAck = nextSocketEvent<SharedTerminalAck>(
+      host,
+      SHARED_TERMINAL_ACK_EVENT,
+      (ack) => ack.actionId === "terminal-submit-1",
+    );
+    const hostEffect = nextSocketEvent<SharedTerminalClientEffect>(
+      host,
+      SHARED_TERMINAL_EFFECT_EVENT,
+      (effect) => effect.type === "execute-line",
+    );
+
+    host.emit(SHARED_TERMINAL_ACTION_EVENT, {
+      protocolVersion: SHARED_TERMINAL_PROTOCOL_VERSION,
+      action: {
+        type: "submit-line",
+        actionId: "terminal-submit-1",
+        value: "pwd",
+      },
+    });
+
+    const [hostUpdate, observerUpdate, ack, effect] = await Promise.all([
+      hostDelta,
+      observerDelta,
+      hostAck,
+      hostEffect,
+    ]);
+    expect(observerUpdate).toEqual(hostUpdate);
+    const hostSnapshot = applySharedTerminalDelta(hostInitial, hostUpdate);
+    const observerSnapshot = applySharedTerminalDelta(observerInitial, observerUpdate);
+    expect(observerSnapshot).toEqual(hostSnapshot);
+    expect(ack).toMatchObject({ status: "applied", seq: hostSnapshot?.seq });
+    expect(hostSnapshot).toMatchObject({
+      mode: "busy",
+      transcript: expect.stringContaining("$ pwd\n"),
+      activeRun: { runId: expect.any(String) },
+    });
+    if (!hostSnapshot) throw new Error("Shared terminal snapshot is missing");
+    expect(effect).toMatchObject({
+      protocolVersion: SHARED_TERMINAL_PROTOCOL_VERSION,
+      type: "execute-line",
+      runId: hostSnapshot.activeRun?.runId,
+      line: "pwd",
+      pythonMode: false,
+    });
+    const runId = hostSnapshot.activeRun?.runId;
+    if (!runId) throw new Error("Shared terminal did not create a run");
+
+    const completed = nextSocketEvent<SharedTerminalDelta>(
+      observer,
+      SHARED_TERMINAL_DELTA_EVENT,
+    );
+    host.emit(SHARED_TERMINAL_ACTION_EVENT, {
+      protocolVersion: SHARED_TERMINAL_PROTOCOL_VERSION,
+      action: {
+        type: "host-ready",
+        actionId: "terminal-ready-1",
+        runId,
+        nextMode: "shell",
+      },
+    });
+    const completedDelta = await completed;
+    expect(applySharedTerminalDelta(observerSnapshot!, completedDelta)).toMatchObject({
+      mode: "shell",
+      activeRun: null,
+    });
   });
 
   it("streams a cold sync as ordered bounded parts", async () => {
@@ -520,7 +687,13 @@ describe("Code sync Socket.IO namespace", () => {
     sender.emit(CODE_SYNC_MESSAGE_EVENT, {
       type: CODE_SYNC_TAGS.awareness,
       protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
-      state: { cursor: { entryId: "main-py", offset: 1 } },
+      state: {
+        target: { kind: "file", entryId: "main-py", field: "text" },
+        selection: {
+          anchor: encodedCaret(1),
+          head: encodedCaret(1),
+        },
+      },
     });
     await firstAwareness;
     sender.close();
@@ -531,7 +704,13 @@ describe("Code sync Socket.IO namespace", () => {
       {
         type: CODE_SYNC_TAGS.awareness,
         protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
-        state: { cursor: { entryId: "main-py", offset: 2 } },
+        state: {
+          target: { kind: "file", entryId: "main-py", field: "text" },
+          selection: {
+            anchor: encodedCaret(2),
+            head: encodedCaret(2),
+          },
+        },
       },
     ) as CodeSyncServerMessage;
     expect(awarenessBlocked).toMatchObject({
@@ -951,5 +1130,204 @@ describe("Code sync Socket.IO namespace", () => {
     await expect(disconnected).resolves.toBe("io server disconnect");
     expect(db.prepare("SELECT count(*) AS count FROM code_workspaces").get())
       .toEqual({ count: 0 });
+  });
+
+  it("does not disclose terminal history when terminal reauthorization fails", async () => {
+    const socket = await connect("expiring-terminal-device");
+    const leakedStates: SharedTerminalState[] = [];
+    socket.on(SHARED_TERMINAL_STATE_EVENT, (state: SharedTerminalState) => {
+      leakedStates.push(state);
+    });
+    now += GUEST_ROOM_IDLE_TTL_MS;
+    const rejected = nextSocketEvent<SharedTerminalAck>(
+      socket,
+      SHARED_TERMINAL_ACK_EVENT,
+      (ack) => ack.actionId === "expired-terminal-action",
+    );
+    const disconnected = new Promise<string>((resolve) => {
+      socket.once("disconnect", resolve);
+    });
+    socket.emit(SHARED_TERMINAL_ACTION_EVENT, {
+      protocolVersion: SHARED_TERMINAL_PROTOCOL_VERSION,
+      action: {
+        type: "submit-line",
+        actionId: "expired-terminal-action",
+        value: "pwd",
+      },
+    });
+
+    await expect(rejected).resolves.toMatchObject({
+      status: "rejected",
+      error: "unauthorized",
+    });
+    await expect(disconnected).resolves.toBe("io server disconnect");
+    expect(leakedStates).toEqual([]);
+  });
+
+  it("reauthorizes a silent recipient before sending a remote Yjs update", async () => {
+    const sender = await connect("outbound-update-sender");
+    const recipient = await connect("outbound-update-recipient");
+    const originalReauthorize = service.reauthorize.bind(service);
+    const reauthorize = vi.spyOn(service, "reauthorize").mockImplementation((session) => {
+      if (session.deviceId === "outbound-update-recipient") {
+        throw new CodeSyncServiceError("EXPIRED", "Guest room has expired");
+      }
+      originalReauthorize(session);
+    });
+    const leaked: CodeSyncServerMessage[] = [];
+    recipient.on(CODE_SYNC_MESSAGE_EVENT, (message: CodeSyncServerMessage) => {
+      if (message.type === CODE_SYNC_TAGS.remoteUpdate) leaked.push(message);
+    });
+    const control = nextMessage(
+      recipient,
+      (message) => message.type === CODE_SYNC_TAGS.control,
+    );
+    const disconnected = new Promise<string>((resolve) => {
+      recipient.once("disconnect", resolve);
+    });
+    const document = new Y.Doc();
+    try {
+      const initial = await sender.timeout(2_000).emitWithAck(
+        CODE_SYNC_MESSAGE_EVENT,
+        {
+          type: CODE_SYNC_TAGS.syncStep1,
+          protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+          requestId: "outbound-update-sync",
+          stateVector: Y.encodeStateVector(document),
+        },
+      ) as CodeSyncServerMessage;
+      if (initial.type !== CODE_SYNC_TAGS.syncStep2) {
+        throw new Error("Expected initial Code sync state");
+      }
+      Y.applyUpdate(document, initial.update);
+      const before = Y.encodeStateVector(document);
+      codeWorkspaceText(document, "main-py")?.insert(0, "# outbound auth\n");
+      const update = Y.encodeStateAsUpdate(document, before);
+
+      const ack = await sender.timeout(2_000).emitWithAck(
+        CODE_SYNC_MESSAGE_EVENT,
+        {
+          type: CODE_SYNC_TAGS.update,
+          protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+          requestId: "outbound-update-request",
+          updateId: "outbound-update-id",
+          updateEncoding: CODE_SYNC_UPDATE_ENCODING,
+          update,
+        },
+      ) as CodeSyncServerMessage;
+
+      expect(ack).toMatchObject({
+        type: CODE_SYNC_TAGS.updateAck,
+        status: "committed",
+      });
+      await expect(control).resolves.toMatchObject({
+        type: CODE_SYNC_TAGS.control,
+        code: "expired",
+        terminal: true,
+      });
+      await expect(disconnected).resolves.toBe("io server disconnect");
+      expect(leaked).toEqual([]);
+    } finally {
+      document.destroy();
+      reauthorize.mockRestore();
+    }
+  });
+
+  it("reauthorizes a silent recipient before sending awareness", async () => {
+    const sender = await connect("outbound-awareness-sender");
+    const recipient = await connect("outbound-awareness-recipient");
+    const originalReauthorize = service.reauthorize.bind(service);
+    const reauthorize = vi.spyOn(service, "reauthorize").mockImplementation((session) => {
+      if (session.deviceId === "outbound-awareness-recipient") {
+        throw new CodeSyncServiceError("EXPIRED", "Guest room has expired");
+      }
+      originalReauthorize(session);
+    });
+    const leaked: CodeSyncServerMessage[] = [];
+    recipient.on(CODE_SYNC_MESSAGE_EVENT, (message: CodeSyncServerMessage) => {
+      if (message.type === CODE_SYNC_TAGS.awareness) leaked.push(message);
+    });
+    const control = nextMessage(
+      recipient,
+      (message) => message.type === CODE_SYNC_TAGS.control,
+    );
+    const disconnected = new Promise<string>((resolve) => {
+      recipient.once("disconnect", resolve);
+    });
+
+    sender.emit(CODE_SYNC_MESSAGE_EVENT, {
+      type: CODE_SYNC_TAGS.awareness,
+      protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+      state: {
+        target: { kind: "file", entryId: "main-py", field: "text" },
+        selection: {
+          anchor: encodedCaret(2),
+          head: encodedCaret(2),
+        },
+      },
+    });
+
+    await expect(control).resolves.toMatchObject({
+      type: CODE_SYNC_TAGS.control,
+      code: "expired",
+      terminal: true,
+    });
+    await expect(disconnected).resolves.toBe("io server disconnect");
+    expect(leaked).toEqual([]);
+    reauthorize.mockRestore();
+  });
+
+  it("reauthorizes a silent recipient before shared terminal broadcasts", async () => {
+    const recipient = await connect("outbound-terminal-recipient");
+    // Keep the revoked socket first in the room iteration order. Disconnecting
+    // it during a broadcast must not put a lease-release delta ahead of the
+    // action delta that caused the authorization check.
+    const sender = await connect("outbound-terminal-sender");
+    const originalReauthorize = service.reauthorize.bind(service);
+    const reauthorize = vi.spyOn(service, "reauthorize").mockImplementation((session) => {
+      if (session.deviceId === "outbound-terminal-recipient") {
+        throw new CodeSyncServiceError("EXPIRED", "Guest room has expired");
+      }
+      originalReauthorize(session);
+    });
+    const leaked: unknown[] = [];
+    for (const event of [
+      SHARED_TERMINAL_STATE_EVENT,
+      SHARED_TERMINAL_DELTA_EVENT,
+      SHARED_TERMINAL_EFFECT_EVENT,
+    ]) {
+      recipient.on(event, (payload: unknown) => leaked.push({ event, payload }));
+    }
+    const control = nextMessage(
+      recipient,
+      (message) => message.type === CODE_SYNC_TAGS.control,
+    );
+    const disconnected = new Promise<string>((resolve) => {
+      recipient.once("disconnect", resolve);
+    });
+    const senderAck = nextSocketEvent<SharedTerminalAck>(
+      sender,
+      SHARED_TERMINAL_ACK_EVENT,
+      (ack) => ack.actionId === "outbound-terminal-submit",
+    );
+
+    sender.emit(SHARED_TERMINAL_ACTION_EVENT, {
+      protocolVersion: SHARED_TERMINAL_PROTOCOL_VERSION,
+      action: {
+        type: "submit-line",
+        actionId: "outbound-terminal-submit",
+        value: "pwd",
+      },
+    });
+
+    await expect(senderAck).resolves.toMatchObject({ status: "applied" });
+    await expect(control).resolves.toMatchObject({
+      type: CODE_SYNC_TAGS.control,
+      code: "expired",
+      terminal: true,
+    });
+    await expect(disconnected).resolves.toBe("io server disconnect");
+    expect(leaked).toEqual([]);
+    reauthorize.mockRestore();
   });
 });

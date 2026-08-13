@@ -10,6 +10,14 @@ import {
   CODE_SYNC_UPDATE_ENCODING,
 } from "../../code/protocol/index.js";
 import {
+  SHARED_TERMINAL_ACK_EVENT,
+  SHARED_TERMINAL_ACTION_EVENT,
+  SHARED_TERMINAL_DELTA_EVENT,
+  SHARED_TERMINAL_EFFECT_EVENT,
+  SHARED_TERMINAL_PROTOCOL_VERSION,
+  SHARED_TERMINAL_STATE_EVENT,
+} from "../../code/terminal/index.js";
+import {
   codeWorkspaceText,
   initializeCodeWorkspace,
 } from "../../code/core/index.js";
@@ -66,6 +74,12 @@ class FakeSocket implements CodeSyncSocket {
       .filter((entry) => entry.event === CODE_SYNC_MESSAGE_EVENT)
       .map((entry) => entry.args[0] as Record<string, unknown>)
       .filter((message) => type === undefined || message.type === type);
+  }
+
+  events(event: string): unknown[][] {
+    return this.sent
+      .filter((entry) => entry.event === event)
+      .map((entry) => entry.args);
   }
 }
 
@@ -187,6 +201,10 @@ describe("GuestCodeProvider", () => {
         });
       });
       await eventually(() => expect(provider.getStatus().connection).toBe("online"));
+      const mainText = codeWorkspaceText(provider.document, "main-py")!;
+      const remoteCaret = Y.encodeRelativePosition(
+        Y.createRelativePositionFromTypeIndex(mainText, 2),
+      );
 
       let peers: readonly GuestCodePeerAwareness[] = [];
       const unsubscribe = provider.subscribeAwareness((next) => {
@@ -201,43 +219,24 @@ describe("GuestCodeProvider", () => {
           color: "#aa3355",
         },
         state: {
-          cursor: { entryId: "main-py", offset: 2 },
-          terminal: {
-            kind: "host",
-            runId: "remote-run",
-            requestId: "remote-request",
-          },
+          target: { kind: "file", entryId: "main-py", field: "text" },
+          selection: { anchor: remoteCaret, head: remoteCaret },
         },
       });
       expect(peers).toEqual([expect.objectContaining({
         participant: expect.objectContaining({ participantId: "server-peer" }),
         state: expect.objectContaining({
-          terminal: {
-            kind: "host",
-            runId: "remote-run",
-            requestId: "remote-request",
-          },
+          target: { kind: "file", entryId: "main-py", field: "text" },
+          selection: { anchor: remoteCaret, head: remoteCaret },
         }),
       })]);
 
       provider.setAwareness({
-        terminal: {
-          kind: "input",
-          runId: "remote-run",
-          requestId: "remote-request",
-          submissionId: "submission-1",
-          value: "Ada",
-        },
+        target: { kind: "terminal", field: "input" },
       });
       await eventually(() => {
         expect(socket.messages(CODE_SYNC_TAGS.awareness).at(-1)?.state).toEqual({
-          terminal: {
-            kind: "input",
-            runId: "remote-run",
-            requestId: "remote-request",
-            submissionId: "submission-1",
-            value: "Ada",
-          },
+          target: { kind: "terminal", field: "input" },
         });
       });
       unsubscribe();
@@ -302,6 +301,183 @@ describe("GuestCodeProvider", () => {
         .toBe(originalUpdateId);
     } finally {
       await second.provider.clearLocalData();
+    }
+  });
+
+  it("applies ordered terminal deltas, forwards ACK/effects, and recovers a gap", async () => {
+    const databaseName = `guest-code-terminal-${crypto.randomUUID()}`;
+    const { provider, socket } = createHarness(databaseName);
+    try {
+      await provider.start();
+      ready(socket);
+      respondToSync(socket, syncParts());
+      await eventually(() => expect(provider.getStatus().connection).toBe("online"));
+
+      const states: unknown[] = [];
+      const effects: unknown[] = [];
+      const acks: unknown[] = [];
+      const unsubscribeState = provider.subscribeTerminalState((state) => {
+        states.push(state);
+      });
+      const unsubscribeEffects = provider.subscribeTerminalEffects((effect) => {
+        effects.push(effect);
+      });
+      const unsubscribeAcks = provider.subscribeTerminalAcks((ack) => {
+        acks.push(ack);
+      });
+
+      provider.dispatchTerminal({
+        type: "submit-line",
+        actionId: "terminal-action-1",
+        value: "py main.py",
+      });
+      expect(socket.events(SHARED_TERMINAL_ACTION_EVENT).at(-1)?.[0]).toEqual({
+        protocolVersion: SHARED_TERMINAL_PROTOCOL_VERSION,
+        action: {
+          type: "submit-line",
+          actionId: "terminal-action-1",
+          value: "py main.py",
+        },
+      });
+
+      const state = {
+        protocolVersion: SHARED_TERMINAL_PROTOCOL_VERSION,
+        generation: 1,
+        seq: 4,
+        mode: "busy",
+        prompt: "/workspace $ ",
+        transcript: "/workspace $ py main.py\n",
+        input: { value: "", cursor: 0, owner: null },
+        host: participant,
+        activeRun: {
+          runId: "run-1",
+          entryId: "main-py",
+          entrypoint: "main.py",
+          testId: null,
+        },
+        inputRequestId: null,
+        lastTest: null,
+      } as const;
+      socket.serverEmit(SHARED_TERMINAL_STATE_EVENT, state);
+      expect(states).toEqual([state]);
+
+      const delta = {
+        protocolVersion: SHARED_TERMINAL_PROTOCOL_VERSION,
+        generation: 1,
+        baseSeq: 4,
+        seq: 5,
+        operations: [{
+          type: "transcript-append",
+          trimStart: 0,
+          value: "ready\n",
+        }],
+      } as const;
+      socket.serverEmit(SHARED_TERMINAL_DELTA_EVENT, delta);
+      expect(states.at(-1)).toMatchObject({
+        seq: 5,
+        transcript: "/workspace $ py main.py\nready\n",
+      });
+
+      const ack = {
+        protocolVersion: SHARED_TERMINAL_PROTOCOL_VERSION,
+        actionId: "terminal-action-1",
+        generation: 1,
+        seq: 5,
+        status: "applied",
+        error: null,
+      } as const;
+      socket.serverEmit(SHARED_TERMINAL_ACK_EVENT, ack);
+      expect(acks).toEqual([ack]);
+
+      const effect = {
+        protocolVersion: SHARED_TERMINAL_PROTOCOL_VERSION,
+        type: "start-run",
+        runId: "run-1",
+        entryId: "main-py",
+        entrypoint: "main.py",
+        testId: null,
+      } as const;
+      socket.serverEmit(SHARED_TERMINAL_EFFECT_EVENT, effect);
+      expect(effects).toEqual([effect]);
+
+      socket.serverEmit(SHARED_TERMINAL_DELTA_EVENT, {
+        ...delta,
+        baseSeq: 7,
+        seq: 8,
+      });
+      const recovery = socket.events(SHARED_TERMINAL_ACTION_EVENT)
+        .map(([envelope]) => envelope as {
+          action?: { type?: string };
+        })
+        .filter((envelope) => envelope.action?.type === "sync");
+      expect(recovery).toHaveLength(1);
+      socket.serverEmit(SHARED_TERMINAL_DELTA_EVENT, {
+        ...delta,
+        baseSeq: 7,
+        seq: 8,
+      });
+      expect(socket.events(SHARED_TERMINAL_ACTION_EVENT)
+        .map(([envelope]) => envelope as { action?: { type?: string } })
+        .filter((envelope) => envelope.action?.type === "sync"))
+        .toHaveLength(1);
+
+      socket.serverEmit(SHARED_TERMINAL_STATE_EVENT, {
+        ...state,
+        protocolVersion: 999,
+      });
+      expect(states).toHaveLength(2);
+      expect(states.at(-1)).toMatchObject({ seq: 5 });
+      unsubscribeState();
+      unsubscribeEffects();
+      unsubscribeAcks();
+    } finally {
+      await provider.clearLocalData();
+    }
+  });
+
+  it("accepts a fresh lower terminal generation after the room restarts", async () => {
+    const databaseName = `guest-code-terminal-reconnect-${crypto.randomUUID()}`;
+    const { provider, socket } = createHarness(databaseName);
+    try {
+      await provider.start();
+      ready(socket);
+      respondToSync(socket, syncParts());
+      await eventually(() => expect(provider.getStatus().connection).toBe("online"));
+      const states: Array<{ generation: number; seq: number }> = [];
+      const unsubscribe = provider.subscribeTerminalState((state) => states.push(state));
+      const terminalState = (generation: number, seq: number) => ({
+        protocolVersion: SHARED_TERMINAL_PROTOCOL_VERSION,
+        generation,
+        seq,
+        mode: "shell" as const,
+        prompt: "$ ",
+        transcript: "",
+        input: { value: "", cursor: 0, owner: null },
+        host: null,
+        activeRun: null,
+        inputRequestId: null,
+        lastTest: null,
+      });
+      socket.serverEmit(SHARED_TERMINAL_STATE_EVENT, terminalState(2, 9));
+      socket.disconnect();
+      socket.connect();
+      socket.serverEmit(SHARED_TERMINAL_STATE_EVENT, terminalState(1, 0));
+      socket.serverEmit(SHARED_TERMINAL_DELTA_EVENT, {
+        protocolVersion: SHARED_TERMINAL_PROTOCOL_VERSION,
+        generation: 1,
+        baseSeq: 0,
+        seq: 1,
+        operations: [{
+          type: "transcript-append",
+          trimStart: 0,
+          value: "ready\n",
+        }],
+      });
+      expect(states.map(({ generation, seq }) => [generation, seq]))
+        .toEqual([[2, 9], [1, 0], [1, 1]]);
+      unsubscribe();
+    } finally {
+      await provider.clearLocalData();
     }
   });
 });

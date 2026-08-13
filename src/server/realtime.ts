@@ -444,13 +444,11 @@ export function attachRealtime(
           retryAfterMs: rate.retryAfterMs,
         });
       }
-      const now = nowIso();
-      context.db.prepare(`
-        UPDATE lessons SET code_state = ?, code_revision = code_revision + 1, updated_at = ? WHERE id = ?
-      `).run(JSON.stringify(code), now, lessonId);
-      const revision = (context.db.prepare("SELECT code_revision FROM lessons WHERE id = ?").get(lessonId) as { code_revision: number }).code_revision;
-      socket.to(`lesson:${lessonId}`).emit("lesson:code", { lessonId, code, revision, updatedBy: auth.user.id });
-      safeAck(ack, { ok: true, revision });
+      return safeAck(ack, {
+        ok: false,
+        code: "CODE_ENGINE_MISMATCH",
+        error: "Legacy whole-state Code writes are disabled; Eduri uses the collaborative Code workspace",
+      });
     });
 
     socket.on("lesson:material", (payload: unknown, ack?: Ack) => {

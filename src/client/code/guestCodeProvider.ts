@@ -22,6 +22,26 @@ import {
   CodeSyncIndexedDbStore,
   type PendingCodeSyncUpdate,
 } from "./codeSyncStore.js";
+import {
+  SHARED_TERMINAL_ACTION_EVENT,
+  SHARED_TERMINAL_ACK_EVENT,
+  SHARED_TERMINAL_DELTA_EVENT,
+  SHARED_TERMINAL_EFFECT_EVENT,
+  SHARED_TERMINAL_PROTOCOL_VERSION,
+  SHARED_TERMINAL_STATE_EVENT,
+  applySharedTerminalDelta,
+  parseSharedTerminalAck,
+  parseSharedTerminalClientEffect,
+  parseSharedTerminalState,
+  type SharedTerminalAck,
+  type SharedTerminalAction,
+  type SharedTerminalClientEffect,
+  type SharedTerminalState,
+} from "../../code/terminal/index.js";
+import {
+  createTerminalActionOutbox,
+  type TerminalActionOutbox,
+} from "./terminalActionOutbox.js";
 
 export type GuestCodeConnection =
   | "loading-local"
@@ -36,6 +56,8 @@ export type GuestCodeDurability = "ready" | "writing" | "at-risk";
 
 export interface GuestCodeStatus {
   readonly connection: GuestCodeConnection;
+  /** Changes on every socket connect/disconnect boundary. */
+  readonly terminalConnectionEpoch: number;
   readonly durability: GuestCodeDurability;
   readonly documentReady: boolean;
   readonly pendingUpdates: number;
@@ -287,6 +309,7 @@ export class GuestCodeProvider {
   readonly store: CodeSyncIndexedDbStore;
 
   private readonly socket: CodeSyncSocket;
+  private readonly terminalActionOutbox: TerminalActionOutbox;
   private readonly createId: () => string;
   private readonly ackTimeoutMs: number;
   private readonly awarenessThrottleMs: number;
@@ -295,6 +318,15 @@ export class GuestCodeProvider {
   private readonly statusListeners = new Set<(status: GuestCodeStatus) => void>();
   private readonly awarenessListeners = new Set<
     (peers: readonly GuestCodePeerAwareness[]) => void
+  >();
+  private readonly terminalStateListeners = new Set<
+    (state: SharedTerminalState) => void
+  >();
+  private readonly terminalEffectListeners = new Set<
+    (effect: SharedTerminalClientEffect) => void
+  >();
+  private readonly terminalAckListeners = new Set<
+    (ack: SharedTerminalAck) => void
   >();
   private readonly pending = new Map<string, PendingCodeSyncUpdate>();
   private readonly peers = new Map<string, GuestCodePeerAwareness>();
@@ -305,6 +337,7 @@ export class GuestCodeProvider {
   }>();
   private status: GuestCodeStatus = {
     connection: "loading-local",
+    terminalConnectionEpoch: 0,
     durability: "ready",
     documentReady: false,
     pendingUpdates: 0,
@@ -317,6 +350,9 @@ export class GuestCodeProvider {
   private ackTimer: ReturnType<typeof setTimeout> | null = null;
   private awarenessTimer: ReturnType<typeof setTimeout> | null = null;
   private localAwareness: CodeAwarenessState | null = null;
+  private terminalState: SharedTerminalState | null = null;
+  private terminalSyncPending = false;
+  private terminalInitialSnapshotPending = false;
   private socketReady = false;
   private syncComplete = false;
   private queuedLocalWrites = 0;
@@ -360,6 +396,14 @@ export class GuestCodeProvider {
       CODE_SYNC_NAMESPACE,
       { shareId: options.shareId, deviceId: options.deviceId },
     );
+    this.terminalActionOutbox = createTerminalActionOutbox({
+      connected: () => this.socket.connected && !this.stopped,
+      send: (action) => this.socket.emit(SHARED_TERMINAL_ACTION_EVENT, {
+        protocolVersion: SHARED_TERMINAL_PROTOCOL_VERSION,
+        action,
+      }),
+      onDiscard: (action) => this.handleDiscardedTerminalAction(action),
+    });
   }
 
   start(): Promise<void> {
@@ -379,15 +423,7 @@ export class GuestCodeProvider {
       ))
       .map((peer) => ({
         participant: { ...peer.participant },
-        state: {
-          ...(peer.state.cursor ? { cursor: { ...peer.state.cursor } } : {}),
-          ...(peer.state.selection
-            ? { selection: { ...peer.state.selection } }
-            : {}),
-          ...(peer.state.terminal
-            ? { terminal: { ...peer.state.terminal } }
-            : {}),
-        },
+        state: parseCodeAwarenessState(peer.state),
       }));
   }
 
@@ -403,6 +439,33 @@ export class GuestCodeProvider {
     this.awarenessListeners.add(listener);
     listener(this.getPeers());
     return () => this.awarenessListeners.delete(listener);
+  }
+
+  subscribeTerminalState(
+    listener: (state: SharedTerminalState) => void,
+  ): () => void {
+    this.terminalStateListeners.add(listener);
+    if (this.terminalState) listener(this.terminalState);
+    return () => this.terminalStateListeners.delete(listener);
+  }
+
+  subscribeTerminalEffects(
+    listener: (effect: SharedTerminalClientEffect) => void,
+  ): () => void {
+    this.terminalEffectListeners.add(listener);
+    return () => this.terminalEffectListeners.delete(listener);
+  }
+
+  subscribeTerminalAcks(
+    listener: (ack: SharedTerminalAck) => void,
+  ): () => void {
+    this.terminalAckListeners.add(listener);
+    return () => this.terminalAckListeners.delete(listener);
+  }
+
+  dispatchTerminal(action: SharedTerminalAction): void {
+    if (this.stopped) return;
+    this.terminalActionOutbox.dispatch(action);
   }
 
   setAwareness(state: CodeAwarenessState | null): void {
@@ -457,6 +520,7 @@ export class GuestCodeProvider {
       } satisfies CodeSyncClientMessage);
     }
     this.removeSocketListeners();
+    this.terminalActionOutbox.clear();
     this.socket.disconnect();
     await this.store.close();
     this.document.destroy();
@@ -470,6 +534,7 @@ export class GuestCodeProvider {
       if (this.awarenessTimer !== null) clearTimeout(this.awarenessTimer);
       this.awarenessTimer = null;
       this.removeSocketListeners();
+      this.terminalActionOutbox.clear();
       this.socket.disconnect();
     }
     await this.store.clearData();
@@ -515,6 +580,10 @@ export class GuestCodeProvider {
     this.socket.on("disconnect", this.handleDisconnect);
     this.socket.on("connect_error", this.handleConnectError);
     this.socket.on(CODE_SYNC_MESSAGE_EVENT, this.handleMessage);
+    this.socket.on(SHARED_TERMINAL_STATE_EVENT, this.handleTerminalState);
+    this.socket.on(SHARED_TERMINAL_DELTA_EVENT, this.handleTerminalDelta);
+    this.socket.on(SHARED_TERMINAL_ACK_EVENT, this.handleTerminalAck);
+    this.socket.on(SHARED_TERMINAL_EFFECT_EVENT, this.handleTerminalEffect);
   }
 
   private removeSocketListeners(): void {
@@ -522,19 +591,115 @@ export class GuestCodeProvider {
     this.socket.off("disconnect", this.handleDisconnect);
     this.socket.off("connect_error", this.handleConnectError);
     this.socket.off(CODE_SYNC_MESSAGE_EVENT, this.handleMessage);
+    this.socket.off(SHARED_TERMINAL_STATE_EVENT, this.handleTerminalState);
+    this.socket.off(SHARED_TERMINAL_DELTA_EVENT, this.handleTerminalDelta);
+    this.socket.off(SHARED_TERMINAL_ACK_EVENT, this.handleTerminalAck);
+    this.socket.off(SHARED_TERMINAL_EFFECT_EVENT, this.handleTerminalEffect);
   }
 
+  private readonly handleTerminalState = (raw: unknown): void => {
+    const state = parseSharedTerminalState(raw);
+    if (!state || this.stopped) return;
+    const current = this.terminalState;
+    if (
+      !this.terminalInitialSnapshotPending
+      && current
+      && (
+        state.generation < current.generation
+        || (
+          state.generation === current.generation
+          && state.seq < current.seq
+        )
+      )
+    ) return;
+    this.terminalInitialSnapshotPending = false;
+    this.terminalSyncPending = false;
+    this.terminalState = state;
+    for (const listener of this.terminalStateListeners) listener(state);
+  };
+
+  private readonly handleTerminalDelta = (raw: unknown): void => {
+    if (this.stopped) return;
+    const current = this.terminalState;
+    const next = current ? applySharedTerminalDelta(current, raw) : null;
+    if (!next) {
+      if (this.terminalSyncPending) return;
+      this.terminalSyncPending = true;
+      this.dispatchTerminal({
+        type: "sync",
+        actionId: this.createId(),
+      });
+      return;
+    }
+    this.terminalState = next;
+    for (const listener of this.terminalStateListeners) listener(next);
+  };
+
+  private readonly handleTerminalAck = (raw: unknown): void => {
+    const ack = parseSharedTerminalAck(raw);
+    if (!ack || this.stopped) return;
+    this.terminalActionOutbox.acknowledge(ack.actionId);
+    for (const listener of this.terminalAckListeners) listener(ack);
+  };
+
+  private readonly handleDiscardedTerminalAction = (
+    action: SharedTerminalAction,
+  ): void => {
+    if (this.stopped) return;
+    if (action.type === "sync") {
+      this.terminalSyncPending = false;
+      this.socket.disconnect();
+      this.socket.connect();
+      return;
+    }
+    const current = this.terminalState;
+    const ack: SharedTerminalAck = {
+      protocolVersion: SHARED_TERMINAL_PROTOCOL_VERSION,
+      actionId: action.actionId,
+      generation: current?.generation ?? 1,
+      seq: current?.seq ?? 0,
+      status: "rejected",
+      error: "rate-limited",
+    };
+    for (const listener of this.terminalAckListeners) listener(ack);
+    if (!this.socket.connected || this.terminalSyncPending) return;
+    this.terminalSyncPending = true;
+    this.terminalActionOutbox.dispatch({
+      type: "sync",
+      actionId: this.createId(),
+    });
+  };
+
+  private readonly handleTerminalEffect = (raw: unknown): void => {
+    const effect = parseSharedTerminalClientEffect(raw);
+    if (!effect || this.stopped) return;
+    for (const listener of this.terminalEffectListeners) listener(effect);
+  };
+
   private readonly handleConnect = (): void => {
-    if (!this.stopped) this.patchStatus({ connection: "syncing", error: null });
+    this.terminalSyncPending = false;
+    this.terminalInitialSnapshotPending = true;
+    if (!this.stopped) this.patchStatus({
+      connection: "syncing",
+      terminalConnectionEpoch: this.status.terminalConnectionEpoch + 1,
+      error: null,
+    });
   };
 
   private readonly handleDisconnect = (): void => {
+    if (this.stopped) return;
+    const terminalConnectionEpoch = this.status.terminalConnectionEpoch + 1;
     if (
-      this.stopped
-      || this.status.connection === "expired"
+      this.status.connection === "expired"
       || this.status.connection === "error"
-    ) return;
+    ) {
+      this.patchStatus({ terminalConnectionEpoch });
+      return;
+    }
     this.socketReady = false;
+    this.terminalActionOutbox.clear();
+    this.terminalSyncPending = false;
+    this.terminalInitialSnapshotPending = true;
     this.syncComplete = false;
     this.syncRequestId = null;
     this.nextSyncPart = 0;
@@ -544,10 +709,13 @@ export class GuestCodeProvider {
       this.peers.clear();
       this.emitAwareness();
     }
-    this.patchStatus({ connection: "offline" });
+    this.patchStatus({ connection: "offline", terminalConnectionEpoch });
   };
 
   private readonly handleConnectError = (error: unknown): void => {
+    if (!this.stopped) this.patchStatus({
+      terminalConnectionEpoch: this.status.terminalConnectionEpoch + 1,
+    });
     const data = object(error)?.data;
     const control = parseServerMessage(data);
     if (control?.type === CODE_SYNC_TAGS.control) {

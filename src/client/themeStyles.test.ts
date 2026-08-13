@@ -49,6 +49,11 @@ function contrast(foreground: string, background: string) {
   return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
 }
 
+function channelSpread(value: string) {
+  const channels = hexChannels(value).map((channel) => channel * 255);
+  return Math.max(...channels) - Math.min(...channels);
+}
+
 function token(tokens: Map<string, string>, name: string) {
   const value = tokens.get(name);
   if (!value) throw new Error(`Missing CSS token ${name}`);
@@ -56,6 +61,64 @@ function token(tokens: Map<string, string>, name: string) {
 }
 
 describe("site theme CSS contract", () => {
+  it("keeps large dark surfaces on a neutral graphite scale", () => {
+    const dark = declarationsFrom(siteStyles, ':root[data-theme="dark"] {');
+    const call = declarationsFrom(
+      siteStyles,
+      '[data-theme="dark"] .guest-room__call,',
+    );
+    const board = declarationsFrom(siteStyles, ".board-v2--dark {");
+    const code = declarationsFrom(
+      codeStyles,
+      '.full-code-workspace[data-code-theme="dark"],',
+    );
+    const surfaces = [
+      [dark, [
+        "--background",
+        "--surface",
+        "--control-bg",
+        "--sidebar",
+        "--sidebar-hover",
+        "--sidebar-active",
+        "--surface-raised",
+        "--surface-hover",
+        "--surface-subtle",
+      ]],
+      [call, [
+        "--call-shell-bg",
+        "--call-stage-bg",
+        "--call-participant-bg",
+        "--call-placeholder-bg",
+        "--call-icon-bg",
+        "--call-control-bg",
+        "--call-control-hover-bg",
+      ]],
+      [board, [
+        "--board-style-panel",
+        "--board-style-panel-muted",
+        "--board-style-panel-subtle",
+        "--board-style-checker-a",
+        "--board-style-checker-b",
+      ]],
+      [code, [
+        "--code-workspace-bg",
+        "--code-explorer-bg",
+        "--code-console-bg",
+        "--code-surface",
+        "--code-surface-muted",
+        "--code-surface-hover",
+        "--code-surface-active",
+      ]],
+    ] as const;
+
+    for (const [tokens, names] of surfaces) {
+      for (const name of names) {
+        const value = token(tokens, name);
+        expect(channelSpread(value), `${name} (${value})`).toBeLessThanOrEqual(6);
+      }
+    }
+  });
+
   it("keeps global actions and sidebar text readable in both themes", () => {
     const light = declarationsFrom(siteStyles, ":root {");
     const dark = declarationsFrom(siteStyles, ':root[data-theme="dark"] {');

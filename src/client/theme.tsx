@@ -16,7 +16,7 @@ export const LEGACY_BOARD_THEME_STORAGE_KEY = "eduri-board-theme";
 
 const THEME_COLORS: Readonly<Record<AppTheme, string>> = {
   light: "#f5f7f9",
-  dark: "#161819",
+  dark: "#171816",
 };
 
 interface ThemeContextValue {

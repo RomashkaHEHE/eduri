@@ -171,6 +171,27 @@ describe("code workspace core", () => {
     expect(() => validateCodeWorkspaceDocument(document)).not.toThrow();
   });
 
+  it("rejects embedded or formatted content in collaborative code and test text", () => {
+    const codeDocument = new Y.Doc();
+    initializeCodeWorkspace(codeDocument, "seed");
+    const code = codeWorkspaceText(codeDocument, "main-py")!;
+    code.insertEmbed(0, { unsafe: true });
+    expect(() => validateCodeWorkspaceDocument(codeDocument))
+      .toThrowError(CodeWorkspaceError);
+
+    const testDocument = new Y.Doc();
+    initializeCodeWorkspace(testDocument, "seed");
+    const testId = addCodeTestCase(testDocument, {
+      id: "plain-text-test",
+      name: "Plain",
+    });
+    const test = codeWorkspaceTestCases(testDocument).get(testId)!;
+    const stdin = test.get("stdin") as Y.Text;
+    stdin.insert(0, "formatted", { bold: true });
+    expect(() => validateCodeWorkspaceDocument(testDocument))
+      .toThrowError(CodeWorkspaceError);
+  });
+
   it("stores bounded test timeouts and defaults legacy cases", () => {
     const document = new Y.Doc();
     initializeCodeWorkspace(document, "seed");

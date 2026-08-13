@@ -178,8 +178,8 @@ afterEach(async () => {
   }
 });
 
-describe("legacy lesson Code aggregate rate limits", () => {
-  it("shares the event budget across sessions, sockets, and reconnects without a rejected SQLite write", async () => {
+describe("retired legacy lesson Code ingress", () => {
+  it("shares the event budget while every legacy writer remains fail-closed", async () => {
     let rateNow = Date.parse("2026-08-09T12:00:00.000Z");
     const harness = await startHarness({
       lessonCodeEventsPerMinute: 2,
@@ -194,9 +194,9 @@ describe("legacy lesson Code aggregate rate limits", () => {
     await join(second, LESSON_ONE_ID);
 
     await expect(writeCode(first, LESSON_ONE_ID, "print('first')"))
-      .resolves.toMatchObject({ ok: true, revision: 1 });
+      .resolves.toMatchObject({ ok: false, code: "CODE_ENGINE_MISMATCH" });
     await expect(writeCode(second, LESSON_ONE_ID, "print('second')"))
-      .resolves.toMatchObject({ ok: true, revision: 2 });
+      .resolves.toMatchObject({ ok: false, code: "CODE_ENGINE_MISMATCH" });
 
     first.close();
     second.close();
@@ -217,16 +217,13 @@ describe("legacy lesson Code aggregate rate limits", () => {
     expect(harness.context.db.prepare(`
       SELECT code_revision, code_state FROM lessons WHERE id = ?
     `).get(LESSON_ONE_ID)).toEqual({
-      code_revision: 2,
-      code_state: JSON.stringify({
-        language: "python",
-        value: "print('second')",
-      }),
+      code_revision: 0,
+      code_state: "{}",
     });
 
     rateNow += 60_000;
     await expect(writeCode(reconnected, LESSON_ONE_ID, "print('after-window')"))
-      .resolves.toMatchObject({ ok: true, revision: 3 });
+      .resolves.toMatchObject({ ok: false, code: "CODE_ENGINE_MISMATCH" });
   });
 
   it("shares the byte budget across a reconnect", async () => {
@@ -242,7 +239,7 @@ describe("legacy lesson Code aggregate rate limits", () => {
     const first = await connect(harness, PRIMARY_TOKEN);
     await join(first, LESSON_ONE_ID);
     await expect(writeCode(first, LESSON_ONE_ID, firstCode.value))
-      .resolves.toMatchObject({ ok: true, revision: 1 });
+      .resolves.toMatchObject({ ok: false, code: "CODE_ENGINE_MISMATCH" });
 
     first.close();
     const reconnected = await connect(harness, SECONDARY_TOKEN);
@@ -254,7 +251,7 @@ describe("legacy lesson Code aggregate rate limits", () => {
       });
     expect(harness.context.db.prepare(
       "SELECT code_revision FROM lessons WHERE id = ?",
-    ).get(LESSON_ONE_ID)).toEqual({ code_revision: 1 });
+    ).get(LESSON_ONE_ID)).toEqual({ code_revision: 0 });
   });
 
   it("fails closed at the scope bound and reclaims an idle scope", async () => {
@@ -270,18 +267,18 @@ describe("legacy lesson Code aggregate rate limits", () => {
     await join(socket, LESSON_ONE_ID);
     await join(socket, LESSON_TWO_ID);
     await expect(writeCode(socket, LESSON_ONE_ID, "print('one')"))
-      .resolves.toMatchObject({ ok: true });
+      .resolves.toMatchObject({ ok: false, code: "CODE_ENGINE_MISMATCH" });
     await expect(writeCode(socket, LESSON_TWO_ID, "print('full')"))
       .resolves.toMatchObject({ ok: false, code: "RATE_LIMITED" });
 
     rateNow += 60_000;
     await expect(writeCode(socket, LESSON_TWO_ID, "print('reclaimed')"))
-      .resolves.toMatchObject({ ok: true, revision: 1 });
+      .resolves.toMatchObject({ ok: false, code: "CODE_ENGINE_MISMATCH" });
     expect(harness.context.db.prepare(`
       SELECT id, code_revision FROM lessons ORDER BY id
     `).all()).toEqual([
-      { id: LESSON_ONE_ID, code_revision: 1 },
-      { id: LESSON_TWO_ID, code_revision: 1 },
+      { id: LESSON_ONE_ID, code_revision: 0 },
+      { id: LESSON_TWO_ID, code_revision: 0 },
     ]);
   });
 });
@@ -387,7 +384,10 @@ describe("app-wide Socket.IO admission and ingress limits", () => {
     const reconnected = await connect(harness, SECONDARY_TOKEN);
     await join(reconnected, LESSON_ONE_ID);
     await expect(writeCode(reconnected, LESSON_ONE_ID, "print('after-window')"))
-      .resolves.toMatchObject({ ok: true, revision: 1 });
+      .resolves.toMatchObject({
+        ok: false,
+        code: "CODE_ENGINE_MISMATCH",
+      });
   });
 
   it("charges unknown namespaces before Socket.IO routing and holds the trusted IP window", async () => {

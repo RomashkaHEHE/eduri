@@ -12,8 +12,12 @@ import {
 import {
   installCodeSyncBaseSchema,
   installCodeSyncCompactionSchema,
+  installLessonCodeWorkspaceSchema,
 } from "./code-sync/schema.js";
-import { installCodeStorageUsageSchema } from "./code-sync/storageUsageSchema.js";
+import {
+  installCodeStorageUsageSchema,
+  installLessonCodeStorageUsageSchema,
+} from "./code-sync/storageUsageSchema.js";
 import {
   installCodeBlobScanSchema,
   installCodeBlobSchema,
@@ -665,6 +669,31 @@ const migrations: Migration[] = [
       CREATE INDEX livekit_room_revocation_retry_idx
         ON livekit_room_revocation_outbox(next_attempt_at, enqueued_at, room_name);
     `,
+  },
+  {
+    version: 22,
+    name: "lesson Code CRDT workspace ownership and legacy import audit",
+    foreignKeysOff: true,
+    up: (db) => {
+      installLessonCodeWorkspaceSchema(db);
+      installLessonCodeStorageUsageSchema(db);
+    },
+  },
+  {
+    version: 23,
+    name: "repair guest call generation for previously applied v21 schemas",
+    up: (db) => {
+      const columns = db.prepare("PRAGMA table_info(guest_room_resources)")
+        .all() as Array<{ name: string }>;
+      if (columns.some((column) => column.name === "call_room_generation")) {
+        return;
+      }
+      db.exec(`
+        ALTER TABLE guest_room_resources
+          ADD COLUMN call_room_generation INTEGER NOT NULL DEFAULT 1
+            CHECK (call_room_generation >= 1)
+      `);
+    },
   },
 ];
 

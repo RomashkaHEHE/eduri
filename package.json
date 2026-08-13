@@ -22,6 +22,8 @@
   "dependencies": {
     "@livekit/components-react": "^2.9.23",
     "@monaco-editor/react": "^4.7.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "bcryptjs": "^3.0.2",
     "better-sqlite3": "^11.8.1",
     "cookie": "^1.0.2",

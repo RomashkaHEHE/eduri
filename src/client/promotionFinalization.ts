@@ -12,6 +12,13 @@ export interface PendingGuestFinalization {
 const STORAGE_PREFIX = "eduri:guest-promotion-finalization:v1:";
 const volatileFallback = new Map<string, string>();
 const durableMirrors = new Set<string>();
+const GENERIC_PROMOTION_ERROR =
+  "Не удалось начать сеанс. Проверьте соединение и попробуйте ещё раз.";
+
+export function guestPromotionErrorMessage(error: unknown): string {
+  if (error instanceof ApiError && error.message.trim()) return error.message;
+  return GENERIC_PROMOTION_ERROR;
+}
 
 function legacyKey(kind: GuestPromotionKind): string {
   return `${STORAGE_PREFIX}${kind}`;

@@ -9,36 +9,73 @@ export interface CodeSyncHandshakeAuth {
   readonly deviceId: string;
 }
 
-export interface CodeCursor {
-  readonly entryId: string;
-  readonly offset: number;
+export type CodeYTextAwarenessTarget =
+  | {
+      readonly kind: "file";
+      readonly entryId: string;
+      readonly field: "text";
+    }
+  | {
+      readonly kind: "test";
+      readonly testId: string;
+      readonly field: "stdin" | "expectedOutput";
+    };
+
+export type CodeScalarAwarenessTarget =
+  | {
+      readonly kind: "test";
+      readonly testId: string;
+      readonly field: "name" | "timeout";
+    }
+  | {
+      readonly kind: "explorer";
+      readonly entryId: string;
+      readonly field: "rename";
+    };
+
+export interface CodeTerminalAwarenessTarget {
+  readonly kind: "terminal";
+  readonly field: "input";
 }
 
-export interface CodeSelection {
-  readonly entryId: string;
+export type CodeAwarenessTarget =
+  | CodeYTextAwarenessTarget
+  | CodeScalarAwarenessTarget
+  | CodeTerminalAwarenessTarget;
+
+export interface CodeRelativeSelection {
+  readonly anchor: Uint8Array;
+  readonly head: Uint8Array;
+}
+
+export interface CodeAbsoluteSelection {
+  /** UTF-16 offset into the accompanying scalar draft. */
   readonly anchor: number;
+  /** UTF-16 offset into the accompanying scalar draft. */
   readonly head: number;
 }
 
-export type CodeTerminalAwareness =
+export interface CodeScalarInputPresence {
+  readonly draft: string;
+  readonly selection: CodeAbsoluteSelection;
+}
+
+export type CodeAwarenessState =
   | {
-      readonly kind: "host";
-      readonly runId: string;
-      readonly requestId: string;
+      readonly target: CodeYTextAwarenessTarget;
+      readonly selection?: CodeRelativeSelection;
+      readonly input?: undefined;
     }
   | {
-      readonly kind: "input";
-      readonly runId: string;
-      readonly requestId: string;
-      readonly submissionId: string;
-      readonly value: string;
+      readonly target: CodeScalarAwarenessTarget;
+      readonly input?: CodeScalarInputPresence;
+      readonly selection?: undefined;
+    }
+  | {
+      readonly target: CodeTerminalAwarenessTarget;
+      readonly selection?: undefined;
+      readonly input?: undefined;
     };
-
-export interface CodeAwarenessState {
-  readonly cursor?: CodeCursor;
-  readonly selection?: CodeSelection;
-  readonly terminal?: CodeTerminalAwareness;
-}
 
 export interface CodeParticipantIdentity {
   readonly participantId: string;

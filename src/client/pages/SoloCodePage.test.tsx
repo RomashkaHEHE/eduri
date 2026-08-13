@@ -3,7 +3,7 @@
 import { act, createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { GuestRoom } from "../api";
+import { ApiError, type GuestRoom } from "../api";
 
 const mocks = vi.hoisted(() => ({
   navigate: vi.fn(),
@@ -156,6 +156,23 @@ describe("SoloCodePage session promotion", () => {
         ?.getAttribute("data-read-only"),
     ).toBe("false");
     expect(mocks.navigate).not.toHaveBeenCalled();
+  });
+
+  it("shows a server response instead of masking it as a connection error", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mocks.promote.mockRejectedValue(new ApiError(
+      "Слишком много созданных сеансов",
+      429,
+    ));
+
+    await renderPage();
+    await publishSession();
+    await act(async () => startButton().click());
+
+    await vi.waitFor(() => {
+      expect(container?.querySelector('[role="alert"]')?.textContent)
+        .toContain("Слишком много созданных сеансов");
+    });
   });
 
   it("aborts an unfinished promotion when the page unmounts", async () => {

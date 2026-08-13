@@ -25,6 +25,7 @@ export interface GuestCodeWorkspaceProps {
 
 const INITIAL_STATUS: GuestCodeStatus = {
   connection: "loading-local",
+  terminalConnectionEpoch: 0,
   durability: "ready",
   documentReady: false,
   pendingUpdates: 0,
@@ -67,6 +68,13 @@ export function GuestCodeWorkspace({
         setAwareness: (state) => provider.setAwareness(state),
         subscribeAwareness: (listener) => provider.subscribeAwareness(listener),
       },
+      terminal: {
+        dispatch: (action) => provider.dispatchTerminal(action),
+        subscribeState: (listener) => provider.subscribeTerminalState(listener),
+        subscribeEffects: (listener) => provider.subscribeTerminalEffects(listener),
+        subscribeAcks: (listener) => provider.subscribeTerminalAcks(listener),
+      },
+      waitUntilSynchronized: (timeoutMs) => provider.waitUntilSynchronized(timeoutMs),
     };
     const unsubscribe = provider.subscribeStatus((next) => {
       if (cancelled) return;
@@ -129,7 +137,15 @@ export function GuestCodeWorkspace({
           {status.error}
         </div>
       )}
-      <CodeWorkspace session={session} readOnly={collaborationReadOnly} />
+      <CodeWorkspace
+        session={session}
+        participantId={status.participant?.participantId ?? null}
+        readOnly={collaborationReadOnly}
+        terminalReadOnly={
+          collaborationReadOnly || status.connection !== "online"
+        }
+        terminalConnectionEpoch={status.terminalConnectionEpoch}
+      />
     </div>
   );
 }

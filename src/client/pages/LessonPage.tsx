@@ -31,7 +31,7 @@ import {
 import { useNavigate, useParams } from "react-router-dom";
 import type { LessonSummary } from "../../shared/types";
 import type { MaterialDetail } from "../api";
-import { api, normalizeLessonCode } from "../api";
+import { api } from "../api";
 import { homeForRole, useAuth } from "../auth";
 import { getBoardCatalogEntry } from "../board/catalog";
 import { LessonBoard } from "../board/LessonBoard";
@@ -44,7 +44,6 @@ type WorkspaceMode = "board" | "code" | "materials";
 type ConnectionState = "connecting" | "connected" | "offline";
 
 interface LessonSocketState {
-  code?: unknown;
   materials?: MaterialDetail[];
   notes?: string;
 }
@@ -53,11 +52,8 @@ interface LessonJoinAck {
   ok: boolean;
   lesson?: {
     status?: LessonSummary["status"];
-    codeState?: unknown;
   };
 }
-
-const starterCode = "numbers = [2, 4, 6]\nprint(sum(numbers))";
 
 const LessonCodeWorkspace = lazy(
   () => import("../components/LessonCodeWorkspace")
@@ -137,14 +133,12 @@ export function LessonPage() {
   const [materials, setMaterials] = useState<MaterialDetail[]>([]);
   const [notes, setNotes] = useState("");
   const [notesState, setNotesState] = useState<"idle" | "saving" | "saved" | "error">("idle");
-  const [code, setCode] = useState(starterCode);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [boardDataAtRisk, setBoardDataAtRisk] = useState(false);
   const [endOpen, setEndOpen] = useState(false);
   const [ending, setEnding] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const socketRef = useRef<Socket | null>(null);
-  const codeTimer = useRef<number | null>(null);
   const elapsed = useElapsed(resource.data?.lesson.startedAt ?? resource.data?.lesson.scheduledAt);
   const runGuardedBoardExit = useCriticalDataGuard(boardDataAtRisk);
 
@@ -158,9 +152,6 @@ export function LessonPage() {
     setMaterials(resource.data.materials);
     setPlanMaterials(resource.data.lesson.materials ?? resource.data.materials.filter((material) => material.progressLessonId === resource.data!.lesson.id));
     setNotes(resource.data.lesson.notes ?? "");
-    if (resource.data.lesson.code) {
-      setCode(resource.data.lesson.code.value);
-    }
   }, [resource.data]);
 
   useEffect(() => {
@@ -177,20 +168,11 @@ export function LessonPage() {
       socket.emit("lesson:join", { lessonId }, (ack: LessonJoinAck) => {
         if (!ack?.ok || !ack.lesson) return;
         if (ack.lesson.status) updateLessonStatus(ack.lesson.status);
-        if (ack.lesson.codeState) {
-          const nextCode = normalizeLessonCode(ack.lesson.codeState);
-          if (nextCode) setCode(nextCode.value);
-        }
       });
     };
     socket.on("connect", connected);
     socket.on("disconnect", () => setConnection("offline"));
     socket.on("connect_error", () => setConnection("offline"));
-    socket.on("lesson:code", (payload: { lessonId?: string; code?: unknown }) => {
-      if (payload?.lessonId && payload.lessonId !== lessonId) return;
-      const nextCode = normalizeLessonCode(payload?.code);
-      if (nextCode) setCode(nextCode.value);
-    });
     socket.on("lesson:material", (payload: { lessonId?: string; material?: MaterialDetail; materials?: MaterialDetail[] }) => {
       if (payload.lessonId && payload.lessonId !== lessonId) return;
       if (payload.materials) setPlanMaterials(payload.materials);
@@ -206,28 +188,15 @@ export function LessonPage() {
       setNotes(payload.notes);
     });
     socket.on("lesson:state", (payload: LessonSocketState) => {
-      const nextCode = normalizeLessonCode(payload.code);
-      if (nextCode) setCode(nextCode.value);
       if (payload.materials) setPlanMaterials(payload.materials);
       if (typeof payload.notes === "string") setNotes(payload.notes);
     });
     return () => {
-      if (codeTimer.current) window.clearTimeout(codeTimer.current);
       socket.emit("lesson:leave", { lessonId });
       socket.disconnect();
       socketRef.current = null;
     };
   }, [lessonId]);
-
-  const onCodeChange = (value: string | undefined) => {
-    const next = value ?? "";
-    setCode(next);
-    if (codeTimer.current) window.clearTimeout(codeTimer.current);
-    codeTimer.current = window.setTimeout(() => socketRef.current?.emit("lesson:code", {
-      lessonId,
-      code: { language: "python", value: next },
-    }), 180);
-  };
 
   const addMaterial = async (material: MaterialDetail) => {
     if (planMaterials.some((item) => item.id === material.id)) return;
@@ -328,8 +297,9 @@ export function LessonPage() {
           {codeActivated && (
             <Suspense fallback={<div className="lesson-runtime-loading"><LoadingBlock label="Загружаем редактор кода" /></div>}>
               <LessonCodeWorkspace
-                code={code}
-                onCodeChange={onCodeChange}
+                lessonId={lesson.id}
+                userId={user.id}
+                readOnly={lesson.status === "completed" || lesson.status === "cancelled"}
               />
             </Suspense>
           )}

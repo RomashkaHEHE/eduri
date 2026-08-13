@@ -54,6 +54,12 @@ const boardTicketSchema = z.object({
 const SHARE_KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
 const CALL_TOKEN_TTL_SECONDS = 15 * 60;
 
+export function guestRoomCreationLimit(
+  nodeEnv: AppContext["config"]["nodeEnv"],
+): number {
+  return nodeEnv === "production" ? 5 : 10_000;
+}
+
 function resourcePath(shareKey: string, kind: GuestRoomResourceKind): string {
   return `/room/${shareKey}/${kind}`;
 }
@@ -98,7 +104,7 @@ export function createGuestRoomsRouter(context: AppContext): Router {
   )));
   const createLimiter = rateLimit({
     windowMs: 60 * 60 * 1000,
-    limit: context.config.nodeEnv === "test" ? 10_000 : 5,
+    limit: guestRoomCreationLimit(context.config.nodeEnv),
     standardHeaders: "draft-7",
     legacyHeaders: false,
     handler: (_req, res) => {

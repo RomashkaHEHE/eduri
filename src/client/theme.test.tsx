@@ -150,10 +150,10 @@ describe("site theme preference", () => {
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(document.documentElement.style.colorScheme).toBe("dark");
     expect(document.documentElement.style.backgroundColor)
-      .toBe("rgb(22, 24, 25)");
+      .toBe("rgb(23, 24, 22)");
     expect(document.querySelectorAll('meta[name="theme-color"]')).toHaveLength(1);
     expect(document.querySelector('meta[name="theme-color"]')?.getAttribute("content"))
-      .toBe("#161819");
+      .toBe("#171816");
 
     applyTheme("light");
 
@@ -233,9 +233,9 @@ describe("site theme preference", () => {
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(document.documentElement.style.colorScheme).toBe("dark");
     expect(document.documentElement.style.backgroundColor)
-      .toBe("rgb(22, 24, 25)");
+      .toBe("rgb(23, 24, 22)");
     expect(document.querySelector('meta[name="theme-color"]')?.getAttribute("content"))
-      .toBe("#161819");
+      .toBe("#171816");
     expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("dark");
   });
 
@@ -336,7 +336,7 @@ describe("site theme preference", () => {
 
     expect(documentElement.dataset.theme).toBe("dark");
     expect(documentElement.style.colorScheme).toBe("dark");
-    expect(meta.content).toBe("#161819");
+    expect(meta.content).toBe("#171816");
     expect(values.get(THEME_STORAGE_KEY)).toBe("dark");
     expect(values.has(LEGACY_BOARD_THEME_STORAGE_KEY)).toBe(false);
   });

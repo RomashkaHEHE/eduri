@@ -29,8 +29,9 @@ const socket = {
   disconnect: vi.fn(),
 };
 interface CodeWorkspaceProps {
-  code: string;
-  onCodeChange(value: string | undefined): void;
+  lessonId: string;
+  userId: string;
+  readOnly: boolean;
 }
 let codeWorkspaceProps: CodeWorkspaceProps | undefined;
 
@@ -86,7 +87,7 @@ vi.mock("../components/LessonCodeWorkspace", () => ({
     return createElement(
       "div",
       { "data-testid": "python-workspace" },
-      props.code,
+      props.lessonId,
     );
   },
 }));
@@ -166,7 +167,7 @@ describe("LessonPage local-first bootstrap", () => {
     );
   });
 
-  it("keeps initial, remote, and outgoing workspace state Python-only", async () => {
+  it("mounts the authenticated collaborative workspace without a legacy code writer", async () => {
     networkLesson.mockResolvedValue({
       ...cachedLesson,
       code: {
@@ -195,36 +196,19 @@ describe("LessonPage local-first bootstrap", () => {
     });
     await act(async () => {
       await vi.waitFor(() => {
-        expect(codeWorkspaceProps?.code).toBe("print('initial')");
+        expect(codeWorkspaceProps).toEqual({
+          lessonId: LESSON_ID,
+          userId: USER_ID,
+          readOnly: false,
+        });
       });
     });
 
-    const receiveCode = socket.on.mock.calls.find(
-      ([event]) => event === "lesson:code",
-    )?.[1] as ((payload: unknown) => void) | undefined;
-    expect(receiveCode).toBeDefined();
-    await act(async () => {
-      receiveCode?.({
-        lessonId: LESSON_ID,
-        code: {
-          language: "javascript",
-          value: "console.log('legacy source')",
-        },
-      });
-    });
-    expect(codeWorkspaceProps?.code).toBe("console.log('legacy source')");
-
-    await act(async () => {
-      codeWorkspaceProps?.onCodeChange("print('canonical')");
-    });
-    await vi.waitFor(() => {
-      expect(socket.emit).toHaveBeenCalledWith("lesson:code", {
-        lessonId: LESSON_ID,
-        code: {
-          language: "python",
-          value: "print('canonical')",
-        },
-      });
-    });
+    expect(socket.on.mock.calls.map(([event]) => event)).not.toContain(
+      "lesson:code",
+    );
+    expect(socket.emit.mock.calls.map(([event]) => event)).not.toContain(
+      "lesson:code",
+    );
   });
 });

@@ -1064,6 +1064,23 @@ function readTestCase(
   };
 }
 
+function assertPlainCollaborativeText(
+  value: Y.Text,
+  label: string,
+): void {
+  for (const operation of value.toDelta()) {
+    if (
+      typeof operation.insert !== "string"
+      || operation.attributes !== undefined
+    ) {
+      throw new CodeWorkspaceError(
+        "INVALID_DOCUMENT",
+        `${label} must contain plain text only`,
+      );
+    }
+  }
+}
+
 export function listCodeTestCases(
   document: Y.Doc,
 ): readonly CodeTestCaseSnapshot[] {
@@ -1212,7 +1229,19 @@ export function validateCodeWorkspaceDocument(document: Y.Doc): void {
     if (normalizeCodeWorkspaceName(entry.name) !== entry.name) {
       throw new CodeWorkspaceError("INVALID_DOCUMENT", "Workspace name is not canonical");
     }
-    if (entry.kind === "file") totalText += entry.text?.length ?? 0;
+    if (entry.kind === "file") {
+      totalText += entry.text?.length ?? 0;
+      if (entry.contentKind === "text") {
+        const text = codeWorkspaceText(document, entry.id);
+        if (!text) {
+          throw new CodeWorkspaceError(
+            "INVALID_DOCUMENT",
+            "Workspace text file is invalid",
+          );
+        }
+        assertPlainCollaborativeText(text, "Workspace text file");
+      }
+    }
     let parentId = entry.parentId;
     const seen = new Set<string>([entry.id]);
     let depth = 0;
@@ -1238,5 +1267,17 @@ export function validateCodeWorkspaceDocument(document: Y.Doc): void {
   const testSnapshots = listCodeTestCases(document);
   if (tests.size !== testSnapshots.length || tests.size > CODE_WORKSPACE_MAX_TEST_CASES) {
     throw new CodeWorkspaceError("INVALID_DOCUMENT", "Workspace test cases are invalid");
+  }
+  for (const [testId, test] of tests) {
+    for (const field of ["stdin", "expectedOutput"] as const) {
+      const text = test.get(field);
+      if (!(text instanceof Y.Text)) {
+        throw new CodeWorkspaceError(
+          "INVALID_DOCUMENT",
+          `Workspace test ${testId} ${field} is invalid`,
+        );
+      }
+      assertPlainCollaborativeText(text, `Workspace test ${field}`);
+    }
   }
 }

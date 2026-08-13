@@ -6,6 +6,7 @@ import {
   type CodeWorkspaceSessionHandle,
 } from "../components/CodeWorkspace";
 import { promoteSoloCodeToGuestRoom } from "../code/promoteSoloCode";
+import { guestPromotionErrorMessage } from "../promotionFinalization";
 import { ThemeToggle } from "../theme";
 
 export function SoloCodePage() {
@@ -55,9 +56,7 @@ export function SoloCodePage() {
       }
       console.error("Solo Code promotion failed", error);
       if (mountedRef.current) {
-        setPromotionError(
-          "Не удалось начать сеанс. Проверьте соединение и попробуйте ещё раз.",
-        );
+        setPromotionError(guestPromotionErrorMessage(error));
       }
     } finally {
       if (promotionAbortRef.current === abortController) {

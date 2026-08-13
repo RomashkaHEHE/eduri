@@ -77,7 +77,7 @@ import {
   type BoardFragmentScope,
 } from "../../board/core";
 import {
-  startPythonRun,
+  startPythonRun as startBrowserPythonRun,
   type PythonRunHandle,
 } from "../pythonRunner";
 import { useOptionalTheme } from "../theme";
@@ -231,6 +231,7 @@ export interface BoardSurfaceProps {
   readonly clipboard?: BoardClipboard;
   readonly onAwarenessChange?: (state: BoardAwarenessState) => void;
   readonly rendererFactory?: BoardRendererFactory;
+  readonly startPythonRun?: typeof startBrowserPythonRun;
 }
 
 interface EditingState {
@@ -1315,6 +1316,7 @@ export function BoardSurface({
   clipboard,
   onAwarenessChange,
   rendererFactory = konvaBoardRendererFactory,
+  startPythonRun = startBrowserPythonRun,
 }: BoardSurfaceProps) {
   const surfaceRef = useRef<HTMLElement | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);

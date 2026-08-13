@@ -1642,19 +1642,22 @@ board has focus. Text editors retain the browser's native text clipboard.
   may reduce loading cost, while first uncached use requires the Eduri origin.
 - The run captures stdout, stderr, and expression result. Output is capped at
   256 KiB of characters with an explicit truncation marker.
-- Client and worker use tagged protocol-v3 messages through
-  `/python-runner.worker.js?protocol=3`: one request, bounded streamed output,
+- Client and worker use tagged protocol-v4 messages from the versioned
+  `/python-runner.worker.js?protocol=4&revision=2` source: one request, bounded
+  streamed output,
   and one terminal response. A Board code-block request is the protocol's
   script variant and never accepts interactive workspace input buffers or a
   workspace file delta. The client terminates the worker after a result,
   runtime/worker/protocol error, cancellation, or 45-second timeout. Read-only
   transition, document change, and unmount cancel the run; the worker also
   closes itself after its terminal response.
-- Runtime network, storage, cross-tab, and nested-worker capabilities are
-  removed after the pinned runtime loads but before the payload is accepted;
-  failure to remove a known capability aborts the run. Python receives a frozen
-  empty `jsglobals` object, and production CSP permits no external script or
-  connect origin.
+- The source and hash-verified runtime assets are passed to a disposable Worker
+  created inside an opaque-origin `sandbox="allow-scripts"` iframe. The iframe
+  cannot read application DOM or origin storage, its CSP permits no network,
+  and its strict broker exposes no privileged parent API. Runtime network,
+  storage, cross-tab, and nested-worker capabilities are also removed after
+  the pinned runtime loads as defense in depth; failure to remove a known
+  capability aborts the run. Python receives a frozen empty `jsglobals` object.
 - The resulting output snapshot is a durable, undoable property update. Static
   code blocks currently render source rather than the output snapshot.
 
@@ -1931,7 +1934,9 @@ offline or has pending server sync.
   finalized. A failure before finalization is prepared restores editable solo
   mode and leaves the original solo document and asset store unchanged; the
   server draft is cancelled and partially created guest-device databases are
-  cleared. Immediately before the first finalize request, bounded same-origin
+  cleared. A structured API failure shows the server's specific message;
+  unexpected transport/runtime failures use the generic connection message.
+  Immediately before the first finalize request, bounded same-origin
   recovery metadata records the draft capability. An ambiguous response after
   that point preserves the guest databases and draft instead of cancelling
   them; the next Start session action retries the idempotent finalize for the
@@ -1979,8 +1984,9 @@ offline or has pending server sync.
   File rows do not act as implicit root drop targets, and no destination
   dropdown is used.
 - Named tests are closed by default behind the `Тесты` toolbar toggle. Opening
-  the panel exposes stdin, expected output, and a compact `250..45000` ms
-  timeout field without increment/decrement steppers. Output always uses
+  the panel exposes stdin, expected output, a bounded-width name field visibly
+  labelled `Title:`, and a compact `250..45000` ms field visibly labelled
+  `Timeout:` without increment/decrement steppers. Output always uses
   normalized line comparison: Windows/Linux line endings and one final newline
   do not affect the result. When a workspace has no tests, the panel shows only
   the `Создать тест` action; selecting it creates the first test and opens the
@@ -1988,16 +1994,42 @@ offline or has pending server sync.
   deleting the last test returns to the `Создать тест` state. New and legacy
   tests default to 5,000 ms. Test uses its stored deterministic stdin and
   timeout and never opens the live terminal prompt.
-- Python runs only after an explicit Run/Test command in a fresh disposable
-  protocol-v3 worker. Ordinary Run uses the 45-second client ceiling, streams
-  output as it is emitted, and has no advance stdin field. The one-line terminal
-  input appears and receives focus only when Python calls `input()`; submitting
-  it resumes that same run. UI/shared input is limited to 1,024 UTF-16 code
-  units without CR/LF, while the runner additionally enforces 64 KiB per line,
-  1 MiB total, and a bounded request count. While a run is active, Run becomes
-  Stop and terminates the disposable worker. Terminal/test output preserves
-  trailing line endings and an actually empty stdout; successful execution does
-  not add a synthetic message to the value used by normalized test comparison.
+- Python runs only after an explicit shared Run/Test or terminal command. One
+  authorized browser host executes each server-assigned run; every participant
+  sees the same ordered run state, prompt, output, program input, and test
+  result. A shell `py main.py`/`python main.py` command uses a fresh disposable
+  terminal Worker and a synchronized workspace snapshot. Bare `py` opens an
+  interactive Python prompt which persists only until exit/EOF/stop/session
+  loss. Ordinary Run uses the 45-second client ceiling. While a run is active,
+  Run becomes Stop and interrupts that shared run rather than starting another
+  local execution. Run and Test are also disabled while the initiating client
+  waits for its document outbox and the first authoritative terminal state, so
+  repeated or cross-button clicks cannot enqueue competing starts.
+- The terminal is an xterm surface with its editable command buffer on the
+  active terminal row; there is no detached HTML input. It accepts the bounded
+  virtual-workspace commands `help`, `pwd`, `ls`/`dir`, `cat`/`type`,
+  `clear`/`cls`, and `py`/`python`. It is deliberately not an OS/server shell.
+  A new shared terminal starts with the single hint `help для списка команд`.
+  The terminal header never shows a persistent input-owner name. The active
+  xterm caret remains visible in its authenticated owner's color. For a remote
+  owner, the name label is collapsed by default and appears only while a
+  hover-capable pointer is inside the transparent 18-pixel geometric hit area
+  around the current terminal caret; pointer exit hides it, and touch or other
+  no-hover input does not reveal it. That hit area and its absolutely positioned
+  label do not intercept pointer events, focus, selection, or terminal input and
+  never change the xterm buffer or layout. Their position follows the public
+  xterm buffer cursor through parse, render, resize, and scroll updates, and the
+  complete cursor label overlay hides while that buffer position is outside the
+  rendered viewport.
+  When Python calls `input()`, the same row becomes the program input. UI input
+  is limited to 1,024 UTF-16 code units without control characters; the runner
+  additionally enforces 64 KiB per line, 1 MiB total, and a bounded request
+  count. Output is bounded, batched, and shown in exact server order before the
+  next prompt. Offline source edits remain available, but shared terminal input
+  and Run/Test are disabled until the collaboration transport is online.
+  `Ctrl+C` stops a shell program; inside bare-`py` it clears an idle or active
+  Python block, reports `KeyboardInterrupt`, and returns to `>>>` without
+  destroying the shared REPL. `Ctrl+D` supplies program EOF or exits the REPL.
 - Run captures stable directory paths and, for every file, its stable ID,
   exact path, content kind, SHA-256, byte size, and bytes. The disposable
   Worker returns a bounded, strictly ordered file delta after success and after
@@ -2023,7 +2055,9 @@ offline or has pending server sync.
   finalized. Failure or cancellation before finalize leaves solo state intact,
   cancels the server draft, clears partial guest-local databases, restores
   editing, and keeps the user on `/code` with a dismissible error for
-  non-cancellation failures. Immediately before finalize, the draft capability
+  non-cancellation failures. A structured API failure shows the server's
+  specific message; unexpected transport/runtime failures use the generic
+  connection message. Immediately before finalize, the draft capability
   is persisted as bounded same-origin recovery metadata. Once finalize has
   been attempted, an ambiguous network response preserves the guest databases
   and draft; the next Start session action retries that same idempotent
@@ -2039,13 +2073,36 @@ offline or has pending server sync.
   reports connecting/offline state and the count of updates awaiting ACK. A
   local persistence failure is shown immediately and makes the shared editor
   read-only so later edits cannot be presented as durable.
-- Monaco cursor/selection changes and live terminal input requests/submissions
-  are awareness-only. A participant in the same Code room sees the prompt and
-  can submit the requested line; the accepted line is reflected to observers
-  but is never stored in files, tests, history, or the durable update log.
-  Remote decorations use the participant identity, name, and color supplied
-  authoritatively by the server. Receiving remote document or awareness data
-  never runs code.
+- Monaco is bound directly to the active collaborative `Y.Text`; remote deltas
+  patch only changed model ranges and do not replace its entire controlled
+  value, remount Monaco, reset scroll/selection, or repaint all syntax tokens.
+  A remote selection is a tracked decoration. Its caret is a zero-width content
+  widget in the authenticated participant color, never a `|` character in the
+  model or inline text layout. Test stdin/expected output use the same
+  relative-position behavior. Test name/timeout and Explorer rename show an
+  input-specific overlay caret/selection for every valid remote participant in
+  stable participant order over each bounded remote draft, without changing
+  the local input value or layout. Every remote caret line and selection stays
+  visible. Its authenticated participant-name label is absolutely positioned
+  and hidden by default; it appears only while a hover-capable pointer is over
+  that caret's transparent hit area, then hides again when the pointer leaves.
+  The label never changes the Monaco or native-input value, text layout, scroll,
+  or selection. Touch and other no-hover input do not reveal cursor labels.
+  Focus/blur/unmount clears only presence owned by that exact field.
+- Cursor/selection/focused-field data is awareness-only. Terminal prompt,
+  input, output, run and test lifecycle instead use an ordered ephemeral shared
+  terminal state with server leases, deltas, ACKs and gap recovery. Participant
+  identity, name, and color are supplied authoritatively by the server.
+  Receiving any remote document, presence, or terminal state never executes
+  code unless this client is explicitly elected as the run host. Unacknowledged
+  actions retry with the same idempotency key; reconnect invalidates every old
+  browser execution even when offline/online transitions are visually batched.
+- `/lesson/:id` uses this same Code workspace and `/lesson-code-sync` transport,
+  not the legacy whole-string writer. The first access imports retained lesson
+  code once; scheduled/active lessons are editable, completed/cancelled lessons
+  are read-only. Lesson source/tests are durable, terminal history is ephemeral
+  once everyone disconnects, and binary uploads/terminal binary writes stay
+  unavailable until lesson-scoped blob storage exists.
 - Concurrent tree moves are shown through one deterministic effective tree.
   If independently valid edits form a cycle, target a folder deleted by
   another participant, or combine into an over-deep/overlong path, the affected
@@ -2164,7 +2221,9 @@ Displayed byte units use binary multiples of 1024.
   overlays, controls, alerts, and the guest-room call shell. Both palettes are
   rooted in the document `data-theme`, change without remounting an editor or
   media room, and do not leave an intentionally always-dark sub-surface in the
-  light theme.
+  light theme. Dark backgrounds and raised surfaces use a neutral graphite
+  scale; blue is reserved for focus, selection, collaboration cursors, and
+  primary actions instead of tinting Explorer, terminal, Board, or call areas.
 - Primary and destructive actions use theme-specific foregrounds over their
   fills. Form hover, focus, and validation borders remain distinct in dark
   mode; inactive segmented controls, cards and side-panel shadows use the

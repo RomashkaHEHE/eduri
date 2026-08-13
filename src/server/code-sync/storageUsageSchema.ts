@@ -51,6 +51,7 @@ export function installCodeStorageUsageSchema(db: Database.Database): void {
     CREATE TABLE code_storage_usage (
       workspace_id TEXT PRIMARY KEY
         REFERENCES code_workspaces(id) ON DELETE CASCADE,
+      is_guest INTEGER NOT NULL DEFAULT 1 CHECK (is_guest IN (0, 1)),
       document_count INTEGER NOT NULL CHECK (document_count BETWEEN 0 AND 1),
       snapshot_bytes INTEGER NOT NULL CHECK (snapshot_bytes >= 0),
       state_vector_bytes INTEGER NOT NULL CHECK (state_vector_bytes >= 0),
@@ -124,6 +125,8 @@ export function installCodeStorageUsageSchema(db: Database.Database): void {
     reconciled AS (
       SELECT
         workspace.id AS workspace_id,
+        CASE WHEN workspace.room_resource_id IS NOT NULL THEN 1 ELSE 0 END
+          AS is_guest,
         COALESCE(document_usage.row_count, 0) AS document_count,
         COALESCE(document_usage.snapshot_bytes, 0) AS snapshot_bytes,
         COALESCE(document_usage.state_vector_bytes, 0) AS state_vector_bytes,
@@ -144,12 +147,12 @@ export function installCodeStorageUsageSchema(db: Database.Database): void {
       LEFT JOIN receipt_usage ON receipt_usage.workspace_id = workspace.id
     )
     INSERT INTO code_storage_usage (
-      workspace_id, document_count, snapshot_bytes, state_vector_bytes,
+      workspace_id, is_guest, document_count, snapshot_bytes, state_vector_bytes,
       update_count, update_bytes, receipt_count, receipt_bytes,
       metadata_bytes, accounted_bytes
     )
     SELECT
-      workspace_id, document_count, snapshot_bytes, state_vector_bytes,
+      workspace_id, is_guest, document_count, snapshot_bytes, state_vector_bytes,
       update_count, update_bytes, receipt_count, receipt_bytes,
       metadata_bytes,
       snapshot_bytes + state_vector_bytes + update_bytes + receipt_bytes
@@ -157,38 +160,41 @@ export function installCodeStorageUsageSchema(db: Database.Database): void {
     FROM reconciled;
 
     UPDATE code_guest_storage_usage SET
-      workspace_count = (SELECT COUNT(*) FROM code_storage_usage),
+      workspace_count = (
+        SELECT COUNT(*) FROM code_storage_usage WHERE is_guest = 1
+      ),
       document_count = COALESCE((
-        SELECT SUM(document_count) FROM code_storage_usage
+        SELECT SUM(document_count) FROM code_storage_usage WHERE is_guest = 1
       ), 0),
       snapshot_bytes = COALESCE((
-        SELECT SUM(snapshot_bytes) FROM code_storage_usage
+        SELECT SUM(snapshot_bytes) FROM code_storage_usage WHERE is_guest = 1
       ), 0),
       state_vector_bytes = COALESCE((
-        SELECT SUM(state_vector_bytes) FROM code_storage_usage
+        SELECT SUM(state_vector_bytes) FROM code_storage_usage WHERE is_guest = 1
       ), 0),
       update_count = COALESCE((
-        SELECT SUM(update_count) FROM code_storage_usage
+        SELECT SUM(update_count) FROM code_storage_usage WHERE is_guest = 1
       ), 0),
       update_bytes = COALESCE((
-        SELECT SUM(update_bytes) FROM code_storage_usage
+        SELECT SUM(update_bytes) FROM code_storage_usage WHERE is_guest = 1
       ), 0),
       receipt_count = COALESCE((
-        SELECT SUM(receipt_count) FROM code_storage_usage
+        SELECT SUM(receipt_count) FROM code_storage_usage WHERE is_guest = 1
       ), 0),
       receipt_bytes = COALESCE((
-        SELECT SUM(receipt_bytes) FROM code_storage_usage
+        SELECT SUM(receipt_bytes) FROM code_storage_usage WHERE is_guest = 1
       ), 0),
       metadata_bytes = COALESCE((
-        SELECT SUM(metadata_bytes) FROM code_storage_usage
+        SELECT SUM(metadata_bytes) FROM code_storage_usage WHERE is_guest = 1
       ), 0),
       accounted_bytes = COALESCE((
-        SELECT SUM(accounted_bytes) FROM code_storage_usage
+        SELECT SUM(accounted_bytes) FROM code_storage_usage WHERE is_guest = 1
       ), 0)
     WHERE singleton = 1;
 
     CREATE TRIGGER code_storage_usage_guest_insert
     AFTER INSERT ON code_storage_usage
+    WHEN NEW.is_guest = 1
     BEGIN
       UPDATE code_guest_storage_usage SET
         workspace_count = workspace_count + 1,
@@ -204,12 +210,17 @@ export function installCodeStorageUsageSchema(db: Database.Database): void {
       WHERE singleton = 1;
     END;
 
+    CREATE TRIGGER code_storage_usage_owner_immutable
+    BEFORE UPDATE OF workspace_id, is_guest ON code_storage_usage
+    BEGIN SELECT RAISE(ABORT, 'code storage usage owner is immutable'); END;
+
     CREATE TRIGGER code_storage_usage_guest_update
     AFTER UPDATE OF
       document_count, snapshot_bytes, state_vector_bytes,
       update_count, update_bytes, receipt_count, receipt_bytes,
       metadata_bytes, accounted_bytes
     ON code_storage_usage
+    WHEN NEW.is_guest = 1
     BEGIN
       UPDATE code_guest_storage_usage SET
         document_count = document_count + NEW.document_count - OLD.document_count,
@@ -228,6 +239,7 @@ export function installCodeStorageUsageSchema(db: Database.Database): void {
 
     CREATE TRIGGER code_storage_usage_guest_delete
     AFTER DELETE ON code_storage_usage
+    WHEN OLD.is_guest = 1
     BEGIN
       UPDATE code_guest_storage_usage SET
         workspace_count = workspace_count - 1,
@@ -244,18 +256,19 @@ export function installCodeStorageUsageSchema(db: Database.Database): void {
     END;
 
     CREATE TRIGGER code_workspaces_storage_identity_immutable
-    BEFORE UPDATE OF id, room_resource_id ON code_workspaces
+    BEFORE UPDATE OF id, room_resource_id, lesson_id ON code_workspaces
     BEGIN SELECT RAISE(ABORT, 'code workspace identity is immutable'); END;
 
     CREATE TRIGGER code_workspaces_storage_insert
     AFTER INSERT ON code_workspaces
     BEGIN
       INSERT INTO code_storage_usage (
-        workspace_id, document_count, snapshot_bytes, state_vector_bytes,
+        workspace_id, is_guest, document_count, snapshot_bytes, state_vector_bytes,
         update_count, update_bytes, receipt_count, receipt_bytes,
         metadata_bytes, accounted_bytes
       ) VALUES (
-        NEW.id, 0, 0, 0, 0, 0, 0, 0,
+        NEW.id, CASE WHEN NEW.room_resource_id IS NOT NULL THEN 1 ELSE 0 END,
+        0, 0, 0, 0, 0, 0, 0,
         ${CODE_WORKSPACE_METADATA_RESERVE_BYTES},
         ${CODE_WORKSPACE_METADATA_RESERVE_BYTES}
       );
@@ -398,10 +411,176 @@ export function installCodeStorageUsageSchema(db: Database.Database): void {
       COALESCE(SUM(metadata_bytes), 0) AS metadata_bytes,
       COALESCE(SUM(accounted_bytes), 0) AS accounted_bytes
     FROM code_storage_usage
+    WHERE is_guest = 1
   `).get() as Record<string, number>;
   if (Object.keys(expected).some((column) => aggregate[column] !== expected[column])) {
     throw new Error(
       "Code guest storage usage reconciliation produced inconsistent counters",
     );
+  }
+}
+
+/**
+ * Migration-v22 ownership patch for databases that already installed the
+ * v20 accounting tables. Lesson workspaces keep per-workspace accounting but
+ * are deliberately excluded from the aggregate guest-room quota.
+ */
+export function installLessonCodeStorageUsageSchema(
+  db: Database.Database,
+): void {
+  const columns = new Set((db.prepare(
+    "PRAGMA table_info(code_storage_usage)",
+  ).all() as Array<{ name: string }>).map((column) => column.name));
+
+  db.exec(`
+    DROP TRIGGER IF EXISTS code_storage_usage_guest_insert;
+    DROP TRIGGER IF EXISTS code_storage_usage_guest_update;
+    DROP TRIGGER IF EXISTS code_storage_usage_guest_delete;
+    DROP TRIGGER IF EXISTS code_storage_usage_owner_immutable;
+    DROP TRIGGER IF EXISTS code_workspaces_storage_identity_immutable;
+    DROP TRIGGER IF EXISTS code_workspaces_storage_insert;
+  `);
+  if (!columns.has("is_guest")) {
+    db.exec(`
+      ALTER TABLE code_storage_usage
+      ADD COLUMN is_guest INTEGER NOT NULL DEFAULT 1
+        CHECK (is_guest IN (0, 1));
+    `);
+  }
+
+  db.exec(`
+    UPDATE code_storage_usage
+    SET is_guest = CASE WHEN EXISTS (
+      SELECT 1 FROM code_workspaces workspace
+      WHERE workspace.id = code_storage_usage.workspace_id
+        AND workspace.room_resource_id IS NOT NULL
+    ) THEN 1 ELSE 0 END;
+
+    UPDATE code_guest_storage_usage SET
+      workspace_count = (
+        SELECT COUNT(*) FROM code_storage_usage WHERE is_guest = 1
+      ),
+      document_count = COALESCE((
+        SELECT SUM(document_count) FROM code_storage_usage WHERE is_guest = 1
+      ), 0),
+      snapshot_bytes = COALESCE((
+        SELECT SUM(snapshot_bytes) FROM code_storage_usage WHERE is_guest = 1
+      ), 0),
+      state_vector_bytes = COALESCE((
+        SELECT SUM(state_vector_bytes) FROM code_storage_usage WHERE is_guest = 1
+      ), 0),
+      update_count = COALESCE((
+        SELECT SUM(update_count) FROM code_storage_usage WHERE is_guest = 1
+      ), 0),
+      update_bytes = COALESCE((
+        SELECT SUM(update_bytes) FROM code_storage_usage WHERE is_guest = 1
+      ), 0),
+      receipt_count = COALESCE((
+        SELECT SUM(receipt_count) FROM code_storage_usage WHERE is_guest = 1
+      ), 0),
+      receipt_bytes = COALESCE((
+        SELECT SUM(receipt_bytes) FROM code_storage_usage WHERE is_guest = 1
+      ), 0),
+      metadata_bytes = COALESCE((
+        SELECT SUM(metadata_bytes) FROM code_storage_usage WHERE is_guest = 1
+      ), 0),
+      accounted_bytes = COALESCE((
+        SELECT SUM(accounted_bytes) FROM code_storage_usage WHERE is_guest = 1
+      ), 0)
+    WHERE singleton = 1;
+
+    CREATE TRIGGER code_storage_usage_guest_insert
+    AFTER INSERT ON code_storage_usage
+    WHEN NEW.is_guest = 1
+    BEGIN
+      UPDATE code_guest_storage_usage SET
+        workspace_count = workspace_count + 1,
+        document_count = document_count + NEW.document_count,
+        snapshot_bytes = snapshot_bytes + NEW.snapshot_bytes,
+        state_vector_bytes = state_vector_bytes + NEW.state_vector_bytes,
+        update_count = update_count + NEW.update_count,
+        update_bytes = update_bytes + NEW.update_bytes,
+        receipt_count = receipt_count + NEW.receipt_count,
+        receipt_bytes = receipt_bytes + NEW.receipt_bytes,
+        metadata_bytes = metadata_bytes + NEW.metadata_bytes,
+        accounted_bytes = accounted_bytes + NEW.accounted_bytes
+      WHERE singleton = 1;
+    END;
+
+    CREATE TRIGGER code_storage_usage_owner_immutable
+    BEFORE UPDATE OF workspace_id, is_guest ON code_storage_usage
+    BEGIN SELECT RAISE(ABORT, 'code storage usage owner is immutable'); END;
+
+    CREATE TRIGGER code_storage_usage_guest_update
+    AFTER UPDATE OF
+      document_count, snapshot_bytes, state_vector_bytes,
+      update_count, update_bytes, receipt_count, receipt_bytes,
+      metadata_bytes, accounted_bytes
+    ON code_storage_usage
+    WHEN NEW.is_guest = 1
+    BEGIN
+      UPDATE code_guest_storage_usage SET
+        document_count = document_count + NEW.document_count - OLD.document_count,
+        snapshot_bytes = snapshot_bytes + NEW.snapshot_bytes - OLD.snapshot_bytes,
+        state_vector_bytes = state_vector_bytes
+          + NEW.state_vector_bytes - OLD.state_vector_bytes,
+        update_count = update_count + NEW.update_count - OLD.update_count,
+        update_bytes = update_bytes + NEW.update_bytes - OLD.update_bytes,
+        receipt_count = receipt_count + NEW.receipt_count - OLD.receipt_count,
+        receipt_bytes = receipt_bytes + NEW.receipt_bytes - OLD.receipt_bytes,
+        metadata_bytes = metadata_bytes + NEW.metadata_bytes - OLD.metadata_bytes,
+        accounted_bytes = accounted_bytes
+          + NEW.accounted_bytes - OLD.accounted_bytes
+      WHERE singleton = 1;
+    END;
+
+    CREATE TRIGGER code_storage_usage_guest_delete
+    AFTER DELETE ON code_storage_usage
+    WHEN OLD.is_guest = 1
+    BEGIN
+      UPDATE code_guest_storage_usage SET
+        workspace_count = workspace_count - 1,
+        document_count = document_count - OLD.document_count,
+        snapshot_bytes = snapshot_bytes - OLD.snapshot_bytes,
+        state_vector_bytes = state_vector_bytes - OLD.state_vector_bytes,
+        update_count = update_count - OLD.update_count,
+        update_bytes = update_bytes - OLD.update_bytes,
+        receipt_count = receipt_count - OLD.receipt_count,
+        receipt_bytes = receipt_bytes - OLD.receipt_bytes,
+        metadata_bytes = metadata_bytes - OLD.metadata_bytes,
+        accounted_bytes = accounted_bytes - OLD.accounted_bytes
+      WHERE singleton = 1;
+    END;
+
+    CREATE TRIGGER code_workspaces_storage_identity_immutable
+    BEFORE UPDATE OF id, room_resource_id, lesson_id ON code_workspaces
+    BEGIN SELECT RAISE(ABORT, 'code workspace identity is immutable'); END;
+
+    CREATE TRIGGER code_workspaces_storage_insert
+    AFTER INSERT ON code_workspaces
+    BEGIN
+      INSERT INTO code_storage_usage (
+        workspace_id, is_guest, document_count, snapshot_bytes,
+        state_vector_bytes, update_count, update_bytes, receipt_count,
+        receipt_bytes, metadata_bytes, accounted_bytes
+      ) VALUES (
+        NEW.id, CASE WHEN NEW.room_resource_id IS NOT NULL THEN 1 ELSE 0 END,
+        0, 0, 0, 0, 0, 0, 0,
+        ${CODE_WORKSPACE_METADATA_RESERVE_BYTES},
+        ${CODE_WORKSPACE_METADATA_RESERVE_BYTES}
+      );
+    END;
+  `);
+
+  const mismatch = db.prepare(`
+    SELECT usage.workspace_id
+    FROM code_storage_usage usage
+    JOIN code_workspaces workspace ON workspace.id = usage.workspace_id
+    WHERE usage.is_guest != CASE
+      WHEN workspace.room_resource_id IS NOT NULL THEN 1 ELSE 0 END
+    LIMIT 1
+  `).get();
+  if (mismatch) {
+    throw new Error("Code storage ownership reconciliation failed");
   }
 }

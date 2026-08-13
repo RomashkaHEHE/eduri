@@ -8,11 +8,13 @@ import {
   type BoardSyncTransport,
 } from "./board-v2/sync-transport.js";
 import { attachCodeSyncNamespace } from "./code-sync/transport.js";
+import { attachLessonCodeSyncNamespace } from "./lesson-code-sync/transport.js";
 
 export interface EduriServer extends HttpServer {
   eduriIo: SocketServer;
   eduriBoardV2: BoardSyncTransport;
   eduriCodeSync: Namespace;
+  eduriLessonCodeSync: Namespace;
   eduriContext: AppContext;
 }
 
@@ -25,6 +27,15 @@ export function createServer(options: CreateAppOptions = {}): EduriServer {
   server.eduriCodeSync = attachCodeSyncNamespace(
     server.eduriIo,
     context.codeSync,
+    {
+      allowedOrigins: context.config.appOrigins,
+      trustedProxy: context.config.trustProxy,
+    },
+  );
+  server.eduriLessonCodeSync = attachLessonCodeSyncNamespace(
+    server.eduriIo,
+    context,
+    context.lessonCodeSync,
     {
       allowedOrigins: context.config.appOrigins,
       trustedProxy: context.config.trustProxy,

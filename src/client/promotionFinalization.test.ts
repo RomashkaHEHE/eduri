@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiError, type GuestRoomDraft } from "./api";
 import {
   clearPendingGuestFinalization,
+  guestPromotionErrorMessage,
   isDefinitiveGuestFinalizationFailure,
   loadPendingGuestFinalization,
   savePendingGuestFinalization,
@@ -45,6 +46,16 @@ afterEach(() => {
 });
 
 describe("guest promotion finalization recovery", () => {
+  it("shows specific API failures and masks unexpected runtime details", () => {
+    expect(guestPromotionErrorMessage(
+      new ApiError("Слишком много созданных сеансов", 429),
+    )).toBe("Слишком много созданных сеансов");
+    expect(guestPromotionErrorMessage(new ApiError("   ", 500)))
+      .toBe("Не удалось начать сеанс. Проверьте соединение и попробуйте ещё раз.");
+    expect(guestPromotionErrorMessage(new Error("private runtime detail")))
+      .toBe("Не удалось начать сеанс. Проверьте соединение и попробуйте ещё раз.");
+  });
+
   it("falls back to volatile state when the localStorage getter throws", () => {
     const pending = draft("getter-blocked", "getter-token");
     const storage = vi.spyOn(window, "localStorage", "get")

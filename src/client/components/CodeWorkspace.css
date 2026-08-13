@@ -31,27 +31,27 @@
 .lesson-code-workspace[data-code-theme="dark"],
 :root[data-theme="dark"] .full-code-workspace,
 :root[data-theme="dark"] .lesson-code-workspace {
-  --code-workspace-bg: #171a1f;
-  --code-explorer-bg: #1d252d;
-  --code-console-bg: #17212b;
-  --code-surface: #202a33;
-  --code-surface-muted: #101820;
-  --code-surface-hover: #29343e;
-  --code-surface-active: #34424e;
-  --code-border: #2e3944;
-  --code-border-strong: #667686;
-  --code-text: #d6dee7;
+  --code-workspace-bg: #181918;
+  --code-explorer-bg: #20211f;
+  --code-console-bg: #181918;
+  --code-surface: #252624;
+  --code-surface-muted: #141513;
+  --code-surface-hover: #2e2f2c;
+  --code-surface-active: #393a36;
+  --code-border: #353633;
+  --code-border-strong: #70716d;
+  --code-text: #ddddda;
   --code-text-strong: #ffffff;
-  --code-muted: #9eafbd;
-  --code-accent: #8fb5ff;
-  --code-accent-soft: #243443;
-  --code-drop-bg: #38516a;
-  --code-button-bg: #344553;
-  --code-button-hover: #405565;
+  --code-muted: #aaaca8;
+  --code-accent: #91b4f4;
+  --code-accent-soft: #2c3138;
+  --code-drop-bg: #414851;
+  --code-button-bg: #383936;
+  --code-button-hover: #454641;
   --code-danger: #ff9b96;
   --code-danger-soft: #4a2a2a;
   --code-success: #63d5a8;
-  --code-waiting: #8fb5ff;
+  --code-waiting: #91b4f4;
   --code-shadow: 0 12px 30px rgb(0 0 0 / 34%);
   color-scheme: dark;
 }
@@ -106,7 +106,7 @@
   height: 29px;
   padding: 0 3px 0 0;
   display: grid;
-  grid-template-columns: 15px 18px minmax(0, 1fr);
+  grid-template-columns: 15px 18px minmax(0, 1fr) auto;
   align-items: center;
   gap: 1px;
   color: inherit;
@@ -120,11 +120,24 @@
   cursor: default;
 }
 
-.full-code-workspace .code-tree-entry__main > span:last-child {
+.full-code-workspace .code-tree-entry__main > span:nth-child(3) {
   overflow: hidden;
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.full-code-workspace .code-tree-entry__presence {
+  width: 17px;
+  height: 17px;
+  display: grid;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, white 72%, transparent);
+  border-radius: 999px;
+  color: white;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
 }
 
 .full-code-workspace .code-tree-entry__chevron,
@@ -140,7 +153,12 @@
   color: var(--code-muted, #8e9ba7);
 }
 
-.full-code-workspace .code-tree-entry__rename > input {
+.full-code-workspace .code-tree-entry__rename-input {
+  min-width: 0;
+  width: 100%;
+}
+
+.full-code-workspace .code-tree-entry__rename-input > input {
   width: 100%;
   min-width: 0;
   height: 23px;
@@ -256,10 +274,6 @@
   grid-template-rows: 34px minmax(0, 1fr);
 }
 
-.full-code-workspace .code-console__output.has-prompt {
-  grid-template-rows: 34px minmax(0, 1fr) 38px;
-}
-
 .full-code-workspace .code-console__output header > div {
   min-width: 0;
   display: flex;
@@ -270,70 +284,6 @@
 
 .full-code-workspace .code-console__waiting {
   color: var(--code-waiting, #8fb5ff);
-}
-
-.full-code-workspace .code-console__output pre {
-  grid-row: 2;
-}
-
-.code-console__prompt {
-  min-width: 0;
-  height: 38px;
-  padding: 5px 7px 5px 11px;
-  display: grid;
-  grid-template-columns: 13px minmax(0, 1fr) 30px;
-  align-items: center;
-  gap: 4px;
-  color: var(--code-muted, #6f7f8e);
-  border-top: 1px solid var(--code-border, #2b3946);
-  background: var(--code-surface-muted, #121b23);
-}
-
-.code-console__prompt.is-waiting {
-  color: var(--code-waiting, #8fb5ff);
-}
-
-.code-console__prompt > input {
-  width: 100%;
-  min-width: 0;
-  height: 28px;
-  padding: 0 6px;
-  color: var(--code-text, #e4ebf1);
-  border: 0;
-  outline: 0;
-  background: transparent;
-  font-family: "Cascadia Code", Consolas, monospace;
-  font-size: 11px;
-}
-
-.code-console__prompt > input::placeholder {
-  color: var(--code-muted, #71808d);
-}
-
-.code-console__prompt > input:disabled {
-  cursor: default;
-}
-
-.code-console__prompt > button {
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  display: grid;
-  place-items: center;
-  color: var(--code-text, #dce7f1);
-  border: 0;
-  border-radius: 4px;
-  background: var(--code-button-bg, #334553);
-  cursor: pointer;
-}
-
-.code-console__prompt > button:hover:not(:disabled) {
-  background: var(--code-button-hover, #48637a);
-}
-
-.code-console__prompt > button:disabled {
-  cursor: default;
-  opacity: 0.35;
 }
 
 /* Code Workspace owns a complete palette so Explorer, Monaco chrome, tests,
@@ -508,6 +458,10 @@
   background: var(--code-danger-soft);
 }
 
+.full-code-workspace[data-code-theme] .code-test__field > label {
+  color: var(--code-muted);
+}
+
 .full-code-workspace[data-code-theme] .code-console__inputs label > span {
   color: var(--code-muted);
 }
@@ -516,6 +470,104 @@
 .full-code-workspace[data-code-theme] .code-test__meta input:focus,
 .full-code-workspace[data-code-theme] .code-test__meta select:focus {
   border-color: var(--code-accent);
+}
+
+.full-code-workspace .code-collaborative-field {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--code-border-strong);
+  border-radius: 4px;
+  background: var(--code-surface-muted);
+}
+
+.full-code-workspace .code-collaborative-field:focus-within {
+  border-color: var(--code-accent);
+}
+
+.full-code-workspace .code-presence-field {
+  position: relative;
+  min-width: 0;
+}
+
+.full-code-workspace .code-presence-field > input {
+  width: 100%;
+}
+
+.full-code-workspace .code-presence-field__label {
+  position: absolute;
+  z-index: 4;
+  right: 3px;
+  bottom: calc(100% - 2px);
+  max-width: 150px;
+  padding: 1px 5px;
+  overflow: hidden;
+  border-radius: 4px 4px 0 4px;
+  color: white;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.full-code-workspace .code-shared-terminal {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: 8px 10px;
+  overflow: hidden;
+  background: var(--code-console-bg);
+}
+
+.full-code-workspace .code-shared-terminal [data-eduri-terminal-remote-caret="true"] {
+  position: absolute;
+  z-index: 8;
+  width: 0;
+  height: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.full-code-workspace .code-shared-terminal [data-eduri-terminal-remote-caret-hitbox="true"] {
+  position: absolute;
+  left: -9px;
+  width: 18px;
+  pointer-events: none;
+}
+
+.full-code-workspace .code-shared-terminal [data-eduri-terminal-remote-caret-label="true"] {
+  position: absolute;
+  max-width: 180px;
+  padding: 1px 5px;
+  overflow: hidden;
+  border-radius: 4px 4px 4px 0;
+  font-family: Inter, system-ui, sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 120ms ease, visibility 0s linear 120ms;
+  pointer-events: none;
+}
+
+.full-code-workspace .code-shared-terminal .xterm,
+.full-code-workspace .code-shared-terminal .xterm-viewport,
+.full-code-workspace .code-shared-terminal .xterm-screen {
+  width: 100%;
+  height: 100%;
+}
+
+.full-code-workspace .code-shared-terminal .xterm-viewport {
+  scrollbar-color: var(--code-border-strong) var(--code-console-bg);
 }
 
 .full-code-workspace[data-code-theme] .code-console__inputs > button {
@@ -558,33 +610,8 @@
   scrollbar-color: var(--code-border-strong) var(--code-console-bg);
 }
 
-.full-code-workspace[data-code-theme] .code-console__prompt {
-  color: var(--code-muted);
-  border-color: var(--code-border);
-  background: var(--code-surface-muted);
-}
-
-.full-code-workspace[data-code-theme] .code-console__prompt.is-waiting,
 .full-code-workspace[data-code-theme] .code-console__waiting {
   color: var(--code-waiting);
-}
-
-.full-code-workspace[data-code-theme] .code-console__prompt > input {
-  color: var(--code-text);
-  caret-color: var(--code-accent);
-}
-
-.full-code-workspace[data-code-theme] .code-console__prompt > input::placeholder {
-  color: var(--code-muted);
-}
-
-.full-code-workspace[data-code-theme] .code-console__prompt > button {
-  color: var(--code-text-strong);
-  background: var(--code-button-bg);
-}
-
-.full-code-workspace[data-code-theme] .code-console__prompt > button:hover:not(:disabled) {
-  background: var(--code-button-hover);
 }
 
 .full-code-workspace[data-code-theme] .code-explorer-menu {

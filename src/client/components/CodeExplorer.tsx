@@ -22,6 +22,12 @@ import {
   type MouseEvent,
 } from "react";
 import type { CodeWorkspaceEntrySnapshot } from "../../code/core";
+import {
+  NativeInputPresence,
+  visibleNativeInputPresencePeer,
+  type NativeInputPresencePeer,
+  type NativeInputPresencePublisher,
+} from "../code/nativeInputPresence";
 
 interface CodeExplorerProps {
   readonly entries: readonly CodeWorkspaceEntrySnapshot[];
@@ -33,6 +39,8 @@ interface CodeExplorerProps {
   readonly onBeginRename: (entry: CodeWorkspaceEntrySnapshot) => void;
   readonly onRenameValueChange: (value: string) => void;
   readonly onCommitRename: () => void;
+  readonly awarenessPeers?: readonly NativeInputPresencePeer[];
+  readonly publishAwareness?: NativeInputPresencePublisher;
   readonly onCancelRename: () => void;
   readonly onCreate: (kind: "file" | "folder", parentId: string | null) => void;
   readonly onUpload: (files: FileList | null, parentId: string | null) => void;
@@ -106,6 +114,8 @@ export function CodeExplorer({
   onBeginRename,
   onRenameValueChange,
   onCommitRename,
+  awarenessPeers = [],
+  publishAwareness = () => undefined,
   onCancelRename,
   onCreate,
   onUpload,
@@ -317,6 +327,24 @@ export function CodeExplorer({
           const folder = entry.kind === "folder";
           const expandable = folder && expandableFolderIds.has(entry.id);
           const expanded = expandable && !collapsed.has(entry.id);
+          const renameTarget = {
+            kind: "explorer",
+            entryId: entry.id,
+            field: "rename",
+          } as const;
+          const renamePeer = visibleNativeInputPresencePeer(
+            awarenessPeers,
+            renameTarget,
+          );
+          const editingPeer = [...awarenessPeers]
+            .filter((peer) => (
+              peer.state.target.kind === "file"
+              && peer.state.target.entryId === entry.id
+            ))
+            .sort((left, right) => left.participant.participantId.localeCompare(
+              right.participant.participantId,
+            ))[0] ?? null;
+          const visiblePresencePeer = renamePeer ?? editingPeer;
           return (
             <div
               key={entry.id}
@@ -380,18 +408,32 @@ export function CodeExplorer({
                       ? <FileDigit size={15} />
                       : <FileCode2 size={15} />}
                 </span>
-                <input
-                  autoFocus
+                <NativeInputPresence
+                  className="code-tree-entry__rename-input"
+                  target={renameTarget}
                   value={renameValue}
-                  readOnly={readOnly}
-                  aria-label="Новое имя"
-                  onChange={(event) => onRenameValueChange(event.target.value)}
-                  onBlur={onCommitRename}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") onCommitRename();
-                    if (event.key === "Escape") onCancelRename();
-                  }}
-                />
+                  peers={awarenessPeers}
+                  publish={publishAwareness}
+                >
+                  {(presence) => (
+                    <input
+                      {...presence}
+                      autoFocus
+                      value={renameValue}
+                      readOnly={readOnly}
+                      aria-label="Новое имя"
+                      onChange={(event) => onRenameValueChange(event.target.value)}
+                      onBlur={(event) => {
+                        presence.onBlur(event);
+                        onCommitRename();
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") onCommitRename();
+                        if (event.key === "Escape") onCancelRename();
+                      }}
+                    />
+                  )}
+                </NativeInputPresence>
               </div>
               ) : (
               <button
@@ -434,6 +476,18 @@ export function CodeExplorer({
                       : <FileCode2 size={15} />}
                 </span>
                 <span>{entry.name}</span>
+                {visiblePresencePeer && (
+                  <span
+                    className="code-tree-entry__presence"
+                    style={{ backgroundColor: visiblePresencePeer.participant.color }}
+                    title={renamePeer
+                      ? `${visiblePresencePeer.participant.displayName} переименовывает`
+                      : `${visiblePresencePeer.participant.displayName} редактирует файл`}
+                    aria-label={renamePeer
+                      ? `${visiblePresencePeer.participant.displayName} переименовывает`
+                      : `${visiblePresencePeer.participant.displayName} редактирует файл`}
+                  >{visiblePresencePeer.participant.displayName.slice(0, 1)}</span>
+                )}
               </button>
               )}
             </div>

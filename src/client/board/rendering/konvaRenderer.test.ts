@@ -947,8 +947,8 @@ describe("Konva board object compatibility", () => {
       .toBe("#e7edf5");
     expect((internals.nodes.get("custom-ink")!.getChildren()[0] as Konva.Rect).stroke())
       .toBe("#d33f49");
-    expect(internals.transformer.borderStroke()).toBe("#84a2ff");
-    expect(internals.transformer.anchorFill()).toBe("#11161c");
+    expect(internals.transformer.borderStroke()).toBe("#86a7e8");
+    expect(internals.transformer.anchorFill()).toBe("#151614");
 
     renderer.setTheme("light");
     expect((internals.nodes.get("default-ink")!.getChildren()[0] as Konva.Rect).stroke())
@@ -1484,7 +1484,7 @@ describe("Konva local multi-selection chrome", () => {
     renderer.setTheme("dark");
     expect(
       internals.selectionObjectOutlines.get("selection-rectangle")?.stroke(),
-    ).toBe("#84a2ff");
+    ).toBe("#86a7e8");
     renderer.setTheme("light");
     expect(
       internals.selectionObjectOutlines.get("selection-rectangle")?.stroke(),
@@ -6521,8 +6521,8 @@ describe("Konva pointer gesture input", () => {
       expect(scheduled.size).toBe(1);
 
       renderer.setTheme("dark");
-      expect(lowZoomGesture.trailBody?.fill()).toBe("#c1cad4");
-      expect(lowZoomGesture.trailFootprint?.stroke()).toBe("#c1cad4");
+      expect(lowZoomGesture.trailBody?.fill()).toBe("#cbcbc7");
+      expect(lowZoomGesture.trailFootprint?.stroke()).toBe("#cbcbc7");
 
       runNextFrame(startedAt + 136);
       const firstIdleSamples = lowZoomGesture.trailSamples!;

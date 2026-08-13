@@ -212,19 +212,38 @@ handshake; `X-Real-IP` доверяется только при совпаден
 Код ученика нельзя выполнять в основном app container или shell сервера. Для
 server-side execution необходим одноразовый non-root sandbox без host mounts и
 secrets, с запрещенным/allowlisted network egress, seccomp и лимитами CPU, RAM,
-PID, output и времени. Browser Pyodide уменьшает server RCE risk, но не является
-полной границей для секретов browser. Pyodide `0.27.5` и Monaco `0.55.1`
+PID, output и времени. Browser Pyodide уменьшает server RCE risk, но не заменяет
+OS sandbox для server-side execution. Pyodide `0.27.5` и Monaco `0.55.1`
 фиксируются lock-файлом, копируются из npm packages в same-origin build assets и
-не загружаются с CDN/PyPI во время работы. Каждый явный browser-run получает новый
-Worker; client завершает его после результата, ошибки protocol/runtime/worker,
-отмены или 45-секундного timeout, а Worker также сам закрывается после terminal
-response. Loader получает пустой frozen `jsglobals`; после загрузки только
-pinned runtime и до первого пользовательского Python вызова Worker удаляет
-известные network, persistent-storage, cross-tab и nested-worker API. Если хотя
-бы один из них нельзя удалить, выполнение fail closed. Это не позволяет Python
-state и MEMFS пережить запуск и закрывает известные browser capabilities, но
-blacklist на основном application origin все еще не равен отдельному sandbox
-origin и не считается общей границей для произвольного недоверенного кода.
+не загружаются с CDN/PyPI во время работы. Parent проверяет точный размер и
+SHA-256 runtime assets и передаёт их вместе с versioned Worker source через
+закрытый `MessageChannel` в iframe с `sandbox="allow-scripts"` без
+`allow-same-origin`. Его opaque origin не имеет доступа к application DOM,
+cookie, local/session storage или IndexedDB; CSP `connect-src 'none'` запрещает
+network egress и iframe, и созданному внутри него Blob Worker. Broker принимает
+только exact-key run/terminal protocol, bounded input/EOF/interrupt и не имеет
+универсального RPC в parent. `SharedArrayBuffer` для синхронного stdin создаётся
+только внутри opaque iframe и не передаётся из application realm. Каждый явный
+browser-run получает новый Worker; client завершает Worker, channel и iframe
+после результата, ошибки protocol/runtime/worker, отмены или 45-секундного
+timeout. Терминальная команда `py файл` также получает новый Worker; постоянный
+интерпретатор допускается только внутри явно открытого bare-`py` REPL и
+закрывается на exit/EOF/stop/session loss. Loader получает пустой frozen
+`jsglobals`; удаление известных network, persistent-storage, cross-tab и
+nested-worker API внутри Worker остаётся fail-closed defense in depth.
+Терминал не связан с `child_process`, shell, Docker или API host: сервер лишь
+упорядочивает bounded ephemeral terminal actions и выбирает browser-host, а
+исполнение остаётся в credential-free Pyodide Worker. Доступны только команды
+виртуальной MEMFS workspace (`pwd`, `ls`/`dir`, `cat`/`type`, `clear`/`cls`,
+`py`/`python`). Output/input/transcript, action rate, path, file, workspace и
+time limits проверяются независимо. Для lesson binary upload и binary
+filesystem delta fail closed отключены, пока нет authenticated durable blob
+transport; CRDT никогда не публикует ссылку на blob, существующий лишь в одном
+browser cache.
+Перед каждой отправкой Code update, awareness или terminal delta получатель
+повторно авторизуется; отозванному сокету payload не передаётся. Terminal action
+retry сохраняет исходный action ID и компактный SHA-256 fingerprint, поэтому
+потеря ACK не запускает команду повторно и не удваивает action-rate charge.
 
 ## Credential rotation
 

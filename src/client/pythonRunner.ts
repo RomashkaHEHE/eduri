@@ -1,7 +1,16 @@
 import {
   PYTHON_RUNNER_PROTOCOL_VERSION,
   PYTHON_RUNNER_WORKER_URL,
+  type PythonRuntimeAssets,
 } from "../pythonRunnerContract.js";
+import {
+  loadPythonRuntimeAssets,
+  pythonRuntimeAssetTransferList,
+} from "./pythonRuntimeAssets.js";
+import {
+  createOpaquePythonWorker,
+  opaquePythonWorkerControl,
+} from "./opaquePythonWorker.js";
 
 export {
   PYTHON_RUNNER_PROTOCOL_VERSION,
@@ -94,6 +103,7 @@ export interface PythonRunnerRequest {
   readonly protocolVersion: typeof PYTHON_RUNNER_PROTOCOL_VERSION;
   readonly runId: string;
   readonly payload: PythonRunPayload;
+  readonly runtimeAssets: PythonRuntimeAssets;
   readonly stdinControl?: SharedArrayBuffer;
   readonly stdinData?: SharedArrayBuffer;
 }
@@ -149,6 +159,9 @@ export interface PythonRunnerOptions {
   readonly createWorker?: () => Worker;
   readonly runId?: string;
   readonly timeoutMs?: number;
+  /** Preverified assets for embedding/tests; normal callers use the loader. */
+  readonly runtimeAssets?: PythonRuntimeAssets;
+  readonly loadRuntimeAssets?: () => Promise<PythonRuntimeAssets>;
   readonly onOutput?: (chunk: string) => void;
   readonly onInputRequest?: (
     request: Readonly<{ runId: string; requestId: string }>,
@@ -316,15 +329,32 @@ export function startPythonRun(
     throw new Error("Python run ID is invalid");
   }
   const createWorker = options.createWorker
-    ?? (() => new Worker(PYTHON_RUNNER_WORKER_URL));
+    ?? (() => createOpaquePythonWorker("runner"));
   const timeoutMs = options.timeoutMs ?? PYTHON_RUNNER_TIMEOUT_MS;
   const interactive = payload.kind === "workspace" && payload.stdin === null;
+  let worker: Worker;
+  try {
+    worker = createWorker();
+  } catch (error) {
+    const message = error instanceof Error
+      ? error.message
+      : "Python worker could not be created";
+    return {
+      runId,
+      result: Promise.resolve(responseFor(runId, "worker-error", message)),
+      submitInput: () => false,
+      sendEof: () => false,
+      cancel: () => undefined,
+    };
+  }
+  const opaqueControl = opaquePythonWorkerControl(worker);
   let stdinControlBuffer: SharedArrayBuffer | null = null;
   let stdinDataBuffer: SharedArrayBuffer | null = null;
   let stdinControl: Int32Array | null = null;
   let stdinData: Uint8Array | null = null;
-  if (interactive) {
+  if (interactive && !opaqueControl) {
     if (typeof SharedArrayBuffer !== "function") {
+      worker.terminate();
       return {
         runId,
         result: Promise.resolve(responseFor(
@@ -341,21 +371,6 @@ export function startPythonRun(
     stdinDataBuffer = new SharedArrayBuffer(PYTHON_RUNNER_MAX_INPUT_LINE_BYTES);
     stdinControl = new Int32Array(stdinControlBuffer);
     stdinData = new Uint8Array(stdinDataBuffer);
-  }
-  let worker: Worker;
-  try {
-    worker = createWorker();
-  } catch (error) {
-    const message = error instanceof Error
-      ? error.message
-      : "Python worker could not be created";
-    return {
-      runId,
-      result: Promise.resolve(responseFor(runId, "worker-error", message)),
-      submitInput: () => false,
-      sendEof: () => false,
-      cancel: () => undefined,
-    };
   }
 
   let settled = false;
@@ -417,8 +432,13 @@ export function startPythonRun(
         && streamed.runId === runId
         && typeof streamed.requestId === "string"
         && RUN_ID_PATTERN.test(streamed.requestId)
-        && stdinControl
-        && Atomics.load(stdinControl, 0) === PYTHON_STDIN_WAITING
+        && (
+          opaqueControl !== null
+          || (
+            stdinControl !== null
+            && Atomics.load(stdinControl, 0) === PYTHON_STDIN_WAITING
+          )
+        )
       ) {
         inputRequestCount += 1;
         if (inputRequestCount > MAX_INPUT_REQUESTS) {
@@ -477,61 +497,86 @@ export function startPythonRun(
     ));
   }, timeoutMs);
 
-  const request: PythonRunnerRequest = {
-    type: PYTHON_RUNNER_REQUEST_TYPE,
-    protocolVersion: PYTHON_RUNNER_PROTOCOL_VERSION,
-    runId,
-    payload,
-    ...(stdinControlBuffer && stdinDataBuffer
-      ? { stdinControl: stdinControlBuffer, stdinData: stdinDataBuffer }
-      : {}),
-  };
-  try {
-    worker.postMessage(request);
-  } catch (error) {
-    finish(responseFor(
+  const postRequest = (runtimeAssets: PythonRuntimeAssets): void => {
+    if (settled) return;
+    const request: PythonRunnerRequest = {
+      type: PYTHON_RUNNER_REQUEST_TYPE,
+      protocolVersion: PYTHON_RUNNER_PROTOCOL_VERSION,
       runId,
-      "worker-error",
-      error instanceof Error ? error.message : "Python worker could not start.",
-    ));
+      payload,
+      runtimeAssets,
+      ...(stdinControlBuffer && stdinDataBuffer
+        ? { stdinControl: stdinControlBuffer, stdinData: stdinDataBuffer }
+        : {}),
+    };
+    try {
+      worker.postMessage(
+        request,
+        [...pythonRuntimeAssetTransferList(runtimeAssets)],
+      );
+    } catch (error) {
+      finish(responseFor(
+        runId,
+        "worker-error",
+        error instanceof Error ? error.message : "Python worker could not start.",
+      ));
+    }
+  };
+  if (options.runtimeAssets) {
+    postRequest(options.runtimeAssets);
+  } else {
+    const runtimeAssetLoader = options.loadRuntimeAssets ?? loadPythonRuntimeAssets;
+    void runtimeAssetLoader().then(postRequest).catch(() => {
+      finish(responseFor(
+        runId,
+        "worker-error",
+        "Pinned Python runtime assets could not be loaded or verified.",
+      ));
+    });
   }
 
   return {
     runId,
     result,
     submitInput: (value) => {
-      if (
-        settled
-        || waitingRequestId === null
-        || !stdinControl
-        || !stdinData
-        || Atomics.load(stdinControl, 0) !== PYTHON_STDIN_WAITING
-      ) return false;
+      if (settled || waitingRequestId === null) return false;
       const bytes = new TextEncoder().encode(value);
       if (
         bytes.byteLength > PYTHON_RUNNER_MAX_INPUT_LINE_BYTES
         || submittedInputBytes + bytes.byteLength > PYTHON_RUNNER_MAX_INPUT_BYTES
       ) return false;
-      stdinData.fill(0, 0, bytes.byteLength);
-      stdinData.set(bytes, 0);
+      if (opaqueControl) {
+        if (!opaqueControl.submitPythonInput(value)) return false;
+      } else {
+        if (
+          !stdinControl
+          || !stdinData
+          || Atomics.load(stdinControl, 0) !== PYTHON_STDIN_WAITING
+        ) return false;
+        stdinData.fill(0);
+        stdinData.set(bytes, 0);
+        Atomics.store(stdinControl, 1, bytes.byteLength);
+        Atomics.store(stdinControl, 0, PYTHON_STDIN_VALUE);
+        Atomics.notify(stdinControl, 0);
+      }
       submittedInputBytes += bytes.byteLength;
       waitingRequestId = null;
-      Atomics.store(stdinControl, 1, bytes.byteLength);
-      Atomics.store(stdinControl, 0, PYTHON_STDIN_VALUE);
-      Atomics.notify(stdinControl, 0);
       return true;
     },
     sendEof: () => {
-      if (
-        settled
-        || waitingRequestId === null
-        || !stdinControl
-        || Atomics.load(stdinControl, 0) !== PYTHON_STDIN_WAITING
-      ) return false;
+      if (settled || waitingRequestId === null) return false;
+      if (opaqueControl) {
+        if (!opaqueControl.sendPythonEof()) return false;
+      } else {
+        if (
+          !stdinControl
+          || Atomics.load(stdinControl, 0) !== PYTHON_STDIN_WAITING
+        ) return false;
+        Atomics.store(stdinControl, 1, 0);
+        Atomics.store(stdinControl, 0, PYTHON_STDIN_EOF);
+        Atomics.notify(stdinControl, 0);
+      }
       waitingRequestId = null;
-      Atomics.store(stdinControl, 1, 0);
-      Atomics.store(stdinControl, 0, PYTHON_STDIN_EOF);
-      Atomics.notify(stdinControl, 0);
       return true;
     },
     cancel: () => finish(responseFor(runId, "cancelled", "")),

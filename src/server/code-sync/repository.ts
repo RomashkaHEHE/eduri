@@ -5,12 +5,14 @@ import { CODE_SYNC_LIMITS } from "../../code/protocol/index.js";
 import {
   CODE_WORKSPACE_SCHEMA_VERSION,
   initializeCodeWorkspace,
+  replaceCodeWorkspaceText,
   validateCodeWorkspaceDocument,
 } from "../../code/core/index.js";
 
 interface WorkspaceRow {
   workspace_id: string;
-  room_resource_id: string;
+  room_resource_id: string | null;
+  lesson_id: string | null;
   document_id: string;
   schema_version: number;
 }
@@ -27,6 +29,7 @@ interface DocumentRow {
   update_log_bytes: number;
   receipt_count: number;
   compacted_at: string | null;
+  is_guest: number;
 }
 
 interface UpdateRow {
@@ -69,7 +72,8 @@ export interface CodeSyncStoragePolicy {
 
 export interface CodeWorkspaceRecord {
   readonly id: string;
-  readonly roomResourceId: string;
+  readonly roomResourceId: string | null;
+  readonly lessonId: string | null;
   readonly documentId: string;
   readonly schemaVersion: number;
 }
@@ -161,9 +165,32 @@ function workspaceRecord(row: WorkspaceRow): CodeWorkspaceRecord {
   return {
     id: row.workspace_id,
     roomResourceId: row.room_resource_id,
+    lessonId: row.lesson_id,
     documentId: row.document_id,
     schemaVersion: row.schema_version,
   };
+}
+
+const LESSON_CODE_STARTER = "numbers = [2, 4, 6]\nprint(sum(numbers))";
+
+function legacyLessonSource(sourceJson: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(sourceJson);
+  } catch {
+    return LESSON_CODE_STARTER;
+  }
+  if (typeof parsed === "string") return parsed;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return LESSON_CODE_STARTER;
+  }
+  const record = parsed as Record<string, unknown>;
+  const source = typeof record.value === "string"
+    ? record.value
+    : typeof record.code === "string"
+      ? record.code
+      : null;
+  return source ?? LESSON_CODE_STARTER;
 }
 
 export class CodeSyncRepository {
@@ -290,6 +317,7 @@ export class CodeSyncRepository {
           return {
             id: workspaceId,
             roomResourceId,
+            lessonId: null,
             documentId,
             schemaVersion: CODE_WORKSPACE_SCHEMA_VERSION,
           };
@@ -312,12 +340,134 @@ export class CodeSyncRepository {
       SELECT
         workspace.id AS workspace_id,
         workspace.room_resource_id,
+        workspace.lesson_id,
         workspace.schema_version,
         document.id AS document_id
       FROM code_workspaces workspace
       JOIN code_documents document ON document.workspace_id = workspace.id
       WHERE workspace.room_resource_id = ?
     `).get(roomResourceId) as WorkspaceRow | undefined;
+    return row ? workspaceRecord(row) : null;
+  }
+
+  ensureLessonWorkspace(lessonId: string): CodeWorkspaceRecord {
+    if (!lessonId) {
+      throw new CodeSyncRepositoryError(
+        "INVALID_ARGUMENT",
+        "lessonId is required",
+      );
+    }
+    const existing = this.workspaceForLesson(lessonId);
+    if (existing) return existing;
+
+    try {
+      return this.db.transaction(() => {
+        const lesson = this.db.prepare(`
+          SELECT id, code_state, code_revision
+          FROM lessons WHERE id = ?
+        `).get(lessonId) as {
+          id: string;
+          code_state: string;
+          code_revision: number;
+        } | undefined;
+        if (!lesson) {
+          throw new CodeSyncRepositoryError(
+            "NOT_FOUND",
+            "Lesson was not found",
+          );
+        }
+        const raced = this.workspaceForLesson(lessonId);
+        if (raced) return raced;
+
+        const document = new Y.Doc();
+        try {
+          const mainId = initializeCodeWorkspace(document, "server-bootstrap");
+          replaceCodeWorkspaceText(
+            document,
+            mainId,
+            legacyLessonSource(lesson.code_state),
+            "server-legacy-import",
+          );
+          validateCodeWorkspaceDocument(document);
+          const snapshot = Y.encodeStateAsUpdate(document);
+          const stateVector = Y.encodeStateVector(document);
+          const timestamp = iso(this.now());
+          const workspaceId = randomUUID();
+          const documentId = randomUUID();
+
+          this.db.prepare(`
+            INSERT INTO code_workspaces (
+              id, room_resource_id, lesson_id, schema_version,
+              created_at, updated_at
+            ) VALUES (?, NULL, ?, ?, ?, ?)
+          `).run(
+            workspaceId,
+            lessonId,
+            CODE_WORKSPACE_SCHEMA_VERSION,
+            timestamp,
+            timestamp,
+          );
+          this.db.prepare(`
+            INSERT INTO code_documents (
+              id, workspace_id, snapshot_update, snapshot_bytes,
+              state_vector, state_vector_bytes, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            documentId,
+            workspaceId,
+            Buffer.from(snapshot),
+            snapshot.byteLength,
+            Buffer.from(stateVector),
+            stateVector.byteLength,
+            timestamp,
+            timestamp,
+          );
+          this.db.prepare(`
+            INSERT INTO lesson_code_legacy_imports (
+              workspace_id, lesson_id, source_revision, source_json,
+              source_sha256, imported_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+          `).run(
+            workspaceId,
+            lessonId,
+            lesson.code_revision,
+            lesson.code_state,
+            digest(Buffer.from(lesson.code_state, "utf8")),
+            timestamp,
+          );
+          return {
+            id: workspaceId,
+            roomResourceId: null,
+            lessonId,
+            documentId,
+            schemaVersion: CODE_WORKSPACE_SCHEMA_VERSION,
+          };
+        } finally {
+          document.destroy();
+        }
+      }).immediate();
+    } catch (error) {
+      if (error instanceof CodeSyncRepositoryError) throw error;
+      throw new CodeSyncRepositoryError(
+        "STORAGE_ERROR",
+        "Lesson Code workspace could not be initialized",
+        { cause: error },
+      );
+    }
+  }
+
+  workspaceForLesson(lessonId: string): CodeWorkspaceRecord | null {
+    const row = this.db.prepare(`
+      SELECT
+        workspace.id AS workspace_id,
+        workspace.room_resource_id,
+        workspace.lesson_id,
+        workspace.schema_version,
+        document.id AS document_id
+      FROM code_workspaces workspace
+      JOIN code_documents document ON document.workspace_id = workspace.id
+      WHERE workspace.lesson_id = ?
+    `).get(lessonId) as WorkspaceRow | undefined;
     return row ? workspaceRecord(row) : null;
   }
 
@@ -454,7 +604,9 @@ export class CodeSyncRepository {
       return { status: "duplicate", sequence: receipt.sequence };
     }
 
-    const guestStorageBefore = this.guestStorageBytes();
+    const guestStorageBefore = row.is_guest === 1
+      ? this.guestStorageBytes()
+      : null;
 
     this.assertReceiptCapacity(row);
 
@@ -715,7 +867,8 @@ export class CodeSyncRepository {
     return row.accounted_bytes;
   }
 
-  private assertGuestStorageCapacity(previousBytes: number): void {
+  private assertGuestStorageCapacity(previousBytes: number | null): void {
+    if (previousBytes === null) return;
     const currentBytes = this.guestStorageBytes();
     if (
       currentBytes > this.storagePolicy.maxGuestStorageBytes
@@ -821,7 +974,9 @@ export class CodeSyncRepository {
         document.update_log_count,
         document.update_log_bytes,
         document.receipt_count,
-        document.compacted_at
+        document.compacted_at,
+        CASE WHEN workspace.room_resource_id IS NOT NULL THEN 1 ELSE 0 END
+          AS is_guest
       FROM code_workspaces workspace
       JOIN code_documents document ON document.workspace_id = workspace.id
       WHERE workspace.id = ?

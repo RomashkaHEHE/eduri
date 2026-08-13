@@ -199,7 +199,7 @@ describe("Board v2 asset schema migration", () => {
 
     expect(db.prepare(`
       SELECT MAX(version) AS version FROM schema_migrations
-    `).get()).toEqual({ version: 21 });
+    `).get()).toEqual({ version: 23 });
     expect((db.prepare("PRAGMA table_info(board_asset_uploads)").all() as Array<{
       name: string;
     }>).map((column) => column.name)).toContain("final_storage_key");

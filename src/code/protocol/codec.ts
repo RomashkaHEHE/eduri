@@ -1,13 +1,21 @@
 import {
+  decodeRelativePosition,
+  encodeRelativePosition,
+} from "yjs";
+import {
   CODE_SYNC_LIMITS,
   CODE_SYNC_PROTOCOL_VERSION,
   CODE_SYNC_TAGS,
   CODE_SYNC_UPDATE_ENCODING,
 } from "./constants.js";
 import type {
+  CodeAbsoluteSelection,
   CodeAwarenessState,
-  CodeCursor,
-  CodeSelection,
+  CodeAwarenessTarget,
+  CodeRelativeSelection,
+  CodeScalarAwarenessTarget,
+  CodeScalarInputPresence,
+  CodeYTextAwarenessTarget,
   CodeSyncClientMessage,
   CodeSyncHandshakeAuth,
 } from "./types.js";
@@ -85,95 +93,204 @@ function bytes(value: unknown, maximum: number, label: string): Uint8Array {
   return result;
 }
 
-function offset(value: unknown, label: string): number {
-  if (
-    typeof value !== "number"
-    || !Number.isSafeInteger(value)
-    || value < 0
-    || value > CODE_SYNC_LIMITS.maxTextOffset
-  ) {
-    throw new CodeProtocolError(`${label} is invalid`);
-  }
-  return value;
-}
-
-function cursor(value: unknown): CodeCursor {
-  const input = record(value, "cursor");
-  exactKeys(input, ["entryId", "offset"], "cursor");
-  return {
-    entryId: identifier(input.entryId, "cursor entryId"),
-    offset: offset(input.offset, "cursor offset"),
-  };
-}
-
-function selection(value: unknown): CodeSelection {
-  const input = record(value, "selection");
-  exactKeys(input, ["entryId", "anchor", "head"], "selection");
-  return {
-    entryId: identifier(input.entryId, "selection entryId"),
-    anchor: offset(input.anchor, "selection anchor"),
-    head: offset(input.head, "selection head"),
-  };
-}
-
-function terminal(value: unknown): NonNullable<CodeAwarenessState["terminal"]> {
-  const input = record(value, "terminal awareness");
-  if (input.kind === "host") {
-    exactKeys(input, ["kind", "runId", "requestId"], "terminal host awareness");
-    return {
-      kind: "host",
-      runId: identifier(input.runId, "terminal runId"),
-      requestId: identifier(input.requestId, "terminal requestId"),
-    };
-  }
-  if (input.kind === "input") {
-    exactKeys(
-      input,
-      ["kind", "runId", "requestId", "submissionId", "value"],
-      "terminal input awareness",
-    );
-    if (
-      typeof input.value !== "string"
-      || input.value.length > CODE_SYNC_LIMITS.maxTerminalInputCodeUnits
-      || /[\r\n]/u.test(input.value)
-    ) {
-      throw new CodeProtocolError("terminal input value is invalid");
+function awarenessTarget(value: unknown): CodeAwarenessTarget {
+  const input = record(value, "awareness target");
+  if (input.kind === "file") {
+    exactKeys(input, ["kind", "entryId", "field"], "file awareness target");
+    if (input.field !== "text") {
+      throw new CodeProtocolError("file awareness target field is invalid");
     }
     return {
-      kind: "input",
-      runId: identifier(input.runId, "terminal runId"),
-      requestId: identifier(input.requestId, "terminal requestId"),
-      submissionId: identifier(input.submissionId, "terminal submissionId"),
-      value: input.value,
+      kind: "file",
+      entryId: identifier(input.entryId, "file awareness target entryId"),
+      field: "text",
     };
   }
-  throw new CodeProtocolError("terminal awareness is invalid");
+  if (input.kind === "test") {
+    exactKeys(input, ["kind", "testId", "field"], "test awareness target");
+    if (
+      input.field !== "stdin"
+      && input.field !== "expectedOutput"
+      && input.field !== "name"
+      && input.field !== "timeout"
+    ) {
+      throw new CodeProtocolError("test awareness target field is invalid");
+    }
+    return {
+      kind: "test",
+      testId: identifier(input.testId, "test awareness target testId"),
+      field: input.field,
+    };
+  }
+  if (input.kind === "terminal") {
+    exactKeys(input, ["kind", "field"], "terminal awareness target");
+    if (input.field !== "input") {
+      throw new CodeProtocolError("terminal awareness target field is invalid");
+    }
+    return { kind: "terminal", field: "input" };
+  }
+  if (input.kind === "explorer") {
+    exactKeys(input, ["kind", "entryId", "field"], "explorer awareness target");
+    if (input.field !== "rename") {
+      throw new CodeProtocolError("explorer awareness target field is invalid");
+    }
+    return {
+      kind: "explorer",
+      entryId: identifier(input.entryId, "explorer awareness target entryId"),
+      field: "rename",
+    };
+  }
+  throw new CodeProtocolError("awareness target is invalid");
+}
+
+function relativeSelection(value: unknown): CodeRelativeSelection {
+  const input = record(value, "awareness selection");
+  exactKeys(input, ["anchor", "head"], "awareness selection");
+  return {
+    anchor: relativePositionBytes(
+      input.anchor,
+      "awareness selection anchor",
+    ),
+    head: relativePositionBytes(
+      input.head,
+      "awareness selection head",
+    ),
+  };
+}
+
+function relativePositionBytes(value: unknown, label: string): Uint8Array {
+  const encoded = bytes(
+    value,
+    CODE_SYNC_LIMITS.maxRelativePositionBytes,
+    label,
+  );
+  try {
+    const canonical = encodeRelativePosition(decodeRelativePosition(encoded));
+    if (
+      canonical.byteLength !== encoded.byteLength
+      || canonical.some((byte, index) => byte !== encoded[index])
+    ) {
+      throw new Error("non-canonical relative position");
+    }
+  } catch {
+    throw new CodeProtocolError(`${label} is not an encoded Yjs relative position`);
+  }
+  return encoded;
+}
+
+function targetSupportsRelativeSelection(
+  target: CodeAwarenessTarget,
+): target is CodeYTextAwarenessTarget {
+  return target.kind === "file"
+    || (
+      target.kind === "test"
+      && (target.field === "stdin" || target.field === "expectedOutput")
+    );
+}
+
+function targetSupportsScalarInput(
+  target: CodeAwarenessTarget,
+): target is CodeScalarAwarenessTarget {
+  return target.kind === "explorer"
+    || (
+      target.kind === "test"
+      && (target.field === "name" || target.field === "timeout")
+    );
+}
+
+function absoluteSelection(
+  value: unknown,
+  draftLength: number,
+): CodeAbsoluteSelection {
+  const input = record(value, "scalar awareness selection");
+  exactKeys(
+    input,
+    ["anchor", "head"],
+    "scalar awareness selection",
+  );
+  const endpoint = (candidate: unknown, label: string): number => {
+    if (
+      typeof candidate !== "number"
+      || !Number.isSafeInteger(candidate)
+      || candidate < 0
+      || candidate > draftLength
+    ) {
+      throw new CodeProtocolError(`${label} is outside the scalar draft`);
+    }
+    return candidate;
+  };
+  return {
+    anchor: endpoint(input.anchor, "scalar awareness selection anchor"),
+    head: endpoint(input.head, "scalar awareness selection head"),
+  };
+}
+
+function scalarInputPresence(value: unknown): CodeScalarInputPresence {
+  const input = record(value, "scalar awareness input");
+  exactKeys(input, ["draft", "selection"], "scalar awareness input");
+  if (
+    typeof input.draft !== "string"
+    || input.draft.length > CODE_SYNC_LIMITS.maxScalarDraftLength
+  ) {
+    throw new CodeProtocolError("scalar awareness draft exceeds its size limit");
+  }
+  return {
+    draft: input.draft,
+    selection: absoluteSelection(input.selection, input.draft.length),
+  };
+}
+
+function awarenessByteLength(state: CodeAwarenessState): number {
+  const metadata = {
+    target: state.target,
+    ...(state.input === undefined ? {} : { input: state.input }),
+    ...(state.selection === undefined
+      ? {}
+      : { selection: { anchor: null, head: null } }),
+  };
+  return textEncoder.encode(JSON.stringify(metadata)).byteLength
+    + (state.selection?.anchor.byteLength ?? 0)
+    + (state.selection?.head.byteLength ?? 0);
 }
 
 export function parseCodeAwarenessState(value: unknown): CodeAwarenessState {
   const input = record(value, "awareness state");
   const keys = Object.keys(input);
-  if (
-    keys.length < 1
-    || keys.some((key) => (
-      key !== "cursor" && key !== "selection" && key !== "terminal"
-    ))
-  ) {
-    throw new CodeProtocolError("awareness state is invalid");
+  if (!Object.prototype.hasOwnProperty.call(input, "target")) {
+    throw new CodeProtocolError("awareness state is missing 'target'");
   }
-  const state: CodeAwarenessState = {
-    ...(input.cursor === undefined ? {} : { cursor: cursor(input.cursor) }),
-    ...(input.selection === undefined
-      ? {}
-      : { selection: selection(input.selection) }),
-    ...(input.terminal === undefined
-      ? {}
-      : { terminal: terminal(input.terminal) }),
-  };
-  if (
-    textEncoder.encode(JSON.stringify(state)).byteLength
-    > CODE_SYNC_LIMITS.maxAwarenessBytes
-  ) {
+  if (keys.some((key) => (
+    key !== "target" && key !== "selection" && key !== "input"
+  ))) {
+    throw new CodeProtocolError("awareness state contains an unsupported field");
+  }
+  const target = awarenessTarget(input.target);
+  const hasSelection = Object.prototype.hasOwnProperty.call(input, "selection");
+  const hasScalarInput = Object.prototype.hasOwnProperty.call(input, "input");
+  let state: CodeAwarenessState;
+  if (targetSupportsRelativeSelection(target)) {
+    if (hasScalarInput) {
+      throw new CodeProtocolError("Y.Text awareness target does not support scalar input");
+    }
+    state = {
+      target,
+      ...(hasSelection ? { selection: relativeSelection(input.selection) } : {}),
+    };
+  } else if (targetSupportsScalarInput(target)) {
+    if (hasSelection) {
+      throw new CodeProtocolError("scalar awareness target does not support relative selection");
+    }
+    state = {
+      target,
+      ...(hasScalarInput ? { input: scalarInputPresence(input.input) } : {}),
+    };
+  } else {
+    if (hasSelection || hasScalarInput) {
+      throw new CodeProtocolError("terminal awareness target does not support text state");
+    }
+    state = { target };
+  }
+  if (awarenessByteLength(state) > CODE_SYNC_LIMITS.maxAwarenessBytes) {
     throw new CodeProtocolError("awareness state exceeds its size limit");
   }
   return state;

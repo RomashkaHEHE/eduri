@@ -268,6 +268,119 @@ describe("database migrations", () => {
     ]));
   });
 
+  it("rebuilds guest-only Code ownership for lessons without changing guest rows", () => {
+    db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    migrate(db, { targetVersion: 21 });
+    const roomId = randomUUID();
+    const resourceId = randomUUID();
+    const workspaceId = randomUUID();
+    const documentId = randomUUID();
+    db.prepare(`
+      INSERT INTO guest_rooms (
+        id, share_key, created_at, updated_at, last_activity_at, expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(roomId, "g".repeat(43), NOW, NOW, NOW, "2026-08-12T08:00:00.000Z");
+    db.prepare(`
+      INSERT INTO guest_room_resources (
+        id, room_id, kind, ordinal, resource_key, created_at, last_activity_at
+      ) VALUES (?, ?, 'code', 1, ?, ?, ?)
+    `).run(resourceId, roomId, "h".repeat(32), NOW, NOW);
+    db.prepare(`
+      INSERT INTO code_workspaces (
+        id, room_resource_id, schema_version, created_at, updated_at
+      ) VALUES (?, ?, 1, ?, ?)
+    `).run(workspaceId, resourceId, NOW, NOW);
+    db.prepare(`
+      INSERT INTO code_documents (
+        id, workspace_id, snapshot_update, snapshot_bytes,
+        state_vector, state_vector_bytes, created_at, updated_at
+      ) VALUES (?, ?, X'0000', 2, X'00', 1, ?, ?)
+    `).run(documentId, workspaceId, NOW, NOW);
+    const beforeUsage = db.prepare(`
+      SELECT * FROM code_guest_storage_usage WHERE singleton = 1
+    `).get();
+
+    migrate(db);
+
+    expect(db.pragma("foreign_keys", { simple: true })).toBe(1);
+    expect(db.pragma("foreign_key_check")).toEqual([]);
+    expect(db.prepare(`
+      SELECT id, room_resource_id, lesson_id, schema_version,
+        created_at, updated_at
+      FROM code_workspaces WHERE id = ?
+    `).get(workspaceId)).toEqual({
+      id: workspaceId,
+      room_resource_id: resourceId,
+      lesson_id: null,
+      schema_version: 1,
+      created_at: NOW,
+      updated_at: NOW,
+    });
+    expect(db.prepare(`
+      SELECT is_guest FROM code_storage_usage WHERE workspace_id = ?
+    `).get(workspaceId)).toEqual({ is_guest: 1 });
+    expect(db.prepare(`
+      SELECT * FROM code_guest_storage_usage WHERE singleton = 1
+    `).get()).toEqual(beforeUsage);
+    expect(() => db!.prepare(`
+      INSERT INTO code_workspaces (
+        id, room_resource_id, lesson_id, schema_version, created_at, updated_at
+      ) VALUES (?, NULL, NULL, 1, ?, ?)
+    `).run(randomUUID(), NOW, NOW)).toThrow();
+    expect(db.prepare(`
+      SELECT MAX(version) AS version FROM schema_migrations
+    `).get()).toEqual({ version: 23 });
+  });
+
+  it("repairs a historical v21 schema that was recorded without call generation", () => {
+    db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    migrate(db, { targetVersion: 20 });
+    const roomId = randomUUID();
+    const resourceId = randomUUID();
+    db.prepare(`
+      INSERT INTO guest_rooms (
+        id, share_key, created_at, updated_at, last_activity_at, expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(roomId, "r".repeat(43), NOW, NOW, NOW, "2026-08-12T08:00:00.000Z");
+    db.prepare(`
+      INSERT INTO guest_room_resources (
+        id, room_id, kind, ordinal, resource_key, created_at, last_activity_at
+      ) VALUES (?, ?, 'call', 1, ?, ?, ?)
+    `).run(resourceId, roomId, "s".repeat(32), NOW, NOW);
+    db.exec(`
+      CREATE TABLE livekit_room_revocation_outbox (
+        room_name TEXT PRIMARY KEY CHECK (length(room_name) BETWEEN 1 AND 255),
+        generation INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1),
+        enqueued_at TEXT NOT NULL,
+        next_attempt_at TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts BETWEEN 0 AND 30),
+        last_error_code TEXT
+          CHECK (last_error_code IS NULL OR last_error_code = 'room_delete_failed')
+      );
+      CREATE INDEX livekit_room_revocation_retry_idx
+        ON livekit_room_revocation_outbox(next_attempt_at, enqueued_at, room_name);
+    `);
+    db.prepare(`
+      INSERT INTO schema_migrations (version, name, applied_at)
+      VALUES (21, 'historical durable LiveKit room revocation outbox', ?)
+    `).run(NOW);
+
+    migrate(db);
+
+    expect((db.prepare("PRAGMA table_info(guest_room_resources)").all() as Array<{
+      name: string;
+    }>).map((column) => column.name)).toContain("call_room_generation");
+    expect(db.prepare(`
+      SELECT call_room_generation FROM guest_room_resources WHERE id = ?
+    `).get(resourceId)).toEqual({ call_room_generation: 1 });
+    expect(db.prepare(`
+      SELECT MAX(version) AS version FROM schema_migrations
+    `).get()).toEqual({ version: 23 });
+    expect(() => migrate(db!)).not.toThrow();
+  });
+
   it("backfills bounded Code sync counters when upgrading from v12 to v13", () => {
     db = new Database(":memory:");
     db.pragma("foreign_keys = ON");

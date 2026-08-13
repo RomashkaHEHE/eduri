@@ -4,14 +4,22 @@ import { resolve } from "node:path";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import {
+  isPythonWorkerRequestTarget,
   PYTHON_RUNNER_PUBLIC_FILE,
   PYTHON_RUNNER_WORKER_URL,
+  PYTHON_TERMINAL_PUBLIC_FILE,
+  PYTHON_TERMINAL_WORKER_URL,
+  PYTHON_WORKER_DEVELOPMENT_CONTENT_SECURITY_POLICY,
 } from "./src/pythonRunnerContract.js";
 
 const OFFLINE_PUBLIC_ASSETS = [
   {
     fileName: PYTHON_RUNNER_PUBLIC_FILE,
     url: PYTHON_RUNNER_WORKER_URL,
+  },
+  {
+    fileName: PYTHON_TERMINAL_PUBLIC_FILE,
+    url: PYTHON_TERMINAL_WORKER_URL,
   },
 ] as const;
 const BOARD_COMPACTION_WORKER =
@@ -68,14 +76,47 @@ function offlinePrecacheManifest(): Plugin {
   };
 }
 
+export function pythonWorkerSecurityHeaders(): Plugin {
+  const install = (server: {
+    middlewares: {
+      use(handler: (
+        req: { url?: string },
+        res: { setHeader(name: string, value: string): void },
+        next: () => void,
+      ) => void): void;
+    };
+  }): void => {
+    server.middlewares.use((req, res, next) => {
+      if (isPythonWorkerRequestTarget(req.url)) {
+        res.setHeader(
+          "Content-Security-Policy",
+          PYTHON_WORKER_DEVELOPMENT_CONTENT_SECURITY_POLICY,
+        );
+      }
+      next();
+    });
+  };
+  return {
+    name: "eduri-python-worker-security-headers",
+    configureServer: install,
+    configurePreviewServer: install,
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), offlinePrecacheManifest()],
+  plugins: [
+    react(),
+    pythonWorkerSecurityHeaders(),
+    offlinePrecacheManifest(),
+  ],
   server: {
     host: "127.0.0.1",
     port: 5173,
+    strictPort: true,
     headers: {
       "Cross-Origin-Embedder-Policy": "require-corp",
       "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "cross-origin-isolated=*",
     },
     proxy: {
       "/api": {
@@ -92,6 +133,7 @@ export default defineConfig({
     headers: {
       "Cross-Origin-Embedder-Policy": "require-corp",
       "Cross-Origin-Opener-Policy": "same-origin",
+      "Permissions-Policy": "cross-origin-isolated=*",
     },
   },
   build: {

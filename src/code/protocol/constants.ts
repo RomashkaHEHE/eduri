@@ -1,4 +1,4 @@
-export const CODE_SYNC_PROTOCOL_VERSION = 1 as const;
+export const CODE_SYNC_PROTOCOL_VERSION = 3 as const;
 export const CODE_SYNC_UPDATE_ENCODING = "yjs-update-v1" as const;
 
 export const CODE_SYNC_NAMESPACE = "/code-sync";
@@ -20,6 +20,6 @@ export const CODE_SYNC_LIMITS = {
   maxStateVectorBytes: 64 * 1024,
   maxAwarenessBytes: 2 * 1024,
   maxIdentifierLength: 128,
-  maxTextOffset: 2 * 1024 * 1024,
-  maxTerminalInputCodeUnits: 1_024,
+  maxRelativePositionBytes: 512,
+  maxScalarDraftLength: 1024,
 } as const;

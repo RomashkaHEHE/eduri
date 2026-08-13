@@ -10,8 +10,14 @@ import {
   type PythonRunnerRequest,
   type PythonRunnerResponse,
 } from "./pythonRunner";
+import {
+  PYTHON_RUNTIME_ASSET_MANIFEST,
+  PYTHON_RUNTIME_ASSET_PROTOCOL_VERSION,
+  type PythonRuntimeAssets,
+} from "../pythonRunnerContract.js";
 
 const PYODIDE_RUNTIME_BASE_URL = "/vendor/pyodide/0.27.5/";
+const MEMORY_RUNTIME_BASE_URL = "https://python-runtime.invalid/0.27.5/";
 const PRIVATE_CAPABILITY_NAMES = [
   "BroadcastChannel",
   "EventSource",
@@ -45,12 +51,42 @@ const WORKER_SOURCE = readFileSync(
   "utf8",
 );
 
+function hexBytes(value: string): ArrayBuffer {
+  return Uint8Array.from(
+    value.match(/.{2}/gu) ?? [],
+    (pair) => Number.parseInt(pair, 16),
+  ).buffer;
+}
+
+const RUNTIME_ASSETS: PythonRuntimeAssets = {
+  version: PYTHON_RUNTIME_ASSET_PROTOCOL_VERSION,
+  pyodideScript: "x".repeat(PYTHON_RUNTIME_ASSET_MANIFEST.pyodideScript.byteLength),
+  pyodideAsmScript: "y".repeat(
+    PYTHON_RUNTIME_ASSET_MANIFEST.pyodideAsmScript.byteLength,
+  ),
+  pyodideLock: new ArrayBuffer(PYTHON_RUNTIME_ASSET_MANIFEST.pyodideLock.byteLength),
+  pyodideWasm: new ArrayBuffer(PYTHON_RUNTIME_ASSET_MANIFEST.pyodideWasm.byteLength),
+  pythonStdlib: new ArrayBuffer(PYTHON_RUNTIME_ASSET_MANIFEST.pythonStdlib.byteLength),
+};
+
+function runtimeAssets(): PythonRuntimeAssets {
+  return {
+    version: PYTHON_RUNTIME_ASSET_PROTOCOL_VERSION,
+    pyodideScript: RUNTIME_ASSETS.pyodideScript,
+    pyodideAsmScript: RUNTIME_ASSETS.pyodideAsmScript,
+    pyodideLock: RUNTIME_ASSETS.pyodideLock,
+    pyodideWasm: RUNTIME_ASSETS.pyodideWasm,
+    pythonStdlib: RUNTIME_ASSETS.pythonStdlib,
+  };
+}
+
 function scriptRequest(runId: string, code: string): PythonRunnerRequest {
   return {
     type: PYTHON_RUNNER_REQUEST_TYPE,
     protocolVersion: PYTHON_RUNNER_PROTOCOL_VERSION,
     runId,
     payload: { kind: "script", code },
+    runtimeAssets: runtimeAssets(),
   };
 }
 
@@ -88,6 +124,7 @@ function workspaceRequest(runId: string, stdin: string): PythonRunnerRequest {
       entrypoint: "main.py",
       stdin,
     },
+    runtimeAssets: runtimeAssets(),
   };
 }
 
@@ -160,7 +197,10 @@ function pythonRunnerHarness(
     write: (value: string) => void,
     fs: ReturnType<typeof memoryFileSystem>,
   ) => unknown = () => undefined,
-  options: { readonly lockedCapability?: string } = {},
+  options: {
+    readonly lockedCapability?: string;
+    readonly withoutWebCrypto?: boolean;
+  } = {},
 ) {
   let listener:
     | ((event: { data: unknown }) => Promise<void>)
@@ -174,6 +214,9 @@ function pythonRunnerHarness(
   const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(
     new Response("public response"),
   );
+  let recoveredRuntimeFetch:
+    | ((input: string) => Promise<Response>)
+    | undefined;
   let workerGlobal: Record<string, unknown>;
   const capabilitySnapshots: Array<Record<string, unknown>> = [];
   const fs = memoryFileSystem();
@@ -197,7 +240,27 @@ function pythonRunnerHarness(
   };
   const importScripts = vi.fn();
   const close = vi.fn();
-  const loadPyodide = vi.fn().mockResolvedValue(runtime);
+  const loadPyodide = vi.fn().mockImplementation(async () => {
+    recoveredRuntimeFetch = workerGlobal.fetch as (input: string) => Promise<Response>;
+    for (const descriptor of Object.values(PYTHON_RUNTIME_ASSET_MANIFEST)
+      .filter((candidate) => !candidate.fileName.endsWith(".js"))) {
+      const response = await recoveredRuntimeFetch(
+        `${MEMORY_RUNTIME_BASE_URL}${descriptor.fileName}`,
+      );
+      expect(response.ok).toBe(true);
+      expect((await response.arrayBuffer()).byteLength).toBe(descriptor.byteLength);
+    }
+    (workerGlobal.importScripts as (url: string) => void)(
+      `${MEMORY_RUNTIME_BASE_URL}pyodide.asm.js`,
+    );
+    return runtime;
+  });
+  const digest = vi.fn(async (_algorithm: string, value: ArrayBuffer) => {
+    const descriptor = Object.values(PYTHON_RUNTIME_ASSET_MANIFEST)
+      .find((candidate) => candidate.byteLength === value.byteLength);
+    if (!descriptor) throw new Error("Unexpected runtime asset in digest mock");
+    return hexBytes(descriptor.sha256);
+  });
   workerGlobal = {
     ...Object.fromEntries(PRIVATE_CAPABILITY_NAMES.map((name) => [
       name,
@@ -205,15 +268,20 @@ function pythonRunnerHarness(
     ])),
     TextDecoder,
     TextEncoder,
+    Blob,
+    Response,
+    URL,
     addEventListener(type: string, next: typeof listener) {
       if (type === "message") listener = next;
     },
     close,
+    ...(options.withoutWebCrypto ? {} : { crypto: { subtle: { digest } } }),
     fetch,
     fs,
     importScripts,
     indexedDB: { private: true },
     loadPyodide,
+    location: { href: "https://eduri.test/python-runner.worker.js?protocol=4" },
     postMessage,
   };
   if (options.lockedCapability) {
@@ -234,6 +302,7 @@ function pythonRunnerHarness(
     listener,
     loadPyodide,
     postMessage,
+    recoveredRuntimeFetch: () => recoveredRuntimeFetch,
     runtime,
     workerGlobal,
   };
@@ -252,21 +321,38 @@ function terminalResult(
 }
 
 describe("Python code runner worker", () => {
+  it("verifies pinned assets with pure-JS SHA-256 in an opaque origin", async () => {
+    const request = scriptRequest("run-pure-sha", "pass");
+    const assets = { ...request.runtimeAssets } as Record<string, unknown>;
+    for (const [name, descriptor] of Object.entries(PYTHON_RUNTIME_ASSET_MANIFEST)) {
+      const bytes = readFileSync(new URL(
+        `../../public/vendor/pyodide/0.27.5/${descriptor.fileName}`,
+        import.meta.url,
+      ));
+      assets[name] = descriptor.fileName.endsWith(".js")
+        ? bytes.toString("utf8")
+        : Uint8Array.from(bytes).buffer;
+    }
+    const harness = pythonRunnerHarness(() => undefined, { withoutWebCrypto: true });
+    await harness.listener({ data: { ...request, runtimeAssets: assets } });
+    expect(terminalResult(harness).status).toBe("ok");
+  });
   it("loads only the pinned same-origin runtime and closes after the result", async () => {
     const harness = pythonRunnerHarness();
 
     await harness.listener({
       data: scriptRequest("run-a", "print('hello')"),
     });
-    expect(harness.importScripts).toHaveBeenCalledWith(
-      `${PYODIDE_RUNTIME_BASE_URL}pyodide.js`,
-    );
+    expect(harness.importScripts).toHaveBeenCalledTimes(2);
+    expect(harness.importScripts.mock.calls.every(([url]) => (
+      typeof url === "string" && url.startsWith("blob:")
+    ))).toBe(true);
     expect(harness.loadPyodide).toHaveBeenCalledOnce();
     const runtimeOptions = harness.loadPyodide.mock.calls[0][0];
-    expect(runtimeOptions.indexURL).toBe(PYODIDE_RUNTIME_BASE_URL);
+    expect(runtimeOptions.indexURL).toBe(MEMORY_RUNTIME_BASE_URL);
     expect(Object.getPrototypeOf(runtimeOptions.jsglobals)).toBeNull();
     expect(Object.isFrozen(runtimeOptions.jsglobals)).toBe(true);
-    expect(WORKER_SOURCE).not.toMatch(/https?:\/\//iu);
+    expect(WORKER_SOURCE).not.toMatch(/https?:\/\/(?:eduri|localhost)/iu);
     expect(WORKER_SOURCE).not.toMatch(/(?:jsdelivr|pypi|pythonhosted)/iu);
     expect(harness.runtime.runPythonAsync).toHaveBeenCalledWith(
       "print('hello')",
@@ -283,6 +369,12 @@ describe("Python code runner worker", () => {
     expect(harness.workerGlobal.indexedDB).toBeUndefined();
     expect(harness.workerGlobal.fetch).toBeUndefined();
     expect(harness.workerGlobal.loadPyodide).toBeUndefined();
+    expect(harness.fetch).not.toHaveBeenCalled();
+    const recoveredFetch = harness.recoveredRuntimeFetch();
+    expect(recoveredFetch).toBeTypeOf("function");
+    await expect(recoveredFetch!("/api/health")).rejects.toThrow(
+      "network access is disabled",
+    );
     expect(harness.fetch).not.toHaveBeenCalled();
   });
 
@@ -338,7 +430,7 @@ describe("Python code runner worker", () => {
     expect(harness.postMessage).toHaveBeenCalledWith(expect.objectContaining({
       runId: "run-locked-capability",
       status: "runtime-error",
-      output: expect.stringContaining("could not disable fetch"),
+      output: expect.stringContaining("could not replace fetch"),
     }));
   });
 
@@ -366,6 +458,7 @@ describe("Python code runner worker", () => {
         entrypoint: "main.py",
         stdin: "one\ntwo",
       },
+      runtimeAssets: runtimeAssets(),
     };
 
     await harness.listener({ data: request });
@@ -452,6 +545,7 @@ describe("Python code runner worker", () => {
         entrypoint: "main.py",
         stdin: "",
       },
+      runtimeAssets: runtimeAssets(),
     };
 
     await harness.listener({ data: request });
@@ -495,6 +589,7 @@ describe("Python code runner worker", () => {
           entrypoint: "main.py",
           stdin: "",
         },
+        runtimeAssets: runtimeAssets(),
       },
     });
 

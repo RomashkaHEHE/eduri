@@ -41,6 +41,12 @@ Open `http://127.0.0.1:5173`. The development-only bootstrap credentials are
 `admin` / `change-me-admin`. Production refuses to start with the development
 lookup key or a short/missing administrator password.
 
+`npm run dev` starts both Express/Socket.IO on `127.0.0.1:3020` and Vite on
+`127.0.0.1:5173`. Use that command when testing guest sessions: running Vite
+alone renders the local workspace, but cannot create or synchronize a session.
+Development also uses a non-production room-creation limit so repeated local
+promotion checks do not exhaust the public-service throttle.
+
 Useful checks:
 
 ```bash

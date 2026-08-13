@@ -24,6 +24,7 @@ import {
   getOrCreateSocketIngressGuard,
   type SocketTrafficLimits,
 } from "../socketAbuse.js";
+import { attachCodeTerminalTransport } from "./terminalTransport.js";
 
 type MessageAck = (message: CodeSyncServerMessage) => void;
 
@@ -275,6 +276,58 @@ export function attachCodeSyncNamespace(
     options.trustedProxy,
   );
 
+  const reauthorizeSocket = (
+    socket: Socket,
+    disconnectOnFailure = true,
+  ): boolean => {
+    try {
+      service.reauthorize(connectionData(socket).session);
+      return true;
+    } catch (error) {
+      send(socket, controlFor(error));
+      if (disconnectOnFailure) socket.disconnect(true);
+      return false;
+    }
+  };
+
+  const emitAuthorized = (
+    socketId: string,
+    event: string,
+    payload: unknown,
+  ): boolean => {
+    const target = namespace.sockets.get(socketId);
+    if (!target || !reauthorizeSocket(target)) return false;
+    target.emit(event, payload);
+    return true;
+  };
+
+  const broadcastAuthorized = (
+    workspaceId: string,
+    event: string,
+    payload: unknown,
+    excludeSocketId?: string,
+  ): void => {
+    // Copy the room before reauthorization: rejecting one target disconnects
+    // it synchronously and mutates the adapter membership set.
+    const socketIds = [
+      ...(namespace.adapter.rooms.get(roomName(workspaceId)) ?? []),
+    ];
+    const authorized: Socket[] = [];
+    const revoked: Socket[] = [];
+    for (const socketId of socketIds) {
+      if (socketId === excludeSocketId) continue;
+      const target = namespace.sockets.get(socketId);
+      if (!target) continue;
+      if (reauthorizeSocket(target, false)) authorized.push(target);
+      else revoked.push(target);
+    }
+    // Emit the older state transition before disconnecting a revoked terminal
+    // host. Its disconnect may synchronously produce a newer lease-release
+    // delta, and reversing those two packets would create a sequence gap.
+    for (const target of authorized) target.emit(event, payload);
+    for (const target of revoked) target.disconnect(true);
+  };
+
   namespace.use((socket, next) => {
     if (isWireIngressBlocked(socket)) {
       const failure = new Error("Code sync ingress rate limit reached") as Error & {
@@ -433,7 +486,7 @@ export function attachCodeSyncNamespace(
             sequence: result.sequence,
           }, ack);
           if (result.status === "committed") {
-            socket.to(workspaceRoom).emit(CODE_SYNC_MESSAGE_EVENT, {
+            broadcastAuthorized(session.workspaceId, CODE_SYNC_MESSAGE_EVENT, {
               type: CODE_SYNC_TAGS.remoteUpdate,
               protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
               sourceParticipantId: session.participant.participantId,
@@ -441,7 +494,7 @@ export function attachCodeSyncNamespace(
               updateEncoding: CODE_SYNC_UPDATE_ENCODING,
               update: message.update,
               sequence: result.sequence,
-            } satisfies CodeSyncServerMessage);
+            } satisfies CodeSyncServerMessage, socket.id);
           }
           return;
         }
@@ -482,12 +535,12 @@ export function attachCodeSyncNamespace(
           state: message.state,
         });
         if (peers.size === 0) awareness.delete(session.workspaceId);
-        socket.to(workspaceRoom).emit(CODE_SYNC_MESSAGE_EVENT, {
+        broadcastAuthorized(session.workspaceId, CODE_SYNC_MESSAGE_EVENT, {
           type: CODE_SYNC_TAGS.awareness,
           protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
           participant: session.participant,
           state: message.state,
-        } satisfies CodeSyncServerMessage);
+        } satisfies CodeSyncServerMessage, socket.id);
       } catch (error) {
         const control = controlFor(error, requestId);
         send(socket, control, ack);
@@ -500,14 +553,20 @@ export function attachCodeSyncNamespace(
       const hadAwareness = peers?.delete(socket.id) ?? false;
       if (peers?.size === 0) awareness.delete(session.workspaceId);
       if (hadAwareness) {
-        socket.to(workspaceRoom).emit(CODE_SYNC_MESSAGE_EVENT, {
+        broadcastAuthorized(session.workspaceId, CODE_SYNC_MESSAGE_EVENT, {
           type: CODE_SYNC_TAGS.awareness,
           protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
           participant: session.participant,
           state: null,
-        } satisfies CodeSyncServerMessage);
+        } satisfies CodeSyncServerMessage, socket.id);
       }
     });
+  });
+
+  attachCodeTerminalTransport(namespace, {
+    reauthorize: (session) => service.reauthorize(session),
+    broadcastAuthorized,
+    emitAuthorized,
   });
 
   return namespace;

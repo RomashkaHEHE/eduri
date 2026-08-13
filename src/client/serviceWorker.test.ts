@@ -3,7 +3,11 @@ import vm from "node:vm";
 import { describe, expect, it, vi } from "vitest";
 import {
   PYTHON_RUNNER_PROTOCOL_VERSION,
+  PYTHON_RUNNER_SOURCE_REVISION,
   PYTHON_RUNNER_WORKER_URL,
+  PYTHON_TERMINAL_PROTOCOL_VERSION,
+  PYTHON_TERMINAL_SOURCE_REVISION,
+  PYTHON_TERMINAL_WORKER_URL,
 } from "../pythonRunnerContract.js";
 
 interface FetchRequest {
@@ -66,6 +70,7 @@ function serviceWorkerHarness() {
       "/index.html",
       "/assets/index-current.js",
       PYTHON_RUNNER_WORKER_URL,
+      PYTHON_TERMINAL_WORKER_URL,
     ],
   };
   const worker = {
@@ -137,10 +142,17 @@ describe("Board v2 offline app shell", () => {
   it("pre-caches the versioned Python worker without a standalone theme bootstrap", () => {
     const harness = serviceWorkerHarness();
     expect(PYTHON_RUNNER_WORKER_URL).toBe(
-      `/python-runner.worker.js?protocol=${PYTHON_RUNNER_PROTOCOL_VERSION}`,
+      `/python-runner.worker.js?protocol=${PYTHON_RUNNER_PROTOCOL_VERSION}`
+        + `&revision=${PYTHON_RUNNER_SOURCE_REVISION}`,
     );
     expect(harness.manifest.urls).toContain(PYTHON_RUNNER_WORKER_URL);
+    expect(PYTHON_TERMINAL_WORKER_URL).toBe(
+      `/python-terminal.worker.js?protocol=${PYTHON_TERMINAL_PROTOCOL_VERSION}`
+        + `&revision=${PYTHON_TERMINAL_SOURCE_REVISION}`,
+    );
+    expect(harness.manifest.urls).toContain(PYTHON_TERMINAL_WORKER_URL);
     expect(harness.manifest.urls).not.toContain("/python-runner.worker.js");
+    expect(harness.manifest.urls).not.toContain("/python-terminal.worker.js");
     expect(harness.manifest.urls).not.toContain("/theme-init.js");
   });
 

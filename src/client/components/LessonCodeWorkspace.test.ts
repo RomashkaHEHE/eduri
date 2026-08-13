@@ -2,89 +2,87 @@
 
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import * as Y from "yjs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const editorProps = vi.fn();
-const monacoSetTheme = vi.fn();
-type EditorMount = (
-  editor: unknown,
-  monaco: { editor: { setTheme: typeof monacoSetTheme } },
-) => void;
-let autoMountEditor = true;
-let pendingEditorMount: EditorMount | undefined;
+const workspaceProps = vi.fn();
+const providerStop = vi.fn(async () => undefined);
+const providerStart = vi.fn(async () => undefined);
+const providerFlush = vi.fn(async () => undefined);
+const setAwareness = vi.fn();
+const dispatchTerminal = vi.fn();
+const statusListeners = new Set<(status: Record<string, unknown>) => void>();
+const awarenessListeners = new Set<(peers: readonly unknown[]) => void>();
+const terminalStateListeners = new Set<(state: unknown) => void>();
+const terminalEffectListeners = new Set<(effect: unknown) => void>();
+const terminalAckListeners = new Set<(ack: unknown) => void>();
+const providerOptions = vi.fn();
 
-vi.mock("@monaco-editor/react", () => ({
-  default: (props: {
-    language: string;
-    value: string;
-    theme: string;
-    onChange(value: string): void;
-    onMount?: EditorMount;
-  }) => {
-    editorProps(props);
-    if (autoMountEditor) {
-      props.onMount?.({}, { editor: { setTheme: monacoSetTheme } });
-    } else if (!pendingEditorMount) {
-      pendingEditorMount = props.onMount;
+vi.mock("../code/lessonCodeProvider", () => ({
+  lessonCodeDatabaseName: (userId: string, lessonId: string) =>
+    `lesson-db:${userId}:${lessonId}`,
+  LessonCodeProvider: class {
+    readonly document = new Y.Doc();
+    readonly origin = { kind: "lesson-origin" };
+    constructor(options: unknown) {
+      providerOptions(options);
     }
-    return createElement("textarea", {
-      "aria-label": "Редактор Python",
-      value: props.value,
-      onChange: (event: { currentTarget: { value: string } }) =>
-        props.onChange(event.currentTarget.value),
-    });
+    start = providerStart;
+    stop = providerStop;
+    flush = providerFlush;
+    setAwareness = setAwareness;
+    waitUntilSynchronized = vi.fn(async () => undefined);
+    dispatchTerminal = dispatchTerminal;
+    subscribeStatus(listener: (status: Record<string, unknown>) => void) {
+      statusListeners.add(listener);
+      listener({
+        connection: "online",
+        durability: "ready",
+        documentReady: true,
+        pendingUpdates: 0,
+        participant: {
+          participantId: "lesson-participant",
+          displayName: "Lesson user",
+          color: "#336699",
+        },
+        error: null,
+      });
+      return () => statusListeners.delete(listener);
+    }
+    subscribeAwareness(listener: (peers: readonly unknown[]) => void) {
+      awarenessListeners.add(listener);
+      return () => awarenessListeners.delete(listener);
+    }
+    subscribeTerminalState(listener: (state: unknown) => void) {
+      terminalStateListeners.add(listener);
+      return () => terminalStateListeners.delete(listener);
+    }
+    subscribeTerminalEffects(listener: (effect: unknown) => void) {
+      terminalEffectListeners.add(listener);
+      return () => terminalEffectListeners.delete(listener);
+    }
+    subscribeTerminalAcks(listener: (ack: unknown) => void) {
+      terminalAckListeners.add(listener);
+      return () => terminalAckListeners.delete(listener);
+    }
+  },
+}));
+
+vi.mock("../guestIdentity", () => ({
+  guestDeviceId: () => "lesson-device-01",
+}));
+
+vi.mock("./CodeWorkspace", () => ({
+  CodeWorkspace: (props: Record<string, unknown>) => {
+    workspaceProps(props);
+    return createElement("div", { "data-testid": "shared-code-workspace" });
   },
 }));
 
 import { LessonCodeWorkspace } from "./LessonCodeWorkspace";
-import { THEME_STORAGE_KEY, ThemeProvider } from "../theme";
-import {
-  PYTHON_RUNNER_PROTOCOL_VERSION,
-  PYTHON_RUNNER_REQUEST_TYPE,
-  PYTHON_RUNNER_RESULT_TYPE,
-  PYTHON_RUNNER_WORKER_URL,
-  type PythonRunnerRequest,
-} from "../pythonRunner";
 
-interface WorkerListener {
-  (event: MessageEvent<unknown>): void;
-}
-
-class PythonWorker {
-  static instances: PythonWorker[] = [];
-
-  readonly url: string;
-  readonly listeners = new Set<WorkerListener>();
-  readonly postMessage = vi.fn((message: PythonRunnerRequest) => {
-    const event = {
-      data: {
-        type: PYTHON_RUNNER_RESULT_TYPE,
-        protocolVersion: PYTHON_RUNNER_PROTOCOL_VERSION,
-        runId: message.runId,
-        status: "ok",
-        output: "42",
-        truncated: false,
-      },
-    } as MessageEvent<unknown>;
-    queueMicrotask(() => {
-      for (const listener of this.listeners) listener(event);
-    });
-  });
-  readonly terminate = vi.fn();
-
-  constructor(url: string) {
-    this.url = url;
-    PythonWorker.instances.push(this);
-  }
-
-  addEventListener(type: string, listener: WorkerListener) {
-    if (type === "message") this.listeners.add(listener);
-  }
-
-  removeEventListener(type: string, listener: WorkerListener) {
-    if (type === "message") this.listeners.delete(listener);
-  }
-}
+const LESSON_ID = "00000000-0000-4000-8000-000000000601";
+const USER_ID = "00000000-0000-4000-8000-000000000602";
 
 let container: HTMLDivElement;
 let root: Root;
@@ -92,16 +90,18 @@ let root: Root;
 beforeEach(() => {
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean })
     .IS_REACT_ACT_ENVIRONMENT = true;
-  editorProps.mockReset();
-  monacoSetTheme.mockReset();
-  autoMountEditor = true;
-  pendingEditorMount = undefined;
-  window.localStorage.clear();
-  PythonWorker.instances = [];
-  vi.stubGlobal("Worker", PythonWorker);
-  vi.spyOn(globalThis.crypto, "randomUUID").mockReturnValue(
-    "00000000-0000-4000-8000-000000000601",
-  );
+  workspaceProps.mockReset();
+  providerOptions.mockReset();
+  providerStart.mockClear();
+  providerStop.mockClear();
+  providerFlush.mockClear();
+  setAwareness.mockClear();
+  dispatchTerminal.mockClear();
+  statusListeners.clear();
+  awarenessListeners.clear();
+  terminalStateListeners.clear();
+  terminalEffectListeners.clear();
+  terminalAckListeners.clear();
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -110,126 +110,101 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => root.unmount());
   container.remove();
-  vi.unstubAllGlobals();
-  vi.restoreAllMocks();
+  vi.clearAllMocks();
 });
 
-describe("LessonCodeWorkspace", () => {
-  it("renders one Python editor without a JavaScript choice", async () => {
+describe("LessonCodeWorkspace adapter", () => {
+  it("mounts the shared CRDT workspace with the authenticated lesson identity", async () => {
     await act(async () => {
       root.render(createElement(LessonCodeWorkspace, {
-        code: "print(42)",
-        onCodeChange: vi.fn(),
+        lessonId: LESSON_ID,
+        userId: USER_ID,
       }));
     });
 
-    expect(container.textContent).toContain("Python");
-    expect(container.textContent).not.toContain("JavaScript");
-    expect(editorProps).toHaveBeenLastCalledWith(expect.objectContaining({
-      language: "python",
-      theme: "vs",
-      value: "print(42)",
+    expect(providerOptions).toHaveBeenCalledWith({
+      lessonId: LESSON_ID,
+      userId: USER_ID,
+      deviceId: "lesson-device-01",
+      databaseName: `lesson-db:${USER_ID}:${LESSON_ID}`,
+    });
+    expect(providerStart).toHaveBeenCalledOnce();
+    expect(workspaceProps).toHaveBeenLastCalledWith(expect.objectContaining({
+      participantId: "lesson-participant",
+      readOnly: false,
+      terminalReadOnly: false,
+      session: expect.objectContaining({
+        allowBinaryUploads: false,
+        awareness: expect.any(Object),
+        terminal: expect.any(Object),
+        waitUntilSynchronized: expect.any(Function),
+      }),
     }));
+    expect(container.textContent).toContain("Код синхронизирован");
   });
 
-  it("switches Monaco to the global dark theme", async () => {
-    window.localStorage.setItem(THEME_STORAGE_KEY, "dark");
-    await act(async () => {
-      root.render(createElement(
-        ThemeProvider,
-        null,
-        createElement(LessonCodeWorkspace, {
-          code: "print(42)",
-          onCodeChange: vi.fn(),
-        }),
-      ));
-    });
-
-    expect(editorProps).toHaveBeenLastCalledWith(expect.objectContaining({
-      language: "python",
-      theme: "vs-dark",
-      value: "print(42)",
-    }));
-    expect(monacoSetTheme).toHaveBeenLastCalledWith("vs-dark");
-    const workspace = container.querySelector(".lesson-code-workspace");
-    const output = container.querySelector(".code-output");
-    expect(workspace?.getAttribute("data-code-theme")).toBe("dark");
-    expect(output).not.toBeNull();
-
-    window.localStorage.setItem(THEME_STORAGE_KEY, "light");
-    await act(async () => {
-      window.dispatchEvent(new StorageEvent("storage", {
-        key: THEME_STORAGE_KEY,
-        newValue: "light",
-      }));
-    });
-
-    expect(editorProps).toHaveBeenLastCalledWith(expect.objectContaining({
-      theme: "vs",
-    }));
-    expect(monacoSetTheme).toHaveBeenLastCalledWith("vs");
-    expect(workspace?.getAttribute("data-code-theme")).toBe("light");
-    expect(container.querySelector(".code-output")).toBe(output);
-  });
-
-  it("uses the latest theme when Monaco finishes mounting after a theme change", async () => {
-    autoMountEditor = false;
-    window.localStorage.setItem(THEME_STORAGE_KEY, "light");
-    await act(async () => {
-      root.render(createElement(
-        ThemeProvider,
-        null,
-        createElement(LessonCodeWorkspace, {
-          code: "print(42)",
-          onCodeChange: vi.fn(),
-        }),
-      ));
-    });
-    expect(pendingEditorMount).toBeTypeOf("function");
-
-    window.localStorage.setItem(THEME_STORAGE_KEY, "dark");
-    await act(async () => {
-      window.dispatchEvent(new StorageEvent("storage", {
-        key: THEME_STORAGE_KEY,
-        newValue: "dark",
-      }));
-    });
-    expect(editorProps).toHaveBeenLastCalledWith(expect.objectContaining({
-      theme: "vs-dark",
-    }));
-
-    await act(async () => {
-      pendingEditorMount?.({}, { editor: { setTheme: monacoSetTheme } });
-    });
-    expect(monacoSetTheme).toHaveBeenCalledOnce();
-    expect(monacoSetTheme).toHaveBeenLastCalledWith("vs-dark");
-  });
-
-  it("runs source in a fresh disposable Python worker", async () => {
+  it("keeps local-first editing enabled while the shared terminal is offline", async () => {
     await act(async () => {
       root.render(createElement(LessonCodeWorkspace, {
-        code: "print(40 + 2)",
-        onCodeChange: vi.fn(),
+        lessonId: LESSON_ID,
+        userId: USER_ID,
       }));
     });
-    const runButton = Array.from(container.querySelectorAll("button"))
-      .find((button) => button.textContent?.includes("Запустить"));
-    expect(runButton).toBeDefined();
 
     await act(async () => {
-      runButton?.click();
-      await Promise.resolve();
+      for (const listener of statusListeners) listener({
+        connection: "offline",
+        durability: "ready",
+        documentReady: true,
+        pendingUpdates: 1,
+        participant: {
+          participantId: "lesson-participant",
+          displayName: "Lesson user",
+          color: "#336699",
+        },
+        error: null,
+      });
     });
 
-    expect(PythonWorker.instances).toHaveLength(1);
-    expect(PythonWorker.instances[0].url).toBe(PYTHON_RUNNER_WORKER_URL);
-    expect(PythonWorker.instances[0].postMessage).toHaveBeenCalledWith({
-      type: PYTHON_RUNNER_REQUEST_TYPE,
-      protocolVersion: PYTHON_RUNNER_PROTOCOL_VERSION,
-      runId: "00000000-0000-4000-8000-000000000601",
-      payload: { kind: "script", code: "print(40 + 2)" },
+    expect(workspaceProps).toHaveBeenLastCalledWith(expect.objectContaining({
+      participantId: "lesson-participant",
+      readOnly: false,
+      terminalReadOnly: true,
+    }));
+  });
+
+  it("passes read-only state without replacing the collaborative session", async () => {
+    await act(async () => {
+      root.render(createElement(LessonCodeWorkspace, {
+        lessonId: LESSON_ID,
+        userId: USER_ID,
+        readOnly: false,
+      }));
     });
-    expect(container.textContent).toContain("42");
-    expect(PythonWorker.instances[0].terminate).toHaveBeenCalledTimes(1);
+    const firstSession = workspaceProps.mock.lastCall?.[0].session;
+    await act(async () => {
+      root.render(createElement(LessonCodeWorkspace, {
+        lessonId: LESSON_ID,
+        userId: USER_ID,
+        readOnly: true,
+      }));
+    });
+    expect(workspaceProps).toHaveBeenLastCalledWith(expect.objectContaining({
+      readOnly: true,
+      session: firstSession,
+    }));
+    expect(providerOptions).toHaveBeenCalledOnce();
+  });
+
+  it("stops sync on unmount", async () => {
+    await act(async () => {
+      root.render(createElement(LessonCodeWorkspace, {
+        lessonId: LESSON_ID,
+        userId: USER_ID,
+      }));
+    });
+    await act(async () => root.unmount());
+    expect(providerStop).toHaveBeenCalledOnce();
+    root = createRoot(container);
   });
 });

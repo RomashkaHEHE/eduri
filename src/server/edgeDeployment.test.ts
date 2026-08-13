@@ -1,10 +1,21 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import {
+  PYTHON_RUNNER_PUBLIC_FILE,
+  PYTHON_OPAQUE_HOST_BOOTSTRAP_SHA256_BASE64,
+  PYTHON_TERMINAL_PUBLIC_FILE,
+  PYTHON_WORKER_CONTENT_SECURITY_POLICY,
+} from "../pythonRunnerContract.js";
 
 const nginx = readFileSync(
   new URL("../../ops/nginx/eduri.ru.conf", import.meta.url),
   "utf8",
 );
+const opaqueHostBootstrap = readFileSync(
+  new URL("../client/opaquePythonHost.bootstrap.js", import.meta.url),
+  "utf8",
+).replace(/\r\n?/gu, "\n");
 
 function countLiteral(value: string): number {
   return nginx.split(value).length - 1;
@@ -76,6 +87,49 @@ describe("nginx edge deployment contract", () => {
     expect(nginx).toContain('add_header Cross-Origin-Resource-Policy "same-origin" always;');
     expect(nginx).toContain("proxy_hide_header Content-Security-Policy-Report-Only;");
     expect(nginx).toContain("proxy_hide_header X-Powered-By;");
+  });
+
+  it("serves both Python workers with the canonical network-denying CSP", () => {
+    expect(nginx).toContain("map $uri $eduri_content_security_policy {");
+    for (const fileName of [
+      PYTHON_RUNNER_PUBLIC_FILE,
+      PYTHON_TERMINAL_PUBLIC_FILE,
+    ]) {
+      expect(nginx).toContain(
+        `/${fileName} "${PYTHON_WORKER_CONTENT_SECURITY_POLICY}";`,
+      );
+    }
+    expect(PYTHON_WORKER_CONTENT_SECURITY_POLICY).toContain("connect-src 'none'");
+    expect(PYTHON_WORKER_CONTENT_SECURITY_POLICY).toContain("worker-src 'none'");
+    expect(PYTHON_WORKER_CONTENT_SECURITY_POLICY).toContain("child-src 'none'");
+    expect(PYTHON_WORKER_CONTENT_SECURITY_POLICY).toContain("webrtc 'block'");
+    expect(PYTHON_WORKER_CONTENT_SECURITY_POLICY).toContain(
+      "https://eduri.ru/vendor/pyodide/0.27.5/pyodide.js",
+    );
+    expect(PYTHON_WORKER_CONTENT_SECURITY_POLICY).toContain(
+      "https://eduri.ru/vendor/pyodide/0.27.5/pyodide.asm.js",
+    );
+    expect(PYTHON_WORKER_CONTENT_SECURITY_POLICY).not.toContain(
+      "script-src 'self'",
+    );
+    expect(nginx).toContain(
+      'add_header Content-Security-Policy "$eduri_content_security_policy" always;',
+    );
+  });
+
+  it("allows exactly the checked-in opaque host bootstrap in the default CSP", () => {
+    const independentlyComputedHash = createHash("sha256")
+      .update(opaqueHostBootstrap, "utf8")
+      .digest("base64");
+
+    expect(independentlyComputedHash).toBe(
+      PYTHON_OPAQUE_HOST_BOOTSTRAP_SHA256_BASE64,
+    );
+    expect(nginx).toContain(`'sha256-${independentlyComputedHash}'`);
+    expect(nginx).toMatch(
+      /default "[^"\r\n]*script-src 'self' blob: [^"\r\n]*worker-src 'self' blob:/u,
+    );
+    expect(nginx).not.toContain("script-src 'unsafe-inline'");
   });
 
   it("never writes a valid guest bearer capability to the access log", () => {

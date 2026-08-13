@@ -17,6 +17,7 @@ import {
   type LiveKitRoomService,
 } from "../livekit.js";
 import { GuestRoomService } from "../guestRooms.js";
+import { guestRoomCreationLimit } from "./guestRooms.js";
 
 const roots: string[] = [];
 
@@ -24,13 +25,14 @@ function harness(options: {
   liveKit?: boolean;
   dataDir?: string;
   liveKitRoomService?: LiveKitRoomService;
+  nodeEnv?: "development" | "test";
 } = {}) {
   const dataDir = options.dataDir
     ?? fs.mkdtempSync(path.join(os.tmpdir(), "eduri-guest-room-"));
   if (!roots.includes(dataDir)) roots.push(dataDir);
   const app = createApp({
     config: {
-      nodeEnv: "test",
+      nodeEnv: options.nodeEnv ?? "test",
       appOrigins: ["http://eduri.test"],
       dataDir,
       databasePath: path.join(dataDir, "test.sqlite"),
@@ -58,6 +60,25 @@ afterEach(() => {
 });
 
 describe("guest room HTTP API", () => {
+  it("keeps the public creation throttle only in production", () => {
+    expect(guestRoomCreationLimit("production")).toBe(5);
+    expect(guestRoomCreationLimit("development")).toBe(10_000);
+    expect(guestRoomCreationLimit("test")).toBe(10_000);
+  });
+
+  it("does not apply the production creation throttle during local development", async () => {
+    const { app, context } = harness({ nodeEnv: "development" });
+    for (let index = 0; index < 6; index += 1) {
+      await request(app)
+        .post("/api/guest/rooms")
+        .set("Origin", "http://eduri.test")
+        .send({ initialResource: "code", draft: true })
+        .expect(201);
+    }
+    context.stopGuestRoomMaintenance?.();
+    context.db.close();
+  });
+
   it("returns a retryable response when persistent guest capacity is full", async () => {
     const { app, context } = harness();
     context.guestRooms = new GuestRoomService(

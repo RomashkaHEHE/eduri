@@ -25,6 +25,8 @@ import {
   type SharedTerminalClientEffect,
   type SharedTerminalState,
 } from "../../code/terminal/index.js";
+import { CODE_SYNC_LIMITS } from "../../code/protocol/constants.js";
+import { decodeExactYTextSelection } from "../code/monacoRemotePresence.js";
 
 if (!globalThis.crypto.subtle) {
   Object.defineProperty(globalThis.crypto, "subtle", {
@@ -63,12 +65,18 @@ vi.mock("@monaco-editor/react", () => ({
     editorMocks.props(props);
     useEffect(() => {
       let value = props.defaultValue ?? props.value ?? "";
-      let selection = {
+      type MockSelection = {
+        selectionStartLineNumber: number;
+        selectionStartColumn: number;
+        positionLineNumber: number;
+        positionColumn: number;
+      };
+      let selections: MockSelection[] = [{
         selectionStartLineNumber: 1,
         selectionStartColumn: 1,
         positionLineNumber: 1,
         positionColumn: 1,
-      };
+      }];
       const contentListeners = new Set<(event: { changes: unknown[] }) => void>();
       const disposeListeners = new Set<() => void>();
       const cursorListeners = new Set<() => void>();
@@ -149,11 +157,11 @@ vi.mock("@monaco-editor/react", () => ({
         getDomNode: () => globalThis.document.body,
         getModel: () => model,
         getPosition: () => ({
-          lineNumber: selection.positionLineNumber,
-          column: selection.positionColumn,
+          lineNumber: selections[0]!.positionLineNumber,
+          column: selections[0]!.positionColumn,
         }),
-        getSelection: () => selection,
-        getSelections: () => [selection],
+        getSelection: () => ({ ...selections[0]! }),
+        getSelections: () => selections.map((selection) => ({ ...selection })),
         hasTextFocus: () => focused,
         layoutContentWidget: vi.fn(),
         onDidBlurEditorText: (listener: () => void) => {
@@ -171,8 +179,8 @@ vi.mock("@monaco-editor/react", () => ({
           return { dispose: () => focusListeners.delete(listener) };
         },
         removeContentWidget: vi.fn(),
-        setSelections: (next: typeof selection[]) => {
-          selection = next[0] ?? selection;
+        setSelections: (next: readonly MockSelection[]) => {
+          selections = next.map((selection) => ({ ...selection }));
         },
         emitCursorSelection: () => {
           for (const listener of cursorListeners) listener();
@@ -2102,6 +2110,85 @@ describe("CodeWorkspace collaborative session", () => {
     });
 
     expect(setAwareness).toHaveBeenLastCalledWith(null);
+    document.destroy();
+  });
+
+  it("publishes every ordered Monaco selection with its direction", async () => {
+    const document = new Y.Doc();
+    initializeCodeWorkspace(document, "solo-bootstrap");
+    const setAwareness = vi.fn();
+    const session: CodeWorkspaceSessionHandle = {
+      document,
+      origin: Object.freeze({ type: "local" }),
+      blobStore: {
+        put: vi.fn(async () => {
+          throw new Error("not used");
+        }),
+        get: vi.fn(async () => null),
+      },
+      flush: vi.fn(async () => undefined),
+      awareness: {
+        setAwareness,
+        subscribeAwareness: () => () => undefined,
+      },
+    };
+    container = documentOwner().createElement("div");
+    documentOwner().body.append(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(createElement(CodeWorkspace, { session }));
+      await Promise.resolve();
+    });
+
+    const mounted = editorMocks.instances[0];
+    expect(mounted).toBeDefined();
+    const latestProps = editorMocks.props.mock.calls.at(-1)?.[0] as {
+      options?: { multiCursorLimit?: number };
+    } | undefined;
+    expect(latestProps?.options?.multiCursorLimit)
+      .toBe(CODE_SYNC_LIMITS.maxYTextSelections);
+
+    await act(async () => mounted?.editor.setTextFocus(true));
+    setAwareness.mockClear();
+    mounted?.editor.setSelections([
+      {
+        selectionStartLineNumber: 1,
+        selectionStartColumn: 2,
+        positionLineNumber: 1,
+        positionColumn: 2,
+      },
+      {
+        selectionStartLineNumber: 1,
+        selectionStartColumn: 3,
+        positionLineNumber: 1,
+        positionColumn: 8,
+      },
+      {
+        selectionStartLineNumber: 1,
+        selectionStartColumn: 12,
+        positionLineNumber: 1,
+        positionColumn: 5,
+      },
+    ]);
+    await act(async () => mounted?.editor.emitCursorSelection());
+
+    expect(setAwareness).toHaveBeenCalledTimes(1);
+    const published = setAwareness.mock.calls[0]?.[0];
+    expect(published).toMatchObject({
+      target: { kind: "file", entryId: "main-py", field: "text" },
+    });
+    expect(published?.selections).toHaveLength(3);
+    const mainText = codeWorkspaceText(document, "main-py");
+    expect(mainText).not.toBeNull();
+    expect(published?.selections.map((selection: {
+      anchor: Uint8Array;
+      head: Uint8Array;
+    }) => decodeExactYTextSelection(mainText!, selection))).toEqual([
+      { anchor: 1, head: 1 },
+      { anchor: 2, head: 7 },
+      { anchor: 11, head: 4 },
+    ]);
     document.destroy();
   });
 });

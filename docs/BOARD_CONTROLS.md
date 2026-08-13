@@ -2076,16 +2076,23 @@ offline or has pending server sync.
 - Monaco is bound directly to the active collaborative `Y.Text`; remote deltas
   patch only changed model ranges and do not replace its entire controlled
   value, remount Monaco, reset scroll/selection, or repaint all syntax tokens.
-  A remote selection is a tracked decoration. Its caret is a zero-width content
-  widget in the authenticated participant color, never a `|` character in the
-  model or inline text layout. Test stdin/expected output use the same
-  relative-position behavior. Test name/timeout and Explorer rename show an
+  Standard `Alt` multi-cursor editing is preserved. For the focused main editor
+  or test stdin/expected-output editor, awareness sends Monaco's primary
+  selection first and every secondary selection after it, capped at 32. Anchor
+  and head preserve forward/backward direction. Each remote non-empty selection
+  is a tracked decoration and each selection head is a zero-width content
+  widget in the authenticated participant color, even when multiple carets
+  overlap. A whole-line selection ends at the ordinary next-line column-one
+  boundary and is painted only over Monaco's finite text-range geometry; it
+  never extends to the editor, viewport, or page edge. No `|` character enters
+  the model or inline text layout. Test name/timeout and Explorer rename show an
   input-specific overlay caret/selection for every valid remote participant in
   stable participant order over each bounded remote draft, without changing
   the local input value or layout. Every remote caret line and selection stays
-  visible. Its authenticated participant-name label is absolutely positioned
-  and hidden by default; it appears only while a hover-capable pointer is over
-  that caret's transparent hit area, then hides again when the pointer leaves.
+  visible. Each caret's authenticated participant-name label is absolutely
+  positioned and hidden by default; it appears only while a hover-capable
+  pointer is over that caret's transparent hit area, then hides again when the
+  pointer leaves.
   The label never changes the Monaco or native-input value, text layout, scroll,
   or selection. Touch and other no-hover input do not reveal cursor labels.
   Focus/blur/unmount clears only presence owned by that exact field.

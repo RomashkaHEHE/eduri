@@ -244,6 +244,13 @@ browser cache.
 повторно авторизуется; отозванному сокету payload не передаётся. Terminal action
 retry сохраняет исходный action ID и компактный SHA-256 fingerprint, поэтому
 потеря ACK не запускает команду повторно и не удваивает action-rate charge.
+Code awareness для одного активного `Y.Text` target содержит не более 32
+упорядоченных selections. Каждый Yjs relative-position endpoint ограничен 512
+байтами, а весь awareness state вместе с target и всеми selections — 2 КиБ.
+Пустые, разреженные, неканонические, смешанные singular/plural и превышающие
+любой из лимитов payload отклоняются до broadcast. Старое singular selection
+принимается только как совместимый ingress и сразу нормализуется в canonical
+одноэлементный массив.
 
 ## Credential rotation
 

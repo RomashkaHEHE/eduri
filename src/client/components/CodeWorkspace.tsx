@@ -45,7 +45,10 @@ import type {
   CodeAwarenessState,
   GuestCodePeerAwareness,
 } from "../code/guestCodeProvider";
-import type { CodeAwarenessTarget } from "../../code/protocol";
+import {
+  CODE_SYNC_LIMITS,
+  type CodeAwarenessTarget,
+} from "../../code/protocol";
 import {
   SharedTerminalStateMachine,
   SHARED_TERMINAL_LIMITS,
@@ -81,7 +84,7 @@ import {
 } from "../code/monacoYTextBinding";
 import {
   createMonacoRemotePresenceRenderer,
-  encodeMonacoYTextSelection,
+  encodeMonacoYTextSelections,
   type MonacoRemotePresenceRenderer,
 } from "../code/monacoRemotePresence";
 import {
@@ -294,6 +297,7 @@ export function CodeWorkspace({
     lineHeight: 22,
     tabSize: 4,
     insertSpaces: true,
+    multiCursorLimit: CODE_SYNC_LIMITS.maxYTextSelections,
     scrollBeyondLastLine: false,
     padding: { top: 12 },
     ariaLabel: `Редактор ${entries.find((entry) => entry.id === activeId)?.name ?? "кода"}`,
@@ -1270,11 +1274,11 @@ export function CodeWorkspace({
     }
     const text = codeWorkspaceText(handle.document, entryId);
     if (!text || editorBindingRef.current?.yText !== text) return;
-    const selection = encodeMonacoYTextSelection(text, model, editor);
-    if (!selection) return;
+    const selections = encodeMonacoYTextSelections(text, model, editor);
+    if (!selections) return;
     publishOwnedAwareness(mainEditorAwarenessOwnerRef.current, {
       target: { kind: "file", entryId, field: "text" },
-      selection,
+      selections,
     });
   }, [publishOwnedAwareness]);
 
@@ -1312,7 +1316,7 @@ export function CodeWorkspace({
       participantId: peer.participant.participantId,
       displayName: peer.participant.displayName,
       color: peer.participant.color,
-      selection: peer.state.selection,
+      selections: peer.state.selections,
     })));
     publishMainEditorAwareness();
   }, [
@@ -1393,7 +1397,7 @@ export function CodeWorkspace({
       participantId: peer.participant.participantId,
       displayName: peer.participant.displayName,
       color: peer.participant.color,
-      selection: peer.state.selection,
+      selections: peer.state.selections,
     })));
   }, [activeId, remotePeers]);
 

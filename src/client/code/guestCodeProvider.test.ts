@@ -4,6 +4,7 @@ import "fake-indexeddb/auto";
 import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
+  CODE_SYNC_CAPABILITIES,
   CODE_SYNC_MESSAGE_EVENT,
   CODE_SYNC_PROTOCOL_VERSION,
   CODE_SYNC_TAGS,
@@ -89,7 +90,10 @@ const participant = {
   color: "#336699",
 };
 
-function ready(socket: FakeSocket): void {
+function ready(
+  socket: FakeSocket,
+  capabilities?: readonly string[],
+): void {
   socket.serverEmit(CODE_SYNC_MESSAGE_EVENT, {
     type: CODE_SYNC_TAGS.ready,
     protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
@@ -98,7 +102,26 @@ function ready(socket: FakeSocket): void {
     deviceId: "device-1",
     participant,
     updateEncoding: CODE_SYNC_UPDATE_ENCODING,
+    ...(capabilities === undefined ? {} : { capabilities }),
   });
+}
+
+function multiSelectionAwareness() {
+  const document = new Y.Doc();
+  const text = document.getText("selection-source");
+  text.insert(0, "abcdef");
+  const position = (index: number) => Y.encodeRelativePosition(
+    Y.createRelativePositionFromTypeIndex(text, index),
+  );
+  const state = {
+    target: { kind: "file", entryId: "main-py", field: "text" },
+    selections: [
+      { anchor: position(1), head: position(3) },
+      { anchor: position(5), head: position(2) },
+    ],
+  } as const;
+  document.destroy();
+  return state;
 }
 
 function syncParts(): Uint8Array[] {
@@ -165,6 +188,64 @@ function createHarness(databaseName: string): {
 }
 
 describe("GuestCodeProvider", () => {
+  it("advertises multi-selection capability first and sends plural awareness to a capable server", async () => {
+    const { provider, socket } = createHarness(
+      `guest-code-capable-awareness-${crypto.randomUUID()}`,
+    );
+    try {
+      await provider.start();
+      const awareness = multiSelectionAwareness();
+      provider.setAwareness(awareness);
+      const messageCount = socket.messages().length;
+
+      ready(socket, [CODE_SYNC_CAPABILITIES.multiSelectionAwareness]);
+
+      const messages = socket.messages().slice(messageCount);
+      expect(messages.map((message) => message.type)).toEqual([
+        CODE_SYNC_TAGS.capabilities,
+        CODE_SYNC_TAGS.syncStep1,
+        CODE_SYNC_TAGS.awareness,
+      ]);
+      expect(messages[0]).toEqual({
+        type: CODE_SYNC_TAGS.capabilities,
+        protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+        capabilities: [CODE_SYNC_CAPABILITIES.multiSelectionAwareness],
+      });
+      expect(messages[2]?.state).toEqual(awareness);
+      expect(messages[2]?.state).not.toHaveProperty("selection");
+    } finally {
+      await provider.clearLocalData();
+    }
+  });
+
+  it("omits capabilities and sends only the primary legacy selection to an old server", async () => {
+    const { provider, socket } = createHarness(
+      `guest-code-legacy-awareness-${crypto.randomUUID()}`,
+    );
+    try {
+      await provider.start();
+      const awareness = multiSelectionAwareness();
+      provider.setAwareness(awareness);
+      const messageCount = socket.messages().length;
+
+      ready(socket);
+
+      const messages = socket.messages().slice(messageCount);
+      expect(messages.map((message) => message.type)).toEqual([
+        CODE_SYNC_TAGS.syncStep1,
+        CODE_SYNC_TAGS.awareness,
+      ]);
+      expect(socket.messages(CODE_SYNC_TAGS.capabilities)).toHaveLength(0);
+      expect(messages[1]?.state).toEqual({
+        target: awareness.target,
+        selection: awareness.selections[0],
+      });
+      expect(messages[1]?.state).not.toHaveProperty("selections");
+    } finally {
+      await provider.clearLocalData();
+    }
+  });
+
   it("waits for the final sync part, replays one durable update after reconnect, and trusts server awareness identity", async () => {
     const databaseName = `guest-code-provider-${crypto.randomUUID()}`;
     const { provider, socket } = createHarness(databaseName);
@@ -227,7 +308,7 @@ describe("GuestCodeProvider", () => {
         participant: expect.objectContaining({ participantId: "server-peer" }),
         state: expect.objectContaining({
           target: { kind: "file", entryId: "main-py", field: "text" },
-          selection: { anchor: remoteCaret, head: remoteCaret },
+          selections: [{ anchor: remoteCaret, head: remoteCaret }],
         }),
       })]);
 

@@ -1,12 +1,14 @@
 import { parse as parseCookie } from "cookie";
 import type { Namespace, Server as SocketIOServer, Socket } from "socket.io";
 import {
+  CODE_SYNC_CAPABILITIES,
   CODE_SYNC_MESSAGE_EVENT,
   CODE_SYNC_PROTOCOL_VERSION,
   CODE_SYNC_TAGS,
   CODE_SYNC_UPDATE_ENCODING,
   CodeProtocolError,
   parseCodeSyncClientMessage,
+  toLegacyCodeAwarenessState,
   type CodeAwarenessState,
   type CodeParticipantIdentity,
   type CodeSyncControlCode,
@@ -40,6 +42,8 @@ interface AwarenessEntry {
 
 interface ConnectionData {
   readonly session: AuthenticatedLessonCodeSync;
+  multiSelectionAwareness: boolean;
+  awarenessReplaySent: boolean;
 }
 
 export interface LessonCodeSyncTransportOptions {
@@ -207,6 +211,54 @@ export function attachLessonCodeSyncNamespace(
     }
   };
 
+  const awarenessStateFor = (
+    socket: Socket,
+    state: CodeAwarenessState | null,
+  ) => state === null || dataFor(socket).multiSelectionAwareness
+    ? state
+    : toLegacyCodeAwarenessState(state);
+
+  const sendAwareness = (
+    socket: Socket,
+    participant: CodeParticipantIdentity,
+    state: CodeAwarenessState | null,
+  ): void => {
+    send(socket, {
+      type: CODE_SYNC_TAGS.awareness,
+      protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+      participant,
+      state: awarenessStateFor(socket, state),
+    });
+  };
+
+  const replayAwarenessOnce = (socket: Socket): void => {
+    const data = dataFor(socket);
+    if (data.awarenessReplaySent) return;
+    data.awarenessReplaySent = true;
+    const currentAwareness = awareness.get(data.session.workspaceId);
+    if (!currentAwareness || currentAwareness.size === 0) return;
+    if (!reauthorizeSocket(socket)) return;
+    for (const current of currentAwareness.values()) {
+      sendAwareness(socket, current.participant, current.state);
+    }
+  };
+
+  const broadcastAwareness = (
+    workspaceId: string,
+    participant: CodeParticipantIdentity,
+    state: CodeAwarenessState | null,
+    excludeSocketId?: string,
+  ): void => {
+    for (const socketId of namespace.adapter.rooms.get(roomName(workspaceId)) ?? []) {
+      if (socketId === excludeSocketId) continue;
+      const target = namespace.sockets.get(socketId);
+      if (!target || !reauthorizeSocket(target)) continue;
+      if (dataFor(target).awarenessReplaySent) {
+        sendAwareness(target, participant, state);
+      }
+    }
+  };
+
   namespace.use((socket, next) => {
     if (isWireIngressBlocked(socket)) {
       const failure = new Error("Lesson Code sync ingress rate limit reached") as Error & {
@@ -241,6 +293,8 @@ export function attachLessonCodeSyncNamespace(
       const handshake = parseLessonCodeSyncHandshakeAuth(socket.handshake.auth);
       socket.data.lessonCodeSync = {
         session: service.authenticate(auth, handshake),
+        multiSelectionAwareness: false,
+        awarenessReplaySent: false,
       } satisfies ConnectionData;
       next();
     } catch (error) {
@@ -296,21 +350,19 @@ export function attachLessonCodeSyncNamespace(
       deviceId: session.deviceId,
       participant: session.participant,
       updateEncoding: CODE_SYNC_UPDATE_ENCODING,
+      capabilities: [CODE_SYNC_CAPABILITIES.multiSelectionAwareness],
     });
-
-    for (const current of awareness.get(session.workspaceId)?.values() ?? []) {
-      send(socket, {
-        type: CODE_SYNC_TAGS.awareness,
-        protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
-        participant: current.participant,
-        state: current.state,
-      });
-    }
 
     socket.on(CODE_SYNC_MESSAGE_EVENT, (raw: unknown, ack?: MessageAck) => {
       let requestId: string | undefined;
       try {
         const message = parseCodeSyncClientMessage(raw);
+        if (message.type === CODE_SYNC_TAGS.capabilities) {
+          dataFor(socket).multiSelectionAwareness = true;
+          replayAwarenessOnce(socket);
+          return;
+        }
+        replayAwarenessOnce(socket);
         requestId = "requestId" in message ? message.requestId : undefined;
         const updateBytes = message.type === CODE_SYNC_TAGS.update
           ? message.update.byteLength
@@ -400,12 +452,12 @@ export function attachLessonCodeSyncNamespace(
           state: message.state,
         });
         if (peers.size === 0) awareness.delete(session.workspaceId);
-        broadcast(session.workspaceId, {
-          type: CODE_SYNC_TAGS.awareness,
-          protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
-          participant: session.participant,
-          state: message.state,
-        }, socket.id);
+        broadcastAwareness(
+          session.workspaceId,
+          session.participant,
+          message.state,
+          socket.id,
+        );
       } catch (error) {
         const control = controlFor(error, requestId);
         send(socket, control, ack);
@@ -418,12 +470,12 @@ export function attachLessonCodeSyncNamespace(
       const hadAwareness = peers?.delete(socket.id) ?? false;
       if (peers?.size === 0) awareness.delete(session.workspaceId);
       if (hadAwareness) {
-        broadcast(session.workspaceId, {
-          type: CODE_SYNC_TAGS.awareness,
-          protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
-          participant: session.participant,
-          state: null,
-        }, socket.id);
+        broadcastAwareness(
+          session.workspaceId,
+          session.participant,
+          null,
+          socket.id,
+        );
       }
     });
   });

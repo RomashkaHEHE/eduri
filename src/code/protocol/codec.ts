@@ -3,6 +3,7 @@ import {
   encodeRelativePosition,
 } from "yjs";
 import {
+  CODE_SYNC_CAPABILITIES,
   CODE_SYNC_LIMITS,
   CODE_SYNC_PROTOCOL_VERSION,
   CODE_SYNC_TAGS,
@@ -12,6 +13,7 @@ import type {
   CodeAbsoluteSelection,
   CodeAwarenessState,
   CodeAwarenessTarget,
+  CodeLegacyAwarenessState,
   CodeRelativeSelection,
   CodeScalarAwarenessTarget,
   CodeScalarInputPresence,
@@ -158,6 +160,24 @@ function relativeSelection(value: unknown): CodeRelativeSelection {
   };
 }
 
+function relativeSelections(value: unknown): readonly CodeRelativeSelection[] {
+  if (
+    !Array.isArray(value)
+    || value.length < 1
+    || value.length > CODE_SYNC_LIMITS.maxYTextSelections
+  ) {
+    throw new CodeProtocolError("awareness selections exceed their count limit");
+  }
+  const selections: CodeRelativeSelection[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    if (!Object.prototype.hasOwnProperty.call(value, index)) {
+      throw new CodeProtocolError("awareness selections must be a dense array");
+    }
+    selections.push(relativeSelection(value[index]));
+  }
+  return selections;
+}
+
 function relativePositionBytes(value: unknown, label: string): Uint8Array {
   const encoded = bytes(
     value,
@@ -244,13 +264,37 @@ function awarenessByteLength(state: CodeAwarenessState): number {
   const metadata = {
     target: state.target,
     ...(state.input === undefined ? {} : { input: state.input }),
-    ...(state.selection === undefined
+    ...(state.selections === undefined
       ? {}
-      : { selection: { anchor: null, head: null } }),
+      : {
+          selections: state.selections.map(() => ({
+            anchor: null,
+            head: null,
+          })),
+        }),
   };
   return textEncoder.encode(JSON.stringify(metadata)).byteLength
-    + (state.selection?.anchor.byteLength ?? 0)
-    + (state.selection?.head.byteLength ?? 0);
+    + (state.selections?.reduce((total, selection) => (
+      total + selection.anchor.byteLength + selection.head.byteLength
+    ), 0) ?? 0);
+}
+
+export function toLegacyCodeAwarenessState(
+  state: CodeAwarenessState,
+): CodeLegacyAwarenessState {
+  if (!targetSupportsRelativeSelection(state.target)) return state;
+  const primary = state.selections?.[0];
+  return {
+    target: state.target,
+    ...(primary
+      ? {
+          selection: {
+            anchor: primary.anchor.slice(),
+            head: primary.head.slice(),
+          },
+        }
+      : {}),
+  };
 }
 
 export function parseCodeAwarenessState(value: unknown): CodeAwarenessState {
@@ -260,24 +304,32 @@ export function parseCodeAwarenessState(value: unknown): CodeAwarenessState {
     throw new CodeProtocolError("awareness state is missing 'target'");
   }
   if (keys.some((key) => (
-    key !== "target" && key !== "selection" && key !== "input"
+    key !== "target"
+    && key !== "selection"
+    && key !== "selections"
+    && key !== "input"
   ))) {
     throw new CodeProtocolError("awareness state contains an unsupported field");
   }
   const target = awarenessTarget(input.target);
   const hasSelection = Object.prototype.hasOwnProperty.call(input, "selection");
+  const hasSelections = Object.prototype.hasOwnProperty.call(input, "selections");
   const hasScalarInput = Object.prototype.hasOwnProperty.call(input, "input");
   let state: CodeAwarenessState;
   if (targetSupportsRelativeSelection(target)) {
-    if (hasScalarInput) {
+    if (hasScalarInput || (hasSelection && hasSelections)) {
       throw new CodeProtocolError("Y.Text awareness target does not support scalar input");
     }
     state = {
       target,
-      ...(hasSelection ? { selection: relativeSelection(input.selection) } : {}),
+      ...(hasSelections
+        ? { selections: relativeSelections(input.selections) }
+        : hasSelection
+          ? { selections: [relativeSelection(input.selection)] }
+          : {}),
     };
   } else if (targetSupportsScalarInput(target)) {
-    if (hasSelection) {
+    if (hasSelection || hasSelections) {
       throw new CodeProtocolError("scalar awareness target does not support relative selection");
     }
     state = {
@@ -285,7 +337,7 @@ export function parseCodeAwarenessState(value: unknown): CodeAwarenessState {
       ...(hasScalarInput ? { input: scalarInputPresence(input.input) } : {}),
     };
   } else {
-    if (hasSelection || hasScalarInput) {
+    if (hasSelection || hasSelections || hasScalarInput) {
       throw new CodeProtocolError("terminal awareness target does not support text state");
     }
     state = { target };
@@ -376,6 +428,26 @@ export function parseCodeSyncClientMessage(
       type: CODE_SYNC_TAGS.awareness,
       protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
       state: input.state === null ? null : parseCodeAwarenessState(input.state),
+    };
+  }
+  if (input.type === CODE_SYNC_TAGS.capabilities) {
+    exactKeys(
+      input,
+      ["type", "protocolVersion", "capabilities"],
+      "CAPABILITIES",
+    );
+    if (
+      !Array.isArray(input.capabilities)
+      || input.capabilities.length !== 1
+      || input.capabilities[0]
+        !== CODE_SYNC_CAPABILITIES.multiSelectionAwareness
+    ) {
+      throw new CodeProtocolError("Code sync capabilities are invalid");
+    }
+    return {
+      type: CODE_SYNC_TAGS.capabilities,
+      protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+      capabilities: [CODE_SYNC_CAPABILITIES.multiSelectionAwareness],
     };
   }
   throw new CodeProtocolError("Code sync message type is unsupported");

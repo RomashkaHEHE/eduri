@@ -164,14 +164,23 @@ class MockEditor {
   };
 
   setOffsets(model: MockTextModel, anchor: number, head: number): void {
-    const anchorPosition = model.getPositionAt(anchor);
-    const headPosition = model.getPositionAt(head);
-    this.selections = [{
-      selectionStartLineNumber: anchorPosition.lineNumber,
-      selectionStartColumn: anchorPosition.column,
-      positionLineNumber: headPosition.lineNumber,
-      positionColumn: headPosition.column,
-    }];
+    this.setOffsetSelections(model, [[anchor, head]]);
+  }
+
+  setOffsetSelections(
+    model: MockTextModel,
+    selections: readonly (readonly [anchor: number, head: number])[],
+  ): void {
+    this.selections = selections.map(([anchor, head]) => {
+      const anchorPosition = model.getPositionAt(anchor);
+      const headPosition = model.getPositionAt(head);
+      return {
+        selectionStartLineNumber: anchorPosition.lineNumber,
+        selectionStartColumn: anchorPosition.column,
+        positionLineNumber: headPosition.lineNumber,
+        positionColumn: headPosition.column,
+      };
+    });
   }
 
   onDidDispose = (listener: () => void): Disposable => {
@@ -270,13 +279,17 @@ describe("Monaco Y.Text binding", () => {
     document.destroy();
   });
 
-  it("preserves the directional editor selection across a remote insertion", () => {
+  it("preserves every directional editor selection across a remote insertion", () => {
     const document = new Y.Doc();
     const yText = document.getText("source");
     yText.insert(0, "hello world");
     const model = new MockTextModel(yText.toString());
     const editor = new MockEditor(model.asModel());
-    editor.setOffsets(model, 11, 6);
+    editor.setOffsetSelections(model, [
+      [3, 3],
+      [0, 5],
+      [11, 6],
+    ]);
     const binding = attachMonacoYTextBinding({
       yText,
       model: model.asModel(),
@@ -286,9 +299,13 @@ describe("Monaco Y.Text binding", () => {
     document.transact(() => yText.insert(0, "say "), { remote: true });
 
     expect(model.value).toBe("say hello world");
-    const restored = editor.restoredSelections.at(-1)?.[0];
+    const restored = editor.restoredSelections.at(-1);
     expect(restored).toBeDefined();
-    expect(offsets(model, restored!)).toEqual([15, 10]);
+    expect(restored?.map((selection) => offsets(model, selection))).toEqual([
+      [7, 7],
+      [4, 9],
+      [15, 10],
+    ]);
 
     binding.destroy();
     document.destroy();

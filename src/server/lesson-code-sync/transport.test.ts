@@ -7,6 +7,7 @@ import { Server as SocketIOServer } from "socket.io";
 import * as Y from "yjs";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  CODE_SYNC_CAPABILITIES,
   CODE_SYNC_MESSAGE_EVENT,
   CODE_SYNC_PROTOCOL_VERSION,
   CODE_SYNC_TAGS,
@@ -39,6 +40,17 @@ const LESSON_ID = "30000000-0000-4000-8000-000000000101";
 const TUTOR_TOKEN = `lesson-code-tutor-${"a".repeat(32)}`;
 const STUDENT_TOKEN = `lesson-code-student-${"b".repeat(32)}`;
 const OUTSIDER_TOKEN = `lesson-code-outsider-${"c".repeat(32)}`;
+
+function encodedCaret(offset = 0): Uint8Array {
+  const document = new Y.Doc();
+  const text = document.getText("presence");
+  text.insert(0, "cursor");
+  const encoded = Y.encodeRelativePosition(
+    Y.createRelativePositionFromTypeIndex(text, offset),
+  );
+  document.destroy();
+  return encoded;
+}
 
 function nextMessage(
   socket: Socket,
@@ -366,6 +378,90 @@ describe("lesson Code sync namespace", () => {
     expect(server.eduriContext.db.prepare(`
       SELECT code_revision FROM lessons WHERE id = ?
     `).get(LESSON_ID)).toEqual({ code_revision: 4 });
+  });
+
+  it("replays awareness once in the negotiated plural or legacy wire shape", async () => {
+    const sender = await connect(TUTOR_TOKEN, "awareness-replay-sender");
+    const primary = encodedCaret(1);
+    const secondary = encodedCaret(5);
+    sender.emit(CODE_SYNC_MESSAGE_EVENT, {
+      type: CODE_SYNC_TAGS.awareness,
+      protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+      state: {
+        target: { kind: "file", entryId: "main-py", field: "text" },
+        selections: [
+          { anchor: primary, head: primary },
+          { anchor: secondary, head: secondary },
+        ],
+      },
+    });
+    await synchronize(sender, new Y.Doc());
+
+    const legacy = await connect(STUDENT_TOKEN, "awareness-replay-legacy");
+    const capable = await connect(STUDENT_TOKEN, "awareness-replay-capable");
+    const legacyMessages: CodeSyncServerMessage[] = [];
+    const capableMessages: CodeSyncServerMessage[] = [];
+    legacy.on(CODE_SYNC_MESSAGE_EVENT, (message: CodeSyncServerMessage) => {
+      if (message.type === CODE_SYNC_TAGS.awareness) legacyMessages.push(message);
+    });
+    capable.on(CODE_SYNC_MESSAGE_EVENT, (message: CodeSyncServerMessage) => {
+      if (message.type === CODE_SYNC_TAGS.awareness) capableMessages.push(message);
+    });
+    const legacyReplay = nextMessage(
+      legacy,
+      (message) => message.type === CODE_SYNC_TAGS.awareness,
+    );
+    const capableReplay = nextMessage(
+      capable,
+      (message) => message.type === CODE_SYNC_TAGS.awareness,
+    );
+
+    const legacyDocument = new Y.Doc();
+    await synchronize(legacy, legacyDocument);
+    capable.emit(CODE_SYNC_MESSAGE_EVENT, {
+      type: CODE_SYNC_TAGS.capabilities,
+      protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+      capabilities: [CODE_SYNC_CAPABILITIES.multiSelectionAwareness],
+    });
+    const capableDocument = new Y.Doc();
+    await synchronize(capable, capableDocument);
+
+    const legacyAwareness = await legacyReplay;
+    const capableAwareness = await capableReplay;
+    expect(legacyAwareness).toMatchObject({
+      state: { target: { kind: "file", entryId: "main-py", field: "text" } },
+    });
+    if (
+      legacyAwareness.type !== CODE_SYNC_TAGS.awareness
+      || legacyAwareness.state === null
+      || !("selection" in legacyAwareness.state)
+      || !legacyAwareness.state.selection
+    ) throw new Error("Expected legacy awareness selection");
+    expect(legacyAwareness.state).not.toHaveProperty("selections");
+    expect(Uint8Array.from(legacyAwareness.state.selection.anchor)).toEqual(primary);
+    expect(Uint8Array.from(legacyAwareness.state.selection.head)).toEqual(primary);
+
+    expect(capableAwareness).toMatchObject({
+      state: { target: { kind: "file", entryId: "main-py", field: "text" } },
+    });
+    if (
+      capableAwareness.type !== CODE_SYNC_TAGS.awareness
+      || capableAwareness.state === null
+      || !("selections" in capableAwareness.state)
+      || !capableAwareness.state.selections
+    ) throw new Error("Expected plural awareness selections");
+    expect(capableAwareness.state).not.toHaveProperty("selection");
+    expect(capableAwareness.state.selections.map((selection) => ({
+      anchor: Uint8Array.from(selection.anchor),
+      head: Uint8Array.from(selection.head),
+    }))).toEqual([
+      { anchor: primary, head: primary },
+      { anchor: secondary, head: secondary },
+    ]);
+    expect(legacyMessages).toHaveLength(1);
+    expect(capableMessages).toHaveLength(1);
+    legacyDocument.destroy();
+    capableDocument.destroy();
   });
 
   it("rejects writes after completion but still allows a read-only cold sync", async () => {

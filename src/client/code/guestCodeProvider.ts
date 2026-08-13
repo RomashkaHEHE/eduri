@@ -1,6 +1,7 @@
 import { io } from "socket.io-client";
 import * as Y from "yjs";
 import {
+  CODE_SYNC_CAPABILITIES,
   CODE_SYNC_LIMITS,
   CODE_SYNC_MESSAGE_EVENT,
   CODE_SYNC_NAMESPACE,
@@ -8,6 +9,7 @@ import {
   CODE_SYNC_TAGS,
   CODE_SYNC_UPDATE_ENCODING,
   parseCodeAwarenessState,
+  toLegacyCodeAwarenessState,
   type CodeAwarenessState,
   type CodeParticipantIdentity,
   type CodeSyncClientMessage,
@@ -98,6 +100,7 @@ interface ParsedReady {
   readonly type: typeof CODE_SYNC_TAGS.ready;
   readonly deviceId: string;
   readonly participant: CodeParticipantIdentity;
+  readonly capabilities: readonly string[];
 }
 
 interface ParsedSyncStep2 {
@@ -208,8 +211,17 @@ function parseServerMessage(raw: unknown): ParsedServerMessage | null {
   if (input.type === CODE_SYNC_TAGS.ready) {
     const deviceId = identifier(input.deviceId);
     const identity = participant(input.participant);
+    const capabilities = Array.isArray(input.capabilities)
+      && input.capabilities.every((capability) => typeof capability === "string")
+      ? [...input.capabilities] as string[]
+      : [];
     return deviceId && identity
-      ? { type: CODE_SYNC_TAGS.ready, deviceId, participant: identity }
+      ? {
+          type: CODE_SYNC_TAGS.ready,
+          deviceId,
+          participant: identity,
+          capabilities,
+        }
       : null;
   }
   if (input.type === CODE_SYNC_TAGS.syncStep2) {
@@ -354,6 +366,7 @@ export class GuestCodeProvider {
   private terminalSyncPending = false;
   private terminalInitialSnapshotPending = false;
   private socketReady = false;
+  private multiSelectionAwareness = false;
   private syncComplete = false;
   private queuedLocalWrites = 0;
   private startPromise: Promise<void> | null = null;
@@ -697,6 +710,7 @@ export class GuestCodeProvider {
       return;
     }
     this.socketReady = false;
+    this.multiSelectionAwareness = false;
     this.terminalActionOutbox.clear();
     this.terminalSyncPending = false;
     this.terminalInitialSnapshotPending = true;
@@ -744,8 +758,18 @@ export class GuestCodeProvider {
         return;
       }
       this.socketReady = true;
+      this.multiSelectionAwareness = message.capabilities.includes(
+        CODE_SYNC_CAPABILITIES.multiSelectionAwareness,
+      );
       this.syncComplete = false;
       this.status = { ...this.status, participant: message.participant };
+      if (this.multiSelectionAwareness) {
+        this.socket.emit(CODE_SYNC_MESSAGE_EVENT, {
+          type: CODE_SYNC_TAGS.capabilities,
+          protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+          capabilities: [CODE_SYNC_CAPABILITIES.multiSelectionAwareness],
+        } satisfies CodeSyncClientMessage);
+      }
       this.sendSyncStep1();
       this.sendAwareness();
       return;
@@ -903,7 +927,9 @@ export class GuestCodeProvider {
     this.socket.emit(CODE_SYNC_MESSAGE_EVENT, {
       type: CODE_SYNC_TAGS.awareness,
       protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
-      state: this.localAwareness,
+      state: this.multiSelectionAwareness || this.localAwareness === null
+        ? this.localAwareness
+        : toLegacyCodeAwarenessState(this.localAwareness),
     } satisfies CodeSyncClientMessage);
   }
 

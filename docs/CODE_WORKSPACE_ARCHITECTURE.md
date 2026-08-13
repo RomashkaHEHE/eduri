@@ -63,9 +63,14 @@ removes the outbox record; merely opening the workspace creates no room
 mutation.
 
 Awareness protocol v3 advertises exactly one focused editing target. File text
-and test stdin/expected-output selections use encoded Yjs relative positions
-bound to the exact `Y.Text`. Test name/timeout and Explorer rename inputs use a
-bounded ephemeral draft plus UTF-16 selection; terminal presence identifies the
+and test stdin/expected-output presence carries Monaco's ordered selection set:
+the primary selection first, followed by at most 31 secondary selections. Each
+directional anchor/head pair uses encoded Yjs relative positions bound to the
+exact `Y.Text`. The parser accepts the previous singular relative-selection
+field at ingress and normalizes it immediately to a one-item canonical array;
+plural-capability negotiation keeps a mixed-version recipient on the singular
+primary form. Test name/timeout and Explorer rename inputs use a bounded
+ephemeral draft plus one UTF-16 selection; terminal presence identifies the
 shared input surface but carries no terminal state. Focus ownership is tokened,
 so cleanup from an unmounted field cannot clear a newer focused field. Every
 awareness state is bounded and ephemeral. Participant ID, display name, and
@@ -76,19 +81,23 @@ Monaco is not a controlled React text input. An exact `Y.Text` is bound directly
 to its model: local Monaco changes become granular Yjs operations and remote
 Yjs deltas become granular model edits. Monaco therefore retains its model,
 tokenization, scroll, selection, and undo chrome instead of replacing the full
-model and repainting syntax on every remote character. Remote selections are
-tracked decorations and remote carets are zero-width content widgets in the
-authenticated participant color; no `|` or other cursor glyph is inserted into
-the document or inline text layout. Native collaborative inputs use absolute
-overlay carets and selections over their bounded remote drafts. In both Monaco
-and native inputs, caret lines and selections remain visible while participant
-name labels are hidden by default. A label is absolutely positioned and appears
-only while a hover-capable pointer is over the transparent hit area belonging
-to that caret; pointer exit hides it, and touch or other no-hover input does not
-reveal it. Labels never change document/input values, text layout, scroll, or
-selection. Pure nested `Y.Text` events bypass React entry/test snapshots
-entirely. Structural and metadata changes still refresh those snapshots, while
-Run/Test captures read authoritative data from the Y.Doc.
+model and repainting syntax on every remote character. Every non-collapsed
+remote selection is a tracked decoration and every selection head is a stable,
+zero-width content-widget caret in the authenticated participant color,
+including coincident carets. A forward or backward whole-line selection ends
+at its actual next-line column-one boundary and uses Monaco's finite text-range
+geometry; it never fills the remaining editor or page width. No `|` or other
+cursor glyph is inserted into the document or inline text layout. Native
+collaborative inputs use absolute overlay carets and selections over their
+bounded remote drafts. In both Monaco and native inputs, caret lines and
+selections remain visible while participant name labels are hidden by default.
+Each caret has its own absolutely positioned label, revealed only while a
+hover-capable pointer is over that caret's transparent hit area; pointer exit
+hides it, and touch or other no-hover input does not reveal it. Labels never
+change document/input values, text layout, scroll, or selection. Pure nested
+`Y.Text` events bypass React entry/test snapshots entirely. Structural and
+metadata changes still refresh those snapshots, while Run/Test captures read
+authoritative data from the Y.Doc.
 
 The current Explorer renders the effective parent forest directly. Folders
 expand/collapse by pointer or arrow key. Create, upload, rename, and delete are
@@ -512,8 +521,10 @@ and sandbox immediately.
 - concurrent file content and tree operations converge under duplicate,
   delayed, and reordered updates;
 - offline edits survive reload and merge on reconnect;
-- cursors and selections remain bounded authenticated awareness, while terminal
-  input/output/run lifecycle remains bounded, server-ordered, and ephemeral;
+- all primary and secondary cursors/selections, their order and direction
+  survive remote edits within the documented 32-selection awareness bound;
+  malformed or oversized presence is rejected while terminal input/output/run
+  lifecycle remains bounded, server-ordered, and ephemeral;
 - uploaded trees cannot escape the workspace through names, archives, links,
   Unicode ambiguity, or case collisions;
 - arbitrary binary blobs cannot become ready, deduplicated, or downloadable

@@ -7,9 +7,10 @@ import {
   useRef,
 } from "react";
 import type * as Y from "yjs";
-import type {
-  CodeAwarenessState,
-  CodeYTextAwarenessTarget,
+import {
+  CODE_SYNC_LIMITS,
+  type CodeAwarenessState,
+  type CodeYTextAwarenessTarget,
 } from "../../code/protocol";
 import {
   attachMonacoYTextBinding,
@@ -17,7 +18,7 @@ import {
 } from "../code/monacoYTextBinding";
 import {
   createMonacoRemotePresenceRenderer,
-  encodeMonacoYTextSelection,
+  encodeMonacoYTextSelections,
   type MonacoRemotePresenceRenderer,
 } from "../code/monacoRemotePresence";
 import type { GuestCodePeerAwareness } from "../code/guestCodeProvider";
@@ -104,6 +105,7 @@ export function CollaborativeMonacoTextField({
       horizontalScrollbarSize: 7,
     },
     wordWrap: "on" as const,
+    multiCursorLimit: CODE_SYNC_LIMITS.maxYTextSelections,
     fontSize: 11,
     lineHeight: 16,
     padding: { top: 6, bottom: 6 },
@@ -125,9 +127,9 @@ export function CollaborativeMonacoTextField({
     const model = editor?.getModel();
     const publish = awarenessRef.current;
     if (!editor || !model || !publish || !editor.hasTextFocus()) return;
-    const selection = encodeMonacoYTextSelection(yText, model, editor);
-    if (!selection) return;
-    publish(awarenessOwnerRef.current, { target: targetRef.current, selection });
+    const selections = encodeMonacoYTextSelections(yText, model, editor);
+    if (!selections) return;
+    publish(awarenessOwnerRef.current, { target: targetRef.current, selections });
   }, [yText]);
 
   const handleMount = useCallback<OnMount>((editor) => {
@@ -160,13 +162,13 @@ export function CollaborativeMonacoTextField({
     rendererRef.current?.setPeers(peers
       .filter((peer) => (
         sameTarget(peer.state.target, target)
-        && peer.state.selection !== undefined
+        && peer.state.selections !== undefined
       ))
       .map((peer) => ({
         participantId: peer.participant.participantId,
         displayName: peer.participant.displayName,
         color: peer.participant.color,
-        selection: peer.state.selection,
+        selections: peer.state.selections,
       })));
   }, [peers, target]);
 

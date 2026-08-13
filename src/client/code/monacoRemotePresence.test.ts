@@ -3,10 +3,11 @@
 import type * as Monaco from "monaco-editor";
 import { afterEach, describe, expect, it } from "vitest";
 import * as Y from "yjs";
+import { CODE_SYNC_LIMITS } from "../../code/protocol/constants.js";
 import {
   createMonacoRemotePresenceRenderer,
   decodeExactYTextSelection,
-  encodeMonacoYTextSelection,
+  encodeMonacoYTextSelections,
   type EncodedYTextSelection,
 } from "./monacoRemotePresence";
 
@@ -45,6 +46,11 @@ class MockPresenceModel {
 
   getOffsetAt = (position: Monaco.IPosition): number => offsetAt(this.value, position);
 
+  setValue(value: string): void {
+    this.value = value;
+    for (const listener of this.changeListeners) listener();
+  }
+
   onDidChangeContent = (listener: () => void): Disposable => {
     this.changeListeners.add(listener);
     return { dispose: () => this.changeListeners.delete(listener) };
@@ -67,7 +73,7 @@ class MockPresenceEditor {
   readonly layoutWidgets: Monaco.editor.IContentWidget[] = [];
   readonly decorationSets: Monaco.editor.IModelDeltaDecoration[][] = [];
   decorationClearCalls = 0;
-  selection: Monaco.ISelection | null = null;
+  selections: Monaco.ISelection[] | null = null;
   private readonly disposeListeners = new Set<() => void>();
   private readonly modelListeners = new Set<() => void>();
 
@@ -78,7 +84,13 @@ class MockPresenceEditor {
   getDomNode = (): HTMLElement => this.root;
 
   getSelection = (): Monaco.Selection | null => (
-    this.selection as Monaco.Selection | null
+    this.selections?.[0] as Monaco.Selection | undefined
+  ) ?? null;
+
+  getSelections = (): Monaco.Selection[] | null => (
+    this.selections
+      ? this.selections.map((selection) => ({ ...selection })) as Monaco.Selection[]
+      : null
   );
 
   createDecorationsCollection = (): Monaco.editor.IEditorDecorationsCollection => ({
@@ -162,7 +174,7 @@ describe("Monaco remote presence", () => {
       participantId: "participant-a",
       displayName: "Alice",
       color: "#123456",
-      selection,
+      selections: [selection],
     };
 
     renderer.setPeers([peer]);
@@ -199,10 +211,10 @@ describe("Monaco remote presence", () => {
 
     renderer.setPeers([{
       ...peer,
-      selection: {
+      selections: [{
         anchor: selection.anchor.slice(),
         head: selection.head.slice(),
-      },
+      }],
     }]);
     expect(editor.addedWidgets).toHaveLength(1);
     expect(editor.decorationSets).toHaveLength(1);
@@ -210,7 +222,7 @@ describe("Monaco remote presence", () => {
 
     renderer.setPeers([{
       ...peer,
-      selection: encodedSelection(yText, 2, 5),
+      selections: [encodedSelection(yText, 2, 5)],
     }]);
     expect(editor.addedWidgets).toHaveLength(1);
     expect(editor.addedWidgets[0]).toBe(widget);
@@ -243,13 +255,13 @@ describe("Monaco remote presence", () => {
         participantId: "participant-a",
         displayName: "Alice",
         color: "#123456",
-        selection: encodedSelection(yText, 1, 1),
+        selections: [encodedSelection(yText, 1, 1)],
       },
       {
         participantId: "participant-b",
         displayName: '<img src=x onerror="alert(1)">',
         color: "#abcdef",
-        selection: encodedSelection(yText, 3, 3),
+        selections: [encodedSelection(yText, 3, 3)],
       },
     ]);
 
@@ -324,6 +336,181 @@ describe("Monaco remote presence", () => {
     yDocument.destroy();
   });
 
+  it("renders finite forward and backward whole-line selections with directional carets", () => {
+    const yDocument = new Y.Doc();
+    const yText = yDocument.getText("source");
+    const value = "print('one')\nprint('two')\n";
+    yText.insert(0, value);
+    const nextLine = value.indexOf("\n") + 1;
+    const model = new MockPresenceModel(value);
+    const editor = new MockPresenceEditor(model.asModel());
+    const renderer = createMonacoRemotePresenceRenderer({
+      yText,
+      model: model.asModel(),
+      editor: editor.asEditor(),
+    });
+
+    renderer.setPeers([{
+      participantId: "participant-a",
+      displayName: "Alice",
+      color: "#123456",
+      selections: [
+        encodedSelection(yText, 0, nextLine),
+        encodedSelection(yText, nextLine, 0),
+      ],
+    }]);
+
+    expect(editor.addedWidgets).toHaveLength(2);
+    expect(editor.addedWidgets.map((widget) => widget.getPosition()?.position))
+      .toEqual([
+        { lineNumber: 2, column: 1 },
+        { lineNumber: 1, column: 1 },
+      ]);
+    expect(editor.decorationSets.at(-1)).toHaveLength(2);
+    for (const decoration of editor.decorationSets.at(-1) ?? []) {
+      expect(decoration.range).toMatchObject({
+        startLineNumber: 1,
+        startColumn: 1,
+        endLineNumber: 2,
+        endColumn: 1,
+      });
+      expect(decoration.options.inlineClassName).toMatch(
+        /^eduri-monaco-remote-selection-/u,
+      );
+      expect(decoration.options.inlineClassNameAffectsLetterSpacing).toBe(false);
+      expect(decoration.options.className).toBeUndefined();
+      expect(decoration.options.shouldFillLineOnLineBreak).toBeUndefined();
+      expect(decoration.options.isWholeLine).not.toBe(true);
+    }
+
+    renderer.destroy();
+    yDocument.destroy();
+  });
+
+  it("keeps overlapping indexed carets distinct and removes only departed indexes", () => {
+    const yDocument = new Y.Doc();
+    const yText = yDocument.getText("source");
+    yText.insert(0, "hello");
+    const model = new MockPresenceModel("hello");
+    const editor = new MockPresenceEditor(model.asModel());
+    const renderer = createMonacoRemotePresenceRenderer({
+      yText,
+      model: model.asModel(),
+      editor: editor.asEditor(),
+    });
+    const overlap = encodedSelection(yText, 2, 2);
+
+    renderer.setPeers([{
+      participantId: "participant-a",
+      displayName: "Alice",
+      color: "#123456",
+      selections: [overlap, overlap],
+    }]);
+
+    expect(editor.addedWidgets).toHaveLength(2);
+    expect(new Set(editor.addedWidgets.map((widget) => widget.getId())).size).toBe(2);
+    expect(editor.addedWidgets.map((widget) => widget.getPosition()?.position))
+      .toEqual([
+        { lineNumber: 1, column: 3 },
+        { lineNumber: 1, column: 3 },
+      ]);
+    const originalWidgets = [...editor.addedWidgets];
+    const layoutCount = editor.layoutWidgets.length;
+
+    renderer.setPeers([{
+      participantId: "participant-a",
+      displayName: "Alice",
+      color: "#123456",
+      selections: [
+        { anchor: overlap.anchor.slice(), head: overlap.head.slice() },
+        { anchor: overlap.anchor.slice(), head: overlap.head.slice() },
+      ],
+    }]);
+    expect(editor.addedWidgets).toEqual(originalWidgets);
+    expect(editor.layoutWidgets).toHaveLength(layoutCount);
+
+    renderer.setPeers([{
+      participantId: "participant-a",
+      displayName: "Alice",
+      color: "#123456",
+      selections: [overlap],
+    }]);
+    expect(editor.addedWidgets).toEqual(originalWidgets);
+    expect(editor.removedWidgets).toEqual([originalWidgets[1]]);
+    expect(originalWidgets[0]?.getDomNode().parentElement).toBe(editor.root);
+    expect(originalWidgets[1]?.getDomNode().parentElement).toBeNull();
+
+    renderer.destroy();
+    yDocument.destroy();
+  });
+
+  it("repositions an unchanged caret offset when Monaco line geometry changes", () => {
+    const yDocument = new Y.Doc();
+    const yText = yDocument.getText("source");
+    yText.insert(0, "abc");
+    const model = new MockPresenceModel("abc");
+    const editor = new MockPresenceEditor(model.asModel());
+    const renderer = createMonacoRemotePresenceRenderer({
+      yText,
+      model: model.asModel(),
+      editor: editor.asEditor(),
+    });
+
+    renderer.setPeers([{
+      participantId: "participant-a",
+      displayName: "Alice",
+      color: "#123456",
+      selections: [encodedSelection(yText, 2, 2)],
+    }]);
+
+    const widget = editor.addedWidgets[0]!;
+    expect(widget.getPosition()?.position).toEqual({ lineNumber: 1, column: 3 });
+    const layoutCount = editor.layoutWidgets.length;
+
+    model.setValue("a\nc");
+
+    expect(editor.addedWidgets).toEqual([widget]);
+    expect(widget.getPosition()?.position).toEqual({ lineNumber: 2, column: 1 });
+    expect(editor.layoutWidgets).toHaveLength(layoutCount + 1);
+
+    renderer.destroy();
+    yDocument.destroy();
+  });
+
+  it("renders valid sibling selections while ignoring invalid relative positions", () => {
+    const yDocument = new Y.Doc();
+    const yText = yDocument.getText("source");
+    const otherText = yDocument.getText("other");
+    yText.insert(0, "hello");
+    otherText.insert(0, "other");
+    const model = new MockPresenceModel("hello");
+    const editor = new MockPresenceEditor(model.asModel());
+    const renderer = createMonacoRemotePresenceRenderer({
+      yText,
+      model: model.asModel(),
+      editor: editor.asEditor(),
+    });
+
+    renderer.setPeers([{
+      participantId: "participant-a",
+      displayName: "Alice",
+      color: "#123456",
+      selections: [
+        encodedSelection(otherText, 1, 3),
+        { anchor: Uint8Array.of(255), head: Uint8Array.of(255) },
+        encodedSelection(yText, 1, 4),
+      ],
+    }]);
+
+    expect(editor.addedWidgets).toHaveLength(1);
+    expect(editor.addedWidgets[0]?.getPosition()?.position)
+      .toEqual({ lineNumber: 1, column: 5 });
+    expect(editor.decorationSets.at(-1)).toHaveLength(1);
+
+    renderer.destroy();
+    yDocument.destroy();
+  });
+
   it("decodes only positions belonging to the exact bound Y.Text", () => {
     const yDocument = new Y.Doc();
     const yText = yDocument.getText("source");
@@ -349,28 +536,36 @@ describe("Monaco remote presence", () => {
     yDocument.destroy();
   });
 
-  it("encodes Monaco selection direction as relative anchor and head", () => {
+  it("encodes ordered Monaco selections, preserves direction, and caps the payload", () => {
     const yDocument = new Y.Doc();
     const yText = yDocument.getText("source");
     yText.insert(0, "hello");
     const model = new MockPresenceModel("hello");
     const editor = new MockPresenceEditor(model.asModel());
-    editor.selection = {
-      selectionStartLineNumber: 1,
-      selectionStartColumn: 5,
-      positionLineNumber: 1,
-      positionColumn: 2,
-    };
+    editor.selections = Array.from(
+      { length: CODE_SYNC_LIMITS.maxYTextSelections + 1 },
+      (_, index) => ({
+        selectionStartLineNumber: 1,
+        selectionStartColumn: index === 0 ? 5 : (index % 5) + 1,
+        positionLineNumber: 1,
+        positionColumn: index === 0 ? 2 : ((index + 2) % 5) + 1,
+      }),
+    );
 
-    const encoded = encodeMonacoYTextSelection(
+    const encoded = encodeMonacoYTextSelections(
       yText,
       model.asModel(),
       editor.asEditor(),
     );
     expect(encoded).not.toBeNull();
-    expect(decodeExactYTextSelection(yText, encoded!)).toEqual({
+    expect(encoded).toHaveLength(CODE_SYNC_LIMITS.maxYTextSelections);
+    expect(decodeExactYTextSelection(yText, encoded![0]!)).toEqual({
       anchor: 4,
       head: 1,
+    });
+    expect(decodeExactYTextSelection(yText, encoded![1]!)).toEqual({
+      anchor: 1,
+      head: 3,
     });
     yDocument.destroy();
   });
@@ -390,13 +585,13 @@ describe("Monaco remote presence", () => {
       participantId: "one",
       displayName: "One",
       color: "#ff0000",
-      selection: encodedSelection(yText, 1, 1),
+      selections: [encodedSelection(yText, 1, 1)],
     };
     const second = {
       participantId: "two",
       displayName: "Two",
       color: "#00ff00",
-      selection: encodedSelection(yText, 2, 4),
+      selections: [encodedSelection(yText, 2, 4)],
     };
 
     renderer.setPeers([first, second]);

@@ -1,4 +1,5 @@
 import {
+  CODE_SYNC_CAPABILITIES,
   CODE_SYNC_PROTOCOL_VERSION,
   CODE_SYNC_TAGS,
   CODE_SYNC_UPDATE_ENCODING,
@@ -63,19 +64,35 @@ export interface CodeScalarInputPresence {
 export type CodeAwarenessState =
   | {
       readonly target: CodeYTextAwarenessTarget;
-      readonly selection?: CodeRelativeSelection;
+      readonly selections?: readonly CodeRelativeSelection[];
       readonly input?: undefined;
     }
   | {
       readonly target: CodeScalarAwarenessTarget;
       readonly input?: CodeScalarInputPresence;
-      readonly selection?: undefined;
+      readonly selections?: undefined;
     }
   | {
       readonly target: CodeTerminalAwarenessTarget;
-      readonly selection?: undefined;
+      readonly selections?: undefined;
       readonly input?: undefined;
     };
+
+/** Legacy protocol-v3 shape used only for recipients without plural awareness. */
+export type CodeLegacyAwarenessState =
+  | {
+      readonly target: CodeYTextAwarenessTarget;
+      readonly selection?: CodeRelativeSelection;
+      readonly input?: undefined;
+    }
+  | Exclude<CodeAwarenessState, { readonly target: CodeYTextAwarenessTarget }>;
+
+export type CodeAwarenessWireState =
+  | CodeAwarenessState
+  | CodeLegacyAwarenessState;
+
+export type CodeSyncCapability =
+  typeof CODE_SYNC_CAPABILITIES.multiSelectionAwareness;
 
 export interface CodeParticipantIdentity {
   readonly participantId: string;
@@ -103,13 +120,19 @@ export interface CodeSyncUpdateMessage extends CodeSyncMessageBase {
 
 export interface CodeSyncAwarenessMessage extends CodeSyncMessageBase {
   readonly type: typeof CODE_SYNC_TAGS.awareness;
-  readonly state: CodeAwarenessState | null;
+  readonly state: CodeAwarenessWireState | null;
+}
+
+export interface CodeSyncCapabilitiesMessage extends CodeSyncMessageBase {
+  readonly type: typeof CODE_SYNC_TAGS.capabilities;
+  readonly capabilities: readonly [CodeSyncCapability];
 }
 
 export type CodeSyncClientMessage =
   | CodeSyncStep1Message
   | CodeSyncUpdateMessage
-  | CodeSyncAwarenessMessage;
+  | CodeSyncAwarenessMessage
+  | CodeSyncCapabilitiesMessage;
 
 export interface CodeSyncReadyMessage extends CodeSyncMessageBase {
   readonly type: typeof CODE_SYNC_TAGS.ready;
@@ -118,6 +141,7 @@ export interface CodeSyncReadyMessage extends CodeSyncMessageBase {
   readonly deviceId: string;
   readonly participant: CodeParticipantIdentity;
   readonly updateEncoding: typeof CODE_SYNC_UPDATE_ENCODING;
+  readonly capabilities?: readonly CodeSyncCapability[];
 }
 
 export interface CodeSyncStep2Message extends CodeSyncMessageBase {
@@ -151,7 +175,7 @@ export interface CodeSyncUpdateAckMessage extends CodeSyncMessageBase {
 export interface CodeSyncRemoteAwarenessMessage extends CodeSyncMessageBase {
   readonly type: typeof CODE_SYNC_TAGS.awareness;
   readonly participant: CodeParticipantIdentity;
-  readonly state: CodeAwarenessState | null;
+  readonly state: CodeAwarenessWireState | null;
 }
 
 export type CodeSyncControlCode =

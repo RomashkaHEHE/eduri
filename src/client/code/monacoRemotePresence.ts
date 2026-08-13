@@ -1,5 +1,6 @@
 import type * as Monaco from "monaco-editor";
 import * as Y from "yjs";
+import { CODE_SYNC_LIMITS } from "../../code/protocol/constants.js";
 
 export interface EncodedYTextSelection {
   readonly anchor: Uint8Array;
@@ -10,7 +11,7 @@ export interface MonacoRemotePresencePeer {
   readonly participantId: string;
   readonly displayName: string;
   readonly color: string;
-  readonly selection?: EncodedYTextSelection;
+  readonly selections?: readonly EncodedYTextSelection[];
 }
 
 export interface MonacoRemotePresenceRendererOptions {
@@ -30,9 +31,14 @@ export interface AbsoluteYTextSelection {
   readonly head: number;
 }
 
-interface DecodedPeer extends MonacoRemotePresencePeer {
+interface DecodedSelection {
+  readonly participantId: string;
+  readonly displayName: string;
   readonly color: `#${string}`;
+  readonly selectionIndex: number;
   readonly absolute: AbsoluteYTextSelection;
+  readonly anchorPosition: Monaco.IPosition;
+  readonly headPosition: Monaco.IPosition;
 }
 
 const PARTICIPANT_COLOR = /^#[0-9a-f]{6}$/iu;
@@ -81,39 +87,50 @@ function selectionBackground(color: `#${string}`): string {
   return `rgba(${red}, ${green}, ${blue}, 0.22)`;
 }
 
-function copySelection(
-  selection: EncodedYTextSelection | undefined,
-): EncodedYTextSelection | undefined {
-  return selection
-    ? { anchor: selection.anchor.slice(), head: selection.head.slice() }
-    : undefined;
+function copySelections(
+  selections: readonly EncodedYTextSelection[] | undefined,
+): readonly EncodedYTextSelection[] | undefined {
+  return selections?.slice(0, CODE_SYNC_LIMITS.maxYTextSelections).map(
+    (selection) => ({
+      anchor: selection.anchor.slice(),
+      head: selection.head.slice(),
+    }),
+  );
 }
 
-/** Encode Monaco's directional selection as Yjs-relative positions. */
-export function encodeMonacoYTextSelection(
+/** Encode Monaco's ordered directional selections as Yjs-relative positions. */
+export function encodeMonacoYTextSelections(
   yText: Y.Text,
   model: Monaco.editor.ITextModel,
   editor: Monaco.editor.IStandaloneCodeEditor,
-): EncodedYTextSelection | null {
+): readonly EncodedYTextSelection[] | null {
   if (!yText.doc || editor.getModel() !== model) return null;
-  const selection = editor.getSelection();
-  if (!selection) return null;
-  const anchor = model.getOffsetAt({
-    lineNumber: selection.selectionStartLineNumber,
-    column: selection.selectionStartColumn,
-  });
-  const head = model.getOffsetAt({
-    lineNumber: selection.positionLineNumber,
-    column: selection.positionColumn,
-  });
-  return {
-    anchor: Y.encodeRelativePosition(
-      Y.createRelativePositionFromTypeIndex(yText, anchor),
-    ),
-    head: Y.encodeRelativePosition(
-      Y.createRelativePositionFromTypeIndex(yText, head),
-    ),
-  };
+  const selections = editor.getSelections();
+  if (!selections || selections.length === 0) return null;
+  try {
+    return selections
+      .slice(0, CODE_SYNC_LIMITS.maxYTextSelections)
+      .map((selection) => {
+        const anchor = model.getOffsetAt({
+          lineNumber: selection.selectionStartLineNumber,
+          column: selection.selectionStartColumn,
+        });
+        const head = model.getOffsetAt({
+          lineNumber: selection.positionLineNumber,
+          column: selection.positionColumn,
+        });
+        return {
+          anchor: Y.encodeRelativePosition(
+            Y.createRelativePositionFromTypeIndex(yText, anchor),
+          ),
+          head: Y.encodeRelativePosition(
+            Y.createRelativePositionFromTypeIndex(yText, head),
+          ),
+        };
+      });
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -297,40 +314,55 @@ export function createMonacoRemotePresenceRenderer(
       if (!peer.participantId || unique.has(peer.participantId)) continue;
       unique.set(peer.participantId, peer);
     }
-    const decoded: DecodedPeer[] = [];
+    const decoded: DecodedSelection[] = [];
     for (const peer of [...unique.values()].sort((left, right) => (
       left.participantId.localeCompare(right.participantId)
     ))) {
-      if (!peer.selection) continue;
-      const absolute = decodeExactYTextSelection(yText, peer.selection);
-      if (!absolute) continue;
-      decoded.push({
-        ...peer,
-        color: safeColor(peer.color),
-        absolute,
-      });
+      for (const [selectionIndex, selection] of (
+        peer.selections ?? []
+      ).slice(0, CODE_SYNC_LIMITS.maxYTextSelections).entries()) {
+        const absolute = decodeExactYTextSelection(yText, selection);
+        if (!absolute) continue;
+        decoded.push({
+          participantId: peer.participantId,
+          displayName: peer.displayName,
+          color: safeColor(peer.color),
+          selectionIndex,
+          absolute,
+          anchorPosition: model.getPositionAt(absolute.anchor),
+          headPosition: model.getPositionAt(absolute.head),
+        });
+      }
     }
-    const signature = JSON.stringify(decoded.map((peer) => [
-      peer.participantId,
-      peer.displayName,
-      peer.color,
-      peer.absolute.anchor,
-      peer.absolute.head,
+    const signature = JSON.stringify(decoded.map((selection) => [
+      selection.participantId,
+      selection.displayName,
+      selection.color,
+      selection.selectionIndex,
+      selection.absolute.anchor,
+      selection.absolute.head,
+      selection.anchorPosition.lineNumber,
+      selection.anchorPosition.column,
+      selection.headPosition.lineNumber,
+      selection.headPosition.column,
     ]));
     if (signature === lastSignature) return;
     lastSignature = signature;
 
-    const activeParticipantIds = new Set(decoded.map((peer) => peer.participantId));
-    for (const [participantId, record] of widgets) {
-      if (activeParticipantIds.has(participantId)) continue;
+    const activeWidgetKeys = new Set(decoded.map((selection) => (
+      `${selection.participantId}:${selection.selectionIndex}`
+    )));
+    for (const [widgetKey, record] of widgets) {
+      if (activeWidgetKeys.has(widgetKey)) continue;
       editor.removeContentWidget(record.widget);
-      widgets.delete(participantId);
+      widgets.delete(widgetKey);
     }
 
     const modelDecorations: Monaco.editor.IModelDeltaDecoration[] = [];
     const rules: string[] = [];
-    for (const peer of decoded) {
-      let record = widgets.get(peer.participantId);
+    for (const selection of decoded) {
+      const widgetKey = `${selection.participantId}:${selection.selectionIndex}`;
+      let record = widgets.get(widgetKey);
       if (!record) {
         const token = `r${rendererId}-p${nextPeerToken}`;
         nextPeerToken += 1;
@@ -339,23 +371,36 @@ export function createMonacoRemotePresenceRenderer(
           ownerDocument,
         );
         record = { token, widget };
-        widgets.set(peer.participantId, record);
+        widgets.set(widgetKey, record);
         editor.addContentWidget(widget);
       }
-      const head = model.getPositionAt(peer.absolute.head);
-      record.widget.update(head, peer.displayName, peer.color);
+      record.widget.update(
+        selection.headPosition,
+        selection.displayName,
+        selection.color,
+      );
       editor.layoutContentWidget(record.widget);
 
       const className = `eduri-monaco-remote-selection-${record.token}`;
       rules.push(
-        `.${className}{background-color:${selectionBackground(peer.color)}`
-        + `!important;box-shadow:inset 0 -1px 0 ${peer.color};}`,
+        `.${className}{background-color:${selectionBackground(selection.color)}`
+        + `!important;box-shadow:inset 0 -1px 0 ${selection.color};}`,
       );
-      if (peer.absolute.anchor === peer.absolute.head) continue;
-      const startOffset = Math.min(peer.absolute.anchor, peer.absolute.head);
-      const endOffset = Math.max(peer.absolute.anchor, peer.absolute.head);
-      const start = model.getPositionAt(startOffset);
-      const end = model.getPositionAt(endOffset);
+      if (selection.absolute.anchor === selection.absolute.head) continue;
+      const startOffset = Math.min(
+        selection.absolute.anchor,
+        selection.absolute.head,
+      );
+      const endOffset = Math.max(
+        selection.absolute.anchor,
+        selection.absolute.head,
+      );
+      const start = selection.absolute.anchor === startOffset
+        ? selection.anchorPosition
+        : selection.headPosition;
+      const end = selection.absolute.anchor === endOffset
+        ? selection.anchorPosition
+        : selection.headPosition;
       modelDecorations.push({
         range: {
           startLineNumber: start.lineNumber,
@@ -364,9 +409,9 @@ export function createMonacoRemotePresenceRenderer(
           endColumn: end.column,
         },
         options: {
-          className,
-          hoverMessage: { value: peer.displayName.slice(0, 128) },
-          shouldFillLineOnLineBreak: false,
+          inlineClassName: className,
+          inlineClassNameAffectsLetterSpacing: false,
+          hoverMessage: { value: selection.displayName.slice(0, 128) },
           zIndex: 20,
         },
       });
@@ -410,7 +455,7 @@ export function createMonacoRemotePresenceRenderer(
         participantId: peer.participantId,
         displayName: peer.displayName,
         color: peer.color,
-        selection: copySelection(peer.selection),
+        selections: copySelections(peer.selections),
       }));
       render();
     },

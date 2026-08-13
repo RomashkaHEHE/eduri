@@ -8,6 +8,7 @@ import {
 import * as Y from "yjs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  CODE_SYNC_CAPABILITIES,
   CODE_SYNC_MESSAGE_EVENT,
   CODE_SYNC_NAMESPACE,
   CODE_SYNC_PROTOCOL_VERSION,
@@ -424,6 +425,7 @@ describe("Code sync Socket.IO namespace", () => {
       if (
         awarenessMessage.type !== CODE_SYNC_TAGS.awareness
         || awarenessMessage.state === null
+        || !("selection" in awarenessMessage.state)
         || !awarenessMessage.state.selection
       ) throw new Error("Expected awareness selection");
       expect(Uint8Array.from(awarenessMessage.state.selection.anchor))
@@ -455,6 +457,87 @@ describe("Code sync Socket.IO namespace", () => {
       leftDocument.destroy();
       rightDocument.destroy();
     }
+  });
+
+  it("broadcasts plural awareness to capable peers and primary-only awareness to legacy peers", async () => {
+    const sender = await connect("mixed-awareness-sender");
+    const legacy = await connect("mixed-awareness-legacy");
+    const capable = await connect("mixed-awareness-capable");
+
+    await legacy.timeout(2_000).emitWithAck(CODE_SYNC_MESSAGE_EVENT, {
+      type: CODE_SYNC_TAGS.syncStep1,
+      protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+      requestId: "mixed-awareness-legacy-sync",
+      stateVector: Uint8Array.of(0),
+    });
+    capable.emit(CODE_SYNC_MESSAGE_EVENT, {
+      type: CODE_SYNC_TAGS.capabilities,
+      protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+      capabilities: [CODE_SYNC_CAPABILITIES.multiSelectionAwareness],
+    });
+    await capable.timeout(2_000).emitWithAck(CODE_SYNC_MESSAGE_EVENT, {
+      type: CODE_SYNC_TAGS.syncStep1,
+      protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+      requestId: "mixed-awareness-capable-sync",
+      stateVector: Uint8Array.of(0),
+    });
+
+    const legacyMessage = nextMessage(
+      legacy,
+      (message) => message.type === CODE_SYNC_TAGS.awareness
+        && message.state !== null,
+    );
+    const capableMessage = nextMessage(
+      capable,
+      (message) => message.type === CODE_SYNC_TAGS.awareness
+        && message.state !== null,
+    );
+    const primary = encodedCaret(1);
+    const secondary = encodedCaret(5);
+    sender.emit(CODE_SYNC_MESSAGE_EVENT, {
+      type: CODE_SYNC_TAGS.awareness,
+      protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+      state: {
+        target: { kind: "file", entryId: "main-py", field: "text" },
+        selections: [
+          { anchor: primary, head: primary },
+          { anchor: secondary, head: secondary },
+        ],
+      },
+    });
+
+    const legacyAwareness = await legacyMessage;
+    const capableAwareness = await capableMessage;
+    expect(legacyAwareness).toMatchObject({
+      state: { target: { kind: "file", entryId: "main-py", field: "text" } },
+    });
+    if (
+      legacyAwareness.type !== CODE_SYNC_TAGS.awareness
+      || legacyAwareness.state === null
+      || !("selection" in legacyAwareness.state)
+      || !legacyAwareness.state.selection
+    ) throw new Error("Expected legacy awareness selection");
+    expect(legacyAwareness.state).not.toHaveProperty("selections");
+    expect(Uint8Array.from(legacyAwareness.state.selection.anchor)).toEqual(primary);
+    expect(Uint8Array.from(legacyAwareness.state.selection.head)).toEqual(primary);
+
+    expect(capableAwareness).toMatchObject({
+      state: { target: { kind: "file", entryId: "main-py", field: "text" } },
+    });
+    if (
+      capableAwareness.type !== CODE_SYNC_TAGS.awareness
+      || capableAwareness.state === null
+      || !("selections" in capableAwareness.state)
+      || !capableAwareness.state.selections
+    ) throw new Error("Expected plural awareness selections");
+    expect(capableAwareness.state).not.toHaveProperty("selection");
+    expect(capableAwareness.state.selections.map((selection) => ({
+      anchor: Uint8Array.from(selection.anchor),
+      head: Uint8Array.from(selection.head),
+    }))).toEqual([
+      { anchor: primary, head: primary },
+      { anchor: secondary, head: secondary },
+    ]);
   });
 
   it("orders one shared terminal state and routes execution to its selected host", async () => {
@@ -679,6 +762,15 @@ describe("Code sync Socket.IO namespace", () => {
   it("shares sync and awareness budgets across sockets and reconnects", async () => {
     const observer = await connect("aggregate-observer");
     const sender = await connect("aggregate-awareness-sender");
+    await observer.timeout(2_000).emitWithAck(
+      CODE_SYNC_MESSAGE_EVENT,
+      {
+        type: CODE_SYNC_TAGS.syncStep1,
+        protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+        requestId: "aggregate-observer-replay",
+        stateVector: Uint8Array.of(0),
+      },
+    );
     const firstAwareness = nextMessage(
       observer,
       (message) => message.type === CODE_SYNC_TAGS.awareness
@@ -719,18 +811,29 @@ describe("Code sync Socket.IO namespace", () => {
       terminal: false,
     });
 
-    for (const [index, socket] of [observer, rotated].entries()) {
-      const response = await socket.timeout(2_000).emitWithAck(
+    const firstSync = await rotated.timeout(2_000).emitWithAck(
+      CODE_SYNC_MESSAGE_EVENT,
+      {
+        type: CODE_SYNC_TAGS.syncStep1,
+        protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+        requestId: "aggregate-sync-0",
+        stateVector: Uint8Array.of(0),
+      },
+    ) as CodeSyncServerMessage;
+    expect(firstSync.type).toBe(CODE_SYNC_TAGS.syncStep2);
+    const observerSync = await observer.timeout(2_000).emitWithAck(
         CODE_SYNC_MESSAGE_EVENT,
         {
           type: CODE_SYNC_TAGS.syncStep1,
           protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
-          requestId: `aggregate-sync-${index}`,
+          requestId: "aggregate-sync-observer-limit",
           stateVector: Uint8Array.of(0),
         },
       ) as CodeSyncServerMessage;
-      expect(response.type).toBe(CODE_SYNC_TAGS.syncStep2);
-    }
+    expect(observerSync).toMatchObject({
+      type: CODE_SYNC_TAGS.control,
+      code: "rate-limited",
+    });
     observer.close();
     rotated.close();
     const reconnected = await connect("aggregate-sync-rotated");

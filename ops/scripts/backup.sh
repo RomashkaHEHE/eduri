@@ -23,7 +23,7 @@ while (($# > 0)); do
     shift
 done
 
-for command_name in docker tar sha256sum find grep rm; do
+for command_name in docker tar sha256sum find grep rm sync; do
     require_command "$command_name"
 done
 assert_production_layout
@@ -45,6 +45,7 @@ checksum_path="$archive_path.sha256"
 metadata_path="$archive_path.meta"
 was_running=0
 app_stopped=0
+backup_committed=0
 
 if app_is_running; then
     was_running=1
@@ -57,6 +58,9 @@ cleanup() {
         compose start app >/dev/null || true
     fi
     [[ ! -e "$partial_path" ]] || rm -f -- "$partial_path"
+    if [[ $backup_committed -eq 0 ]]; then
+        rm -f -- "$archive_path" "$checksum_path" "$metadata_path"
+    fi
     exit "$status"
 }
 trap cleanup EXIT INT TERM
@@ -88,6 +92,11 @@ compose_digest="$(sha256sum "$EDURI_COMPOSE_FILE" | awk '{print $1}')"
 } >"$metadata_path"
 chmod 0600 "$metadata_path"
 
+sync -f "$archive_path"
+sync -f "$checksum_path"
+sync -f "$metadata_path"
+sync -f "$EDURI_BACKUP_DIR"
+
 if [[ $was_running -eq 1 && $leave_stopped -eq 0 ]]; then
     compose start app >/dev/null
     app_stopped=0
@@ -103,5 +112,6 @@ if ! bash "$SCRIPT_DIR/check-backup.sh" "${validation_args[@]}"; then
     rm -f -- "$checksum_path" "$metadata_path" "$archive_path"
     die "backup validation failed; the unverified archive and sidecars were removed"
 fi
+backup_committed=1
 trap - EXIT INT TERM
 printf 'Backup ready: %s\n' "$archive_path"

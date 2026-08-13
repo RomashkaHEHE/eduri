@@ -4,7 +4,14 @@ umask 077
 
 readonly APP_ROOT="/home/user1/eduri"
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-readonly OPS_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+case "$SCRIPT_DIR" in
+    /usr/local/libexec/eduri/generations/*)
+        readonly OPS_DIR="$APP_ROOT/ops"
+        ;;
+    *)
+        readonly OPS_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"
+        ;;
+esac
 readonly NGINX_SOURCE="$OPS_DIR/nginx/eduri.ru.conf"
 readonly HOOK_SOURCE="$OPS_DIR/certbot/reload-nginx.sh"
 readonly SITE_AVAILABLE="/etc/nginx/sites-available/eduri.ru"
@@ -17,7 +24,7 @@ die() {
 }
 
 [[ $EUID -eq 0 ]] || die "run this installer as root"
-for command_name in cmp install mktemp mv nginx readlink realpath rm systemctl; do
+for command_name in cmp grep install mktemp mv nginx readlink realpath rm systemctl; do
     command -v "$command_name" >/dev/null 2>&1 \
         || die "required command is missing: $command_name"
 done
@@ -28,6 +35,8 @@ for source_file in "$NGINX_SOURCE" "$HOOK_SOURCE"; do
     [[ -f "$source_file" && ! -L "$source_file" ]] \
         || die "source must be a regular non-symlink file: $source_file"
 done
+[[ "$(grep -Fxc '    if (-f /etc/eduri/maintenance) {' "$NGINX_SOURCE")" == "1" ]] \
+    || die "nginx source must contain exactly one production maintenance gate"
 /bin/sh -n "$HOOK_SOURCE" || die "Certbot deploy hook has invalid shell syntax"
 
 [[ -f "$SITE_AVAILABLE" && ! -L "$SITE_AVAILABLE" ]] \
@@ -47,6 +56,12 @@ nginx_changed=0
 nginx_backup=""
 nginx_candidate=""
 hook_candidate=""
+
+reload_nginx_if_active() {
+    if systemctl is-active --quiet nginx; then
+        systemctl reload nginx
+    fi
+}
 
 restore_nginx_config() {
     local restore_candidate
@@ -68,7 +83,7 @@ cleanup() {
     trap - EXIT
     if [[ $status -ne 0 && $nginx_changed -eq 1 ]]; then
         printf 'Restoring the previous nginx configuration.\n' >&2
-        if restore_nginx_config && nginx -t && systemctl reload nginx; then
+        if restore_nginx_config && nginx -t && reload_nginx_if_active; then
             printf 'Previous nginx configuration restored.\n' >&2
         else
             printf 'ERROR: automatic nginx rollback failed; inspect nginx immediately.\n' >&2
@@ -96,7 +111,7 @@ if ! cmp --silent -- "$NGINX_SOURCE" "$SITE_AVAILABLE"; then
 fi
 
 nginx -t
-systemctl reload nginx
+reload_nginx_if_active
 
 if [[ ! -e "$HOOK_TARGET" ]] || ! cmp --silent -- "$HOOK_SOURCE" "$HOOK_TARGET"; then
     hook_candidate="$(mktemp "$(dirname -- "$(dirname -- "$HOOK_TARGET")")/.reload-nginx.candidate.XXXXXX")"

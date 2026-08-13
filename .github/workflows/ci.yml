@@ -27,6 +27,17 @@ jobs:
         run: |
           node --test scripts/check-publication-files.test.mjs
           node scripts/check-publication-files.mjs
+          python3 ops/scripts/validate_cd_release_test.py
+      - name: Validate deployment shell scripts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          checked=0
+          while IFS= read -r -d '' script; do
+            bash -n "$script"
+            ((checked += 1))
+          done < <(find ops/scripts -maxdepth 1 -type f -name '*.sh' -print0)
+          test "$checked" -gt 0
       - name: Audit locked dependencies
         run: npm audit --audit-level=low
       - name: Install pinned Gitleaks
@@ -55,5 +66,7 @@ jobs:
           cache: npm
       - name: Install locked dependencies
         run: npm ci
+      - name: Prepare self-hosted browser runtime assets
+        run: npm run prepare:client-assets
       - name: Typecheck, test, and build
         run: npm run check

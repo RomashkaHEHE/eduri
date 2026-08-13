@@ -1,5 +1,6 @@
 services:
   app:
+    image: "${EDURI_APP_IMAGE:-eduri-app:production}"
     build: .
     restart: unless-stopped
     env_file: .env

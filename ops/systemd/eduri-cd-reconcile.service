@@ -1,0 +1,14 @@
+[Unit]
+Description=Resume an interrupted Eduri production deployment
+After=local-fs.target docker.service
+Requires=docker.service
+Before=nginx.service
+RequiresMountsFor=/home/user1/eduri /var/lib/eduri-cd /usr/local/libexec/eduri
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/libexec/eduri/current/cd-worker.sh --reconcile
+TimeoutStartSec=60min
+
+[Install]
+WantedBy=multi-user.target

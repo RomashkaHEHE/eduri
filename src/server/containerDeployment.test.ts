@@ -30,10 +30,25 @@ describe("container deployment contract", () => {
     expect(nodeStages).toEqual([`FROM ${NODE_IMAGE}`, `FROM ${NODE_IMAGE}`]);
 
     const imageLines = compose.match(/^\s+image:\s+\S+/gmu) ?? [];
-    expect(imageLines).toHaveLength(2);
+    expect(imageLines).toHaveLength(3);
+    expect(composeService("app")).toContain(
+      'image: "${EDURI_APP_IMAGE:-eduri-app:production}"',
+    );
     expect(composeService("clamav")).toContain(`image: ${CLAMAV_IMAGE}`);
     expect(composeService("livekit")).toContain(`image: ${LIVEKIT_IMAGE}`);
-    for (const line of imageLines) expect(line).toMatch(/@sha256:[0-9a-f]{64}$/u);
+    const externalImageLines = imageLines.filter((line) => !line.includes("EDURI_APP_IMAGE"));
+    expect(externalImageLines).toHaveLength(2);
+    for (const line of externalImageLines) {
+      expect(line).toMatch(/@sha256:[0-9a-f]{64}$/u);
+    }
+  });
+
+  it("lets CD select a prebuilt app image without changing external image pins", () => {
+    const app = composeService("app");
+    expect(app).toMatch(
+      /^  app:\n\s+image: "\$\{EDURI_APP_IMAGE:-eduri-app:production\}"\n\s+build: \.\n/u,
+    );
+    expect(app).not.toContain("pull_policy:");
   });
 
   it("runs npm lifecycle scripts as the unprivileged node user", () => {

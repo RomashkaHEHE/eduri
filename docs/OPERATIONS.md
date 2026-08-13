@@ -1,5 +1,80 @@
 # Production operations
 
+## Automatic production deployment
+
+Pushes to `main` are deployed automatically only after the complete `CI`
+workflow succeeds. `.github/workflows/deploy.yml` checks out the exact verified
+`head_sha`, repeats the publication-file scan, creates a bounded checksummed Git
+archive, and sends it over pinned-host-key SSH. Production deploys are serialized
+and are never cancelled halfway through.
+
+The SSH identity is dedicated to CD. Its `authorized_keys` entry uses a forced
+command with OpenSSH `restrict`, so it cannot start a shell, execute a supplied
+command, allocate a PTY, or open forwarding. The root-owned receiver validates
+the framing, compressed checksum and size, rejects links, special files,
+traversal, secrets, databases and recovery paths, and bounds both member count
+and unpacked bytes. It preserves `.env`, `data`, `backups`, restore data and the
+shared maintenance lock. The receiver hands the validated archive to a detached
+systemd worker, so closing SSH or the Actions runner cannot terminate the
+production transaction. Before cutover, the worker keeps a recovery source
+snapshot and records the existing backup set. The regular deploy creates and
+validates a stopped-application backup. A failed release restores the previous
+source, edge configuration, and that exact pre-deploy data backup before it
+starts the previous app. Failed-release data is retained under a bounded
+`data.failed-restore-cd-*` path for investigation.
+
+The job records a durable phase before every production boundary. Before
+`commit-intent`, HUP, TERM, process failure, SSH loss, and reboot converge on the
+same rollback. At and after `commit-intent`, recovery only completes the new
+release, so it never restores an old database after the new version could have
+accepted public writes. `eduri-cd-reconcile.service` resumes an unfinished job
+at boot. An nginx systemd dependency makes startup fail closed if reconciliation
+cannot finish; nginx cannot accept traffic merely because the recovery unit
+failed. The bootstrap installer durably publishes its helper generation and can
+atomically migrate the previous regular revision marker when it contains the
+exact declared production SHA.
+
+A recovery snapshot is removed only after either the forward release or the
+rollback is healthy. Receiver, worker, validator, and edge helpers are installed
+as immutable generation directories; every helper is syntax-checked separately,
+and `current` switches atomically together with the deployed revision marker.
+
+One-time setup requires a new dedicated Ed25519 key pair. Copy only its public
+key to a temporary root-readable file on the server, then run:
+
+```bash
+ssh-keygen -t ed25519 -C eduri-production-cd -f ./eduri-production-cd
+cd /home/user1/eduri
+sudo bash ops/scripts/install-cd-receiver.sh \
+  /path/to/eduri-production-cd.pub \
+  "$(git rev-parse HEAD)"
+```
+
+The second argument must be the exact 40-character revision already running in
+production; it bootstraps the marker without deploying or restarting the app.
+
+Configure these GitHub Actions repository or `production` environment secrets:
+
+- `EDURI_CD_SSH_PRIVATE_KEY`: the dedicated private key, including its header
+  and footer;
+- `EDURI_CD_KNOWN_HOSTS`: the pinned `eduri.ru` line from a separately verified
+  OpenSSH `known_hosts` file.
+
+The server records the last successful revision in
+`/var/lib/eduri-cd/deployed-sha`. Verify it after a release together with health:
+
+```bash
+sudo cat /var/lib/eduri-cd/deployed-sha
+systemctl status eduri-cd-reconcile.service
+curl --fail --silent --show-error https://eduri.ru/api/health
+sudo -u user1 docker compose --project-directory /home/user1/eduri \
+  --file /home/user1/eduri/docker-compose.yml ps
+```
+
+Rotate the CD key by rerunning `install-cd-receiver.sh` with the new public key
+and replacing `EDURI_CD_SSH_PRIVATE_KEY`. The installer atomically replaces only
+the marked `eduri-production-cd` entry and leaves administrator keys unchanged.
+
 Локальный development/test server по умолчанию слушает только `127.0.0.1`,
 поскольку development credentials заведомо не предназначены для LAN. Только
 production-конфигурация слушает `0.0.0.0`; контейнер публикует этот port лишь на
@@ -24,7 +99,7 @@ Express слушает `127.0.0.1:3020`, LiveKit signaling — `127.0.0.1:7880`,
    слушает loopback и точный локальный Docker gateway `10.253.0.1`, но не
    публичный интерфейс.
 3. Установите Docker Engine с Compose plugin, `curl`, `sqlite3`, `tar`, `flock`
-   (`util-linux`) и `coreutils`.
+   (`util-linux`, включая `setpriv`), `rsync`, `python3` и `coreutils`.
 4. Разместите проект ровно в `/home/user1/eduri` и создайте `.env` с
    `NODE_ENV=production`, `APP_ORIGIN=https://eduri.ru`,
    `TRUST_PROXY=10.253.0.1`,

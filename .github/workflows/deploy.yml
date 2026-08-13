@@ -1,0 +1,100 @@
+name: Deploy production
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
+    environment: production
+    env:
+      DEPLOY_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: Check out the verified revision
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+          fetch-depth: 1
+
+      - name: Reject private publication artifacts
+        run: |
+          test "$(git rev-parse HEAD)" = "$DEPLOY_SHA"
+          node --test scripts/check-publication-files.test.mjs
+          node scripts/check-publication-files.mjs
+
+      - name: Build the release archive
+        id: release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          archive="$RUNNER_TEMP/eduri-release.tar.gz"
+          git archive --format=tar "$DEPLOY_SHA" | gzip -n -9 >"$archive"
+          archive_sha="$(sha256sum "$archive" | cut -d ' ' -f 1)"
+          archive_bytes="$(stat --format='%s' "$archive")"
+          test "$archive_bytes" -gt 0
+          test "$archive_bytes" -le 33554432
+          printf 'archive=%s\narchive_sha=%s\narchive_bytes=%s\n' \
+            "$archive" "$archive_sha" "$archive_bytes" >>"$GITHUB_OUTPUT"
+
+      - name: Configure the pinned deploy identity
+        env:
+          DEPLOY_PRIVATE_KEY: ${{ secrets.EDURI_CD_SSH_PRIVATE_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.EDURI_CD_KNOWN_HOSTS }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$DEPLOY_PRIVATE_KEY"
+          test -n "$DEPLOY_KNOWN_HOSTS"
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\n' "$DEPLOY_PRIVATE_KEY" >"$HOME/.ssh/eduri_cd"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" >"$HOME/.ssh/known_hosts"
+          chmod 0600 "$HOME/.ssh/eduri_cd" "$HOME/.ssh/known_hosts"
+          ssh-keygen -y -f "$HOME/.ssh/eduri_cd" >/dev/null
+          ssh-keygen -F eduri.ru -f "$HOME/.ssh/known_hosts" >/dev/null
+
+      - name: Deploy the verified revision
+        env:
+          ARCHIVE: ${{ steps.release.outputs.archive }}
+          ARCHIVE_SHA: ${{ steps.release.outputs.archive_sha }}
+          ARCHIVE_BYTES: ${{ steps.release.outputs.archive_bytes }}
+        run: |
+          set -Eeuo pipefail
+          current_main="$(git ls-remote --exit-code origin refs/heads/main | cut -f1)"
+          test "$current_main" = "$DEPLOY_SHA"
+          deploy_log="$RUNNER_TEMP/eduri-deploy-output.log"
+          {
+            printf 'EDURI_CD_V1 %s %s %s\n' \
+              "$DEPLOY_SHA" "$ARCHIVE_SHA" "$ARCHIVE_BYTES"
+            cat "$ARCHIVE"
+          } | ssh -T \
+            -i "$HOME/.ssh/eduri_cd" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=15 \
+            -o ConnectionAttempts=3 \
+            -o ServerAliveInterval=15 \
+            -o ServerAliveCountMax=4 \
+            root@eduri.ru | tee "$deploy_log"
+          grep -Fxq "EDURI_DEPLOYED_SHA=$DEPLOY_SHA" "$deploy_log"
+          for attempt in {1..12}; do
+            if curl --fail --silent --show-error --max-time 5 \
+              https://eduri.ru/api/health >/dev/null; then
+              exit 0
+            fi
+            sleep 5
+          done
+          exit 1

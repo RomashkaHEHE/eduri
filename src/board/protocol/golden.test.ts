@@ -7,12 +7,18 @@ import {
   BoardPermission,
   decodeBoardFrame,
   encodeBoardFrame,
+  encodeBoardProfileUpdatePayload,
+  encodeBoardProfileUpdatedPayload,
   messageIdFromHex,
   type BoardFrame,
 } from "./index";
 import protocolV1Fixtures from "./fixtures/v1.json";
 
 const messageId = messageIdFromHex("00112233445566778899aabbccddeeff");
+const fixtureProfile = {
+  displayName: "Tutor Profile",
+  color: "#a1b2c3" as const,
+};
 
 const goldenFixtures: ReadonlyArray<{
   readonly name: string;
@@ -99,6 +105,51 @@ const goldenFixtures: ReadonlyArray<{
       update: new Uint8Array([1, 0, 42]),
     },
     hex: "4544423201070708706167653a6162632a0301002a",
+  },
+  {
+    name: "PROFILE_UPDATE",
+    frame: {
+      type: BoardMessageType.CONTROL,
+      generation: 7,
+      code: BoardControlCode.PROFILE_UPDATE,
+      messageId,
+      payload: encodeBoardProfileUpdatePayload(fixtureProfile),
+    },
+    hex:
+      "454442320108070b0200112233445566778899aabbccddeeff17" +
+      "01000d5475746f722050726f66696c6523613162326333",
+  },
+  {
+    name: "PROFILE_UPDATED_ACCEPTED",
+    frame: {
+      type: BoardMessageType.CONTROL,
+      generation: 7,
+      code: BoardControlCode.PROFILE_UPDATED,
+      messageId,
+      payload: encodeBoardProfileUpdatedPayload({
+        accepted: true,
+        profile: fixtureProfile,
+      }),
+    },
+    hex:
+      "454442320108070c0200112233445566778899aabbccddeeff18" +
+      "0101000d5475746f722050726f66696c6523613162326333",
+  },
+  {
+    name: "PROFILE_UPDATED_REJECTED",
+    frame: {
+      type: BoardMessageType.CONTROL,
+      generation: 7,
+      code: BoardControlCode.PROFILE_UPDATED,
+      messageId,
+      payload: encodeBoardProfileUpdatedPayload({
+        accepted: false,
+        error: "Profile is invalid",
+      }),
+    },
+    hex:
+      "454442320108070c0200112233445566778899aabbccddeeff16" +
+      "0100001250726f66696c6520697320696e76616c6964",
   },
   {
     name: "CONTROL",

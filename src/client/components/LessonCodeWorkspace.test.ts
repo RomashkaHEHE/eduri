@@ -10,6 +10,7 @@ const providerStop = vi.fn(async () => undefined);
 const providerStart = vi.fn(async () => undefined);
 const providerFlush = vi.fn(async () => undefined);
 const setAwareness = vi.fn();
+const updateProfile = vi.fn();
 const dispatchTerminal = vi.fn();
 const statusListeners = new Set<(status: Record<string, unknown>) => void>();
 const awarenessListeners = new Set<(peers: readonly unknown[]) => void>();
@@ -31,6 +32,7 @@ vi.mock("../code/lessonCodeProvider", () => ({
     stop = providerStop;
     flush = providerFlush;
     setAwareness = setAwareness;
+    updateProfile = updateProfile;
     waitUntilSynchronized = vi.fn(async () => undefined);
     dispatchTerminal = dispatchTerminal;
     subscribeStatus(listener: (status: Record<string, unknown>) => void) {
@@ -83,6 +85,7 @@ import { LessonCodeWorkspace } from "./LessonCodeWorkspace";
 
 const LESSON_ID = "00000000-0000-4000-8000-000000000601";
 const USER_ID = "00000000-0000-4000-8000-000000000602";
+const PROFILE = { displayName: "Lesson user", color: "#2563eb" as const };
 
 let container: HTMLDivElement;
 let root: Root;
@@ -96,6 +99,7 @@ beforeEach(() => {
   providerStop.mockClear();
   providerFlush.mockClear();
   setAwareness.mockClear();
+  updateProfile.mockClear();
   dispatchTerminal.mockClear();
   statusListeners.clear();
   awarenessListeners.clear();
@@ -119,6 +123,7 @@ describe("LessonCodeWorkspace adapter", () => {
       root.render(createElement(LessonCodeWorkspace, {
         lessonId: LESSON_ID,
         userId: USER_ID,
+        profile: PROFILE,
       }));
     });
 
@@ -126,6 +131,7 @@ describe("LessonCodeWorkspace adapter", () => {
       lessonId: LESSON_ID,
       userId: USER_ID,
       deviceId: "lesson-device-01",
+      profile: PROFILE,
       databaseName: `lesson-db:${USER_ID}:${LESSON_ID}`,
     });
     expect(providerStart).toHaveBeenCalledOnce();
@@ -140,7 +146,15 @@ describe("LessonCodeWorkspace adapter", () => {
         waitUntilSynchronized: expect.any(Function),
       }),
     }));
-    expect(container.textContent).toContain("Код синхронизирован");
+    expect(workspaceProps).toHaveBeenLastCalledWith(expect.objectContaining({
+      syncStatus: {
+        connection: "online",
+        durability: "ready",
+        pendingUpdates: 0,
+        error: null,
+        readOnly: false,
+      },
+    }));
   });
 
   it("keeps local-first editing enabled while the shared terminal is offline", async () => {
@@ -148,6 +162,7 @@ describe("LessonCodeWorkspace adapter", () => {
       root.render(createElement(LessonCodeWorkspace, {
         lessonId: LESSON_ID,
         userId: USER_ID,
+        profile: PROFILE,
       }));
     });
 
@@ -170,6 +185,47 @@ describe("LessonCodeWorkspace adapter", () => {
       participantId: "lesson-participant",
       readOnly: false,
       terminalReadOnly: true,
+      syncStatus: expect.objectContaining({
+        connection: "offline",
+        pendingUpdates: 1,
+        readOnly: false,
+      }),
+    }));
+  });
+
+  it("makes the editor read-only when local persistence is at risk", async () => {
+    await act(async () => {
+      root.render(createElement(LessonCodeWorkspace, {
+        lessonId: LESSON_ID,
+        userId: USER_ID,
+        profile: PROFILE,
+      }));
+    });
+
+    await act(async () => {
+      for (const listener of statusListeners) listener({
+        connection: "online",
+        durability: "at-risk",
+        documentReady: true,
+        pendingUpdates: 2,
+        participant: {
+          participantId: "lesson-participant",
+          displayName: "Lesson user",
+          color: "#336699",
+        },
+        error: "IndexedDB недоступен",
+      });
+    });
+
+    expect(workspaceProps).toHaveBeenLastCalledWith(expect.objectContaining({
+      readOnly: true,
+      terminalReadOnly: true,
+      syncStatus: expect.objectContaining({
+        durability: "at-risk",
+        pendingUpdates: 2,
+        error: "IndexedDB недоступен",
+        readOnly: true,
+      }),
     }));
   });
 
@@ -178,6 +234,7 @@ describe("LessonCodeWorkspace adapter", () => {
       root.render(createElement(LessonCodeWorkspace, {
         lessonId: LESSON_ID,
         userId: USER_ID,
+        profile: PROFILE,
         readOnly: false,
       }));
     });
@@ -186,6 +243,7 @@ describe("LessonCodeWorkspace adapter", () => {
       root.render(createElement(LessonCodeWorkspace, {
         lessonId: LESSON_ID,
         userId: USER_ID,
+        profile: PROFILE,
         readOnly: true,
       }));
     });
@@ -201,6 +259,7 @@ describe("LessonCodeWorkspace adapter", () => {
       root.render(createElement(LessonCodeWorkspace, {
         lessonId: LESSON_ID,
         userId: USER_ID,
+        profile: PROFILE,
       }));
     });
     await act(async () => root.unmount());

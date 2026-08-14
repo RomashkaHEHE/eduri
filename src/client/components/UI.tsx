@@ -49,14 +49,17 @@ export function Modal({
   children,
   onClose,
   width = "medium",
+  dismissible = true,
 }: PropsWithChildren<{
   open: boolean;
   title: string;
   description?: string;
   onClose: () => void;
   width?: "small" | "medium" | "large";
+  dismissible?: boolean;
 }>) {
   const headingId = useId();
+  const descriptionId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
@@ -66,7 +69,7 @@ export function Modal({
     const previous = document.activeElement as HTMLElement | null;
     document.body.classList.add("modal-open");
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onCloseRef.current();
+      if (event.key === "Escape" && dismissible) onCloseRef.current();
       if (event.key !== "Tab" || !dialogRef.current) return;
       const focusable = Array.from(
         dialogRef.current.querySelectorAll<HTMLElement>(
@@ -103,26 +106,34 @@ export function Modal({
       document.removeEventListener("keydown", onKeyDown);
       previous?.focus();
     };
-  }, [open]);
+  }, [dismissible, open]);
 
   if (!open) return null;
   return createPortal(
-    <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+    <div
+      className="modal-backdrop"
+      onMouseDown={(event) => {
+        if (dismissible && event.target === event.currentTarget) onClose();
+      }}
+    >
       <div
         ref={dialogRef}
         className={`modal modal--${width}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby={headingId}
+        aria-describedby={description ? descriptionId : undefined}
       >
         <div className="modal__header">
           <div>
             <h2 id={headingId}>{title}</h2>
-            {description && <p>{description}</p>}
+            {description && <p id={descriptionId}>{description}</p>}
           </div>
-          <IconButton label="Закрыть" onClick={onClose}>
-            <X size={19} />
-          </IconButton>
+          {dismissible && (
+            <IconButton label="Закрыть" onClick={onClose}>
+              <X size={19} />
+            </IconButton>
+          )}
         </div>
         <div className="modal__body">{children}</div>
       </div>

@@ -30,6 +30,9 @@ import {
 
 class FakeSocket implements CodeSyncSocket {
   connected = false;
+  auth?: CodeSyncSocket["auth"];
+  connectCalls = 0;
+  disconnectCalls = 0;
   readonly sent: Array<{ event: string; args: unknown[] }> = [];
   private readonly listeners = new Map<string, Set<(...args: any[]) => void>>();
 
@@ -54,12 +57,14 @@ class FakeSocket implements CodeSyncSocket {
   }
 
   connect(): this {
+    this.connectCalls += 1;
     this.connected = true;
     this.serverEmit("connect");
     return this;
   }
 
   disconnect(): this {
+    this.disconnectCalls += 1;
     const wasConnected = this.connected;
     this.connected = false;
     if (wasConnected) this.serverEmit("disconnect", "io client disconnect");
@@ -188,6 +193,57 @@ function createHarness(databaseName: string): {
 }
 
 describe("GuestCodeProvider", () => {
+  it("updates the live profile without reconnecting or replacing collaboration", async () => {
+    const { provider, socket } = createHarness(
+      `guest-code-profile-${crypto.randomUUID()}`,
+    );
+    const document = provider.document;
+    try {
+      await provider.start();
+      ready(socket);
+      const terminalEpoch = provider.getStatus().terminalConnectionEpoch;
+      provider.updateProfile({ displayName: "Alice", color: "#2563eb" });
+
+      expect(socket.auth).toEqual({
+        shareId: "a".repeat(43),
+        deviceId: "device-1",
+        profile: { displayName: "Alice", color: "#2563eb" },
+      });
+      expect(socket.messages(CODE_SYNC_TAGS.profileUpdate).at(-1)).toEqual({
+        type: CODE_SYNC_TAGS.profileUpdate,
+        protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+        profile: { displayName: "Alice", color: "#2563eb" },
+      });
+      expect(socket.connectCalls).toBe(1);
+      expect(socket.disconnectCalls).toBe(0);
+      expect(provider.document).toBe(document);
+      expect(provider.getStatus().terminalConnectionEpoch).toBe(terminalEpoch);
+
+      socket.serverEmit(CODE_SYNC_MESSAGE_EVENT, {
+        type: CODE_SYNC_TAGS.profileUpdated,
+        protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+        participant: {
+          participantId: participant.participantId,
+          displayName: "Alice",
+          color: "#2563eb",
+        },
+      });
+      expect(provider.getStatus().participant).toEqual({
+        participantId: participant.participantId,
+        displayName: "Alice",
+        color: "#2563eb",
+      });
+
+      const updateCount = socket.messages(CODE_SYNC_TAGS.profileUpdate).length;
+      provider.updateProfile({ displayName: "Alice", color: "#2563eb" });
+      expect(socket.messages(CODE_SYNC_TAGS.profileUpdate)).toHaveLength(updateCount);
+      expect(socket.connectCalls).toBe(1);
+      expect(socket.disconnectCalls).toBe(0);
+    } finally {
+      await provider.stop();
+    }
+  });
+
   it("advertises multi-selection capability first and sends plural awareness to a capable server", async () => {
     const { provider, socket } = createHarness(
       `guest-code-capable-awareness-${crypto.randomUUID()}`,

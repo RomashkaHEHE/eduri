@@ -43,6 +43,7 @@ interface ConnectionData {
 
 export interface CodeSyncTransportOptions {
   readonly awarenessPerMinute?: number;
+  readonly profileUpdatesPerMinute?: number;
   readonly syncPerMinute?: number;
   readonly updatesPerMinute?: number;
   readonly updateBytesPerMinute?: number;
@@ -82,10 +83,11 @@ class FixedWindowRate {
   }
 }
 
-type EventRateName = "awareness" | "sync";
+type EventRateName = "awareness" | "profile" | "sync";
 
 interface CodeRateScope {
   readonly awareness: FixedWindowRate;
+  readonly profile: FixedWindowRate;
   readonly sync: FixedWindowRate;
   readonly updates: FixedWindowRate;
   readonly updateBytes: FixedWindowRate;
@@ -99,6 +101,7 @@ class AggregateCodeRateScopes {
   constructor(
     private readonly limits: {
       readonly awareness: number;
+      readonly profile: number;
       readonly sync: number;
       readonly updates: number;
       readonly updateBytes: number;
@@ -141,6 +144,7 @@ class AggregateCodeRateScopes {
     }
     const created: CodeRateScope = {
       awareness: new FixedWindowRate(this.limits.awareness, now),
+      profile: new FixedWindowRate(this.limits.profile, now),
       sync: new FixedWindowRate(this.limits.sync, now),
       updates: new FixedWindowRate(this.limits.updates, now),
       updateBytes: new FixedWindowRate(this.limits.updateBytes, now),
@@ -214,6 +218,7 @@ export function attachCodeSyncNamespace(
   // Two ordinary collaborators can each emit at the client's 120 ms cadence
   // without exhausting the shared workspace budget.
   const awarenessPerMinute = options.awarenessPerMinute ?? 1_200;
+  const profileUpdatesPerMinute = options.profileUpdatesPerMinute ?? 60;
   const syncPerMinute = options.syncPerMinute ?? 120;
   const updatesPerMinute = options.updatesPerMinute ?? 1_200;
   const updateBytesPerMinute = options.updateBytesPerMinute ?? 16 * 1024 * 1024;
@@ -222,6 +227,7 @@ export function attachCodeSyncNamespace(
   const rateScopes = new AggregateCodeRateScopes(
     {
       awareness: awarenessPerMinute,
+      profile: profileUpdatesPerMinute,
       sync: syncPerMinute,
       updates: updatesPerMinute,
       updateBytes: updateBytesPerMinute,
@@ -279,6 +285,7 @@ export function attachCodeSyncNamespace(
     ingress,
     options.trustedProxy,
   );
+  let terminalTransport: ReturnType<typeof attachCodeTerminalTransport> | undefined;
 
   const reauthorizeSocket = (
     socket: Socket,
@@ -478,6 +485,42 @@ export function attachCodeSyncNamespace(
           return;
         }
         replayAwarenessOnce(socket);
+        if (message.type === CODE_SYNC_TAGS.profileUpdate) {
+          if (!rateScopes.consumeEvent(session.workspaceId, "profile")) {
+            send(socket, {
+              type: CODE_SYNC_TAGS.control,
+              protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+              code: "rate-limited",
+              message: "Code profile update rate limit exceeded",
+              terminal: false,
+            }, ack);
+            return;
+          }
+          const identity = service.updateProfile(session, message.profile);
+          const current = awareness.get(session.workspaceId)?.get(socket.id);
+          if (current) {
+            awareness.get(session.workspaceId)?.set(socket.id, {
+              participant: identity,
+              state: current.state,
+            });
+          }
+          terminalTransport?.updateParticipant(socket);
+          const updated = {
+            type: CODE_SYNC_TAGS.profileUpdated,
+            protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+            participant: identity,
+          } satisfies CodeSyncServerMessage;
+          send(socket, updated, ack);
+          if (current) {
+            broadcastAwareness(
+              session.workspaceId,
+              identity,
+              current.state,
+              socket.id,
+            );
+          }
+          return;
+        }
         if (message.type === CODE_SYNC_TAGS.syncStep1) {
           requestId = message.requestId;
           if (!rateScopes.consumeEvent(session.workspaceId, "sync")) {
@@ -615,7 +658,7 @@ export function attachCodeSyncNamespace(
     });
   });
 
-  attachCodeTerminalTransport(namespace, {
+  terminalTransport = attachCodeTerminalTransport(namespace, {
     reauthorize: (session) => service.reauthorize(session),
     broadcastAuthorized,
     emitAuthorized,

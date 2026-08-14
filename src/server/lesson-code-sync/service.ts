@@ -3,6 +3,10 @@ import type Database from "better-sqlite3";
 import type {
   CodeParticipantIdentity,
 } from "../../code/protocol/index.js";
+import {
+  COLLABORATION_PROFILE_COLORS,
+  type CollaborationProfile,
+} from "../../shared/collaborationProfile.js";
 import type { AuthContext } from "../types.js";
 import {
   CodeSyncRepository,
@@ -15,6 +19,7 @@ import { validateCodeStateVector } from "../code-sync/service.js";
 export interface LessonCodeHandshakeAuth {
   readonly lessonId: string;
   readonly deviceId: string;
+  readonly profile?: CollaborationProfile;
 }
 
 export interface AuthenticatedLessonCodeSync {
@@ -24,19 +29,10 @@ export interface AuthenticatedLessonCodeSync {
   readonly documentId: string;
   readonly userId: string;
   readonly sessionHash: string;
-  readonly participant: CodeParticipantIdentity;
+  participant: CodeParticipantIdentity;
 }
 
 export type LessonCodeAccess = "read-write" | "read-only";
-
-const PARTICIPANT_COLORS = [
-  "#2563eb",
-  "#16825d",
-  "#d33f49",
-  "#d97706",
-  "#7c3aed",
-  "#0891b2",
-] as const;
 
 export class LessonCodeSyncServiceError extends Error {
   constructor(
@@ -81,15 +77,22 @@ function failRepository(error: unknown): never {
   );
 }
 
-function participant(auth: AuthContext): CodeParticipantIdentity {
+function participant(
+  auth: AuthContext,
+  requestedProfile?: CollaborationProfile,
+): CodeParticipantIdentity {
   const participantId = randomUUID();
   const colorIndex = createHash("sha256")
     .update(auth.user.id)
-    .digest()[0] % PARTICIPANT_COLORS.length;
+    .digest()[0] % COLLABORATION_PROFILE_COLORS.length;
+  const profile = requestedProfile ?? {
+    displayName: auth.user.displayName,
+    color: COLLABORATION_PROFILE_COLORS[colorIndex],
+  };
   return {
     participantId,
-    displayName: auth.user.displayName,
-    color: PARTICIPANT_COLORS[colorIndex],
+    displayName: profile.displayName,
+    color: profile.color,
   };
 }
 
@@ -125,7 +128,7 @@ export class LessonCodeSyncService {
       documentId: workspace.documentId,
       userId: auth.user.id,
       sessionHash: auth.sessionHash,
-      participant: participant(auth),
+      participant: participant(auth, handshake.profile),
     };
   }
 
@@ -149,6 +152,19 @@ export class LessonCodeSyncService {
     return row.status === "scheduled" || row.status === "active"
       ? "read-write"
       : "read-only";
+  }
+
+  updateProfile(
+    session: AuthenticatedLessonCodeSync,
+    profile: CollaborationProfile,
+  ): CodeParticipantIdentity {
+    this.reauthorize(session);
+    session.participant = {
+      participantId: session.participant.participantId,
+      displayName: profile.displayName,
+      color: profile.color,
+    };
+    return session.participant;
   }
 
   requireMutable(session: AuthenticatedLessonCodeSync): void {

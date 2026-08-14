@@ -95,6 +95,20 @@ encryption и минимальными правами.
   перед расширением доступа другим преподавателям.
 - WebSocket проверяет Origin, session, tenant и room membership не только при
   handshake, но и для каждого изменения состояния.
+- Collaboration profile (`displayName`, `color`) является недоверенным,
+  ограниченным presentation input. Клиентская запись имеет strict exact-key
+  envelope; server повторно нормализует и валидирует профиль при выдаче Board
+  ticket/Call token, Code handshake и каждом live profile update. Профиль не
+  может менять account/guest actor ID, role, tenant, lesson membership, share
+  capability, resource scope или permission. Board/Code awareness не принимает
+  identity-поля клиента: сервер подставляет participant ID, display name, role и
+  color из текущей повторно авторизованной connection identity.
+- Lesson/guest Call profile PATCH каждый раз повторно проверяет действующую
+  session или share capability, active lesson/room generation и Call resource,
+  затем обновляет только точную server-derived LiveKit participant identity через
+  приватный management RPC. Browser не выбирает participant identity, room name
+  или management endpoint; изменение профиля не выдаёт административных grants,
+  новый JWT и не продлевает guest-room activity.
 - HTTPS обязателен. App port доступен только через loopback; database/data не
   публикуются nginx и не монтируются в web root.
 

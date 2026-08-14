@@ -20,14 +20,28 @@ describe("Code sync protocol codec", () => {
     );
   }
 
-  it("accepts only shareId and deviceId in handshake auth", () => {
+  it("accepts an exact, normalized collaboration profile in handshake auth", () => {
     const shareId = "a".repeat(43);
     expect(parseCodeSyncHandshakeAuth({ shareId, deviceId: "device-1" }))
       .toEqual({ shareId, deviceId: "device-1" });
+    expect(parseCodeSyncHandshakeAuth({
+      shareId,
+      deviceId: "device-1",
+      profile: { displayName: "  Alice   Example ", color: "#AABBCC" },
+    })).toEqual({
+      shareId,
+      deviceId: "device-1",
+      profile: { displayName: "Alice Example", color: "#aabbcc" },
+    });
     expect(() => parseCodeSyncHandshakeAuth({
       shareId,
       deviceId: "device-1",
       capability: "secret-in-url",
+    })).toThrowError(CodeProtocolError);
+    expect(() => parseCodeSyncHandshakeAuth({
+      shareId,
+      deviceId: "device-1",
+      profile: { displayName: "Alice\nAdmin", color: "#aabbcc" },
     })).toThrowError(CodeProtocolError);
   });
 
@@ -71,6 +85,27 @@ describe("Code sync protocol codec", () => {
         capabilities,
       })).toThrowError(CodeProtocolError);
     }
+  });
+
+  it("normalizes a bounded live profile update and rejects extra fields", () => {
+    expect(parseCodeSyncClientMessage({
+      type: CODE_SYNC_TAGS.profileUpdate,
+      protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+      profile: { displayName: "  Alice   Example ", color: "#ABCDEF" },
+    })).toEqual({
+      type: CODE_SYNC_TAGS.profileUpdate,
+      protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+      profile: { displayName: "Alice Example", color: "#abcdef" },
+    });
+    expect(() => parseCodeSyncClientMessage({
+      type: CODE_SYNC_TAGS.profileUpdate,
+      protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+      profile: {
+        displayName: "Alice",
+        color: "#abcdef",
+        participantId: "spoofed",
+      },
+    })).toThrowError(CodeProtocolError);
   });
 
   it("rejects legacy, untagged, and unknown protocol messages", () => {

@@ -17,6 +17,8 @@ export const CODE_SYNC_TAGS = {
   remoteUpdate: "eduri.code.remote-update",
   updateAck: "eduri.code.update-ack",
   capabilities: "eduri.code.capabilities",
+  profileUpdate: "eduri.code.profile-update",
+  profileUpdated: "eduri.code.profile-updated",
   control: "eduri.code.control",
 } as const;
 

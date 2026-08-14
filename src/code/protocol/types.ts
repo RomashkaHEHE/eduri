@@ -4,10 +4,12 @@ import {
   CODE_SYNC_TAGS,
   CODE_SYNC_UPDATE_ENCODING,
 } from "./constants.js";
+import type { CollaborationProfile } from "../../shared/collaborationProfile.js";
 
 export interface CodeSyncHandshakeAuth {
   readonly shareId: string;
   readonly deviceId: string;
+  readonly profile?: CollaborationProfile;
 }
 
 export type CodeYTextAwarenessTarget =
@@ -128,11 +130,17 @@ export interface CodeSyncCapabilitiesMessage extends CodeSyncMessageBase {
   readonly capabilities: readonly [CodeSyncCapability];
 }
 
+export interface CodeSyncProfileUpdateMessage extends CodeSyncMessageBase {
+  readonly type: typeof CODE_SYNC_TAGS.profileUpdate;
+  readonly profile: CollaborationProfile;
+}
+
 export type CodeSyncClientMessage =
   | CodeSyncStep1Message
   | CodeSyncUpdateMessage
   | CodeSyncAwarenessMessage
-  | CodeSyncCapabilitiesMessage;
+  | CodeSyncCapabilitiesMessage
+  | CodeSyncProfileUpdateMessage;
 
 export interface CodeSyncReadyMessage extends CodeSyncMessageBase {
   readonly type: typeof CODE_SYNC_TAGS.ready;
@@ -178,6 +186,11 @@ export interface CodeSyncRemoteAwarenessMessage extends CodeSyncMessageBase {
   readonly state: CodeAwarenessWireState | null;
 }
 
+export interface CodeSyncProfileUpdatedMessage extends CodeSyncMessageBase {
+  readonly type: typeof CODE_SYNC_TAGS.profileUpdated;
+  readonly participant: CodeParticipantIdentity;
+}
+
 export type CodeSyncControlCode =
   | "expired"
   | "not-found"
@@ -200,4 +213,5 @@ export type CodeSyncServerMessage =
   | CodeSyncRemoteUpdateMessage
   | CodeSyncUpdateAckMessage
   | CodeSyncRemoteAwarenessMessage
+  | CodeSyncProfileUpdatedMessage
   | CodeSyncControlMessage;

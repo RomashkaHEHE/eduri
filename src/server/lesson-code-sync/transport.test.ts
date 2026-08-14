@@ -16,6 +16,7 @@ import {
 } from "../../code/protocol/index.js";
 import { LESSON_CODE_SYNC_NAMESPACE } from "../../code/lessonSync.js";
 import { codeWorkspaceText } from "../../code/core/index.js";
+import type { CollaborationProfile } from "../../shared/collaborationProfile.js";
 import {
   SHARED_TERMINAL_ACK_EVENT,
   SHARED_TERMINAL_ACTION_EVENT,
@@ -23,6 +24,7 @@ import {
   SHARED_TERMINAL_EFFECT_EVENT,
   SHARED_TERMINAL_PROTOCOL_VERSION,
   SHARED_TERMINAL_STATE_EVENT,
+  applySharedTerminalDelta,
   type SharedTerminalAck,
   type SharedTerminalClientEffect,
   type SharedTerminalDelta,
@@ -175,9 +177,14 @@ describe("lesson Code sync namespace", () => {
     fs.rmSync(dataDir, { recursive: true, force: true });
   });
 
-  function client(token: string, deviceId: string, lessonId = LESSON_ID): Socket {
+  function client(
+    token: string,
+    deviceId: string,
+    lessonId = LESSON_ID,
+    profile?: CollaborationProfile,
+  ): Socket {
     const socket = createSocketClient(`${baseUrl}${LESSON_CODE_SYNC_NAMESPACE}`, {
-      auth: { lessonId, deviceId },
+      auth: { lessonId, deviceId, ...(profile ? { profile } : {}) },
       autoConnect: false,
       forceNew: true,
       reconnection: false,
@@ -265,6 +272,26 @@ describe("lesson Code sync namespace", () => {
     extended.connect();
     await expect(extendedError)
       .resolves.toMatchObject({ data: { code: "invalid-message" } });
+  });
+
+  it("authoritatively uses the validated handshake profile", async () => {
+    const socket = client(
+      TUTOR_TOKEN,
+      "profile-device",
+      LESSON_ID,
+      { displayName: "Tutor Alias", color: "#a1b2c3" },
+    );
+    const ready = nextMessage(socket, (message) => (
+      message.type === CODE_SYNC_TAGS.ready
+    ));
+    socket.connect();
+    await expect(ready).resolves.toMatchObject({
+      type: CODE_SYNC_TAGS.ready,
+      participant: {
+        displayName: "Tutor Alias",
+        color: "#a1b2c3",
+      },
+    });
   });
 
   it("charges malformed near-5 MiB namespace auth before auth parsing", async () => {
@@ -541,6 +568,140 @@ describe("lesson Code sync namespace", () => {
       error: "unauthorized",
     });
     expect(student.connected).toBe(true);
+  });
+
+  it("updates a live profile without disconnecting the active lesson host", async () => {
+    const host = await connect(TUTOR_TOKEN, "lesson-profile-host");
+    const observer = await connect(STUDENT_TOKEN, "lesson-profile-observer");
+    const initialEvent = nextSocketEvent<SharedTerminalState>(
+      host,
+      SHARED_TERMINAL_STATE_EVENT,
+    );
+    host.emit(SHARED_TERMINAL_ACTION_EVENT, {
+      protocolVersion: SHARED_TERMINAL_PROTOCOL_VERSION,
+      action: { type: "sync", actionId: "lesson-profile-sync" },
+    });
+    const initial = await initialEvent;
+    const startedDelta = nextSocketEvent<SharedTerminalDelta>(
+      observer,
+      SHARED_TERMINAL_DELTA_EVENT,
+    );
+    const startedEffect = nextSocketEvent<SharedTerminalClientEffect>(
+      host,
+      SHARED_TERMINAL_EFFECT_EVENT,
+      (effect) => effect.type === "start-run",
+    );
+    host.emit(SHARED_TERMINAL_ACTION_EVENT, {
+      protocolVersion: SHARED_TERMINAL_PROTOCOL_VERSION,
+      action: {
+        type: "start-run",
+        actionId: "lesson-profile-start",
+        entryId: "main-py",
+        entrypoint: "main.py",
+      },
+    });
+    const [startDelta, effect] = await Promise.all([
+      startedDelta,
+      startedEffect,
+    ]);
+    const started = applySharedTerminalDelta(initial, startDelta);
+    if (!started || effect.type !== "start-run") {
+      throw new Error("Lesson terminal run did not start");
+    }
+    const originalParticipantId = started.host?.participantId;
+
+    await observer.timeout(2_000).emitWithAck(CODE_SYNC_MESSAGE_EVENT, {
+      type: CODE_SYNC_TAGS.syncStep1,
+      protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+      requestId: "lesson-profile-observer-sync",
+      stateVector: Uint8Array.of(0),
+    });
+    const initialPresence = nextMessage(
+      observer,
+      (message) => message.type === CODE_SYNC_TAGS.awareness,
+    );
+    host.emit(CODE_SYNC_MESSAGE_EVENT, {
+      type: CODE_SYNC_TAGS.awareness,
+      protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+      state: { target: { kind: "terminal", field: "input" } },
+    });
+    await initialPresence;
+
+    const ownProfile = nextMessage(
+      host,
+      (message) => message.type === CODE_SYNC_TAGS.profileUpdated,
+    );
+    const remoteProfile = nextMessage(
+      observer,
+      (message) => message.type === CODE_SYNC_TAGS.awareness
+        && message.participant.displayName === "Tutor renamed",
+    );
+    const identityDelta = nextSocketEvent<SharedTerminalDelta>(
+      observer,
+      SHARED_TERMINAL_DELTA_EVENT,
+      (delta) => delta.operations.some((operation) => (
+        operation.type === "runtime"
+        && operation.host?.displayName === "Tutor renamed"
+      )),
+    );
+    host.emit(CODE_SYNC_MESSAGE_EVENT, {
+      type: CODE_SYNC_TAGS.profileUpdate,
+      protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+      profile: { displayName: "Tutor renamed", color: "#a1b2c3" },
+    });
+    const [ownIdentity, remoteIdentity, profileDelta] = await Promise.all([
+      ownProfile,
+      remoteProfile,
+      identityDelta,
+    ]);
+    expect(ownIdentity).toMatchObject({
+      type: CODE_SYNC_TAGS.profileUpdated,
+      participant: {
+        participantId: originalParticipantId,
+        displayName: "Tutor renamed",
+        color: "#a1b2c3",
+      },
+    });
+    expect(remoteIdentity).toMatchObject({
+      type: CODE_SYNC_TAGS.awareness,
+      participant: {
+        participantId: originalParticipantId,
+        displayName: "Tutor renamed",
+        color: "#a1b2c3",
+      },
+      state: { target: { kind: "terminal", field: "input" } },
+    });
+    const renamed = applySharedTerminalDelta(started, profileDelta);
+    expect(renamed).toMatchObject({
+      mode: "busy",
+      activeRun: { runId: effect.runId },
+      host: {
+        participantId: originalParticipantId,
+        displayName: "Tutor renamed",
+        color: "#a1b2c3",
+      },
+    });
+    expect(renamed?.transcript).toBe(started.transcript);
+    expect(host.connected).toBe(true);
+
+    const outputDelta = nextSocketEvent<SharedTerminalDelta>(
+      observer,
+      SHARED_TERMINAL_DELTA_EVENT,
+    );
+    host.emit(SHARED_TERMINAL_ACTION_EVENT, {
+      protocolVersion: SHARED_TERMINAL_PROTOCOL_VERSION,
+      action: {
+        type: "host-output",
+        actionId: "lesson-profile-output",
+        runId: effect.runId,
+        chunk: "still running\n",
+      },
+    });
+    expect(applySharedTerminalDelta(renamed!, await outputDelta)).toMatchObject({
+      mode: "busy",
+      activeRun: { runId: effect.runId },
+      transcript: expect.stringContaining("still running\n"),
+    });
   });
 
   it("emits the current terminal delta before disconnecting a revoked host", async () => {

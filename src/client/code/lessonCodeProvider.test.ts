@@ -30,6 +30,9 @@ import {
 
 class FakeSocket implements LessonCodeSocket {
   connected = false;
+  auth?: LessonCodeSocket["auth"];
+  connectCalls = 0;
+  disconnectCalls = 0;
   readonly sent: Array<{ event: string; args: unknown[] }> = [];
   private readonly listeners = new Map<string, Set<(...args: any[]) => void>>();
 
@@ -51,12 +54,14 @@ class FakeSocket implements LessonCodeSocket {
   }
 
   connect(): this {
+    this.connectCalls += 1;
     this.connected = true;
     this.serverEmit("connect");
     return this;
   }
 
   disconnect(): this {
+    this.disconnectCalls += 1;
     const connected = this.connected;
     this.connected = false;
     if (connected) this.serverEmit("disconnect");
@@ -178,6 +183,57 @@ function harness(databaseName: string) {
 }
 
 describe("LessonCodeProvider", () => {
+  it("updates the live profile without reconnecting or replacing collaboration", async () => {
+    const { provider, socket } = harness(
+      `lesson-code-profile-${crypto.randomUUID()}`,
+    );
+    const document = provider.document;
+    try {
+      await provider.start();
+      ready(socket);
+      const terminalEpoch = provider.getStatus().terminalConnectionEpoch;
+      provider.updateProfile({ displayName: "Tutor", color: "#16825d" });
+
+      expect(socket.auth).toEqual({
+        lessonId: LESSON_ID,
+        deviceId: "device-1",
+        profile: { displayName: "Tutor", color: "#16825d" },
+      });
+      expect(socket.messages(CODE_SYNC_TAGS.profileUpdate).at(-1)).toEqual({
+        type: CODE_SYNC_TAGS.profileUpdate,
+        protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+        profile: { displayName: "Tutor", color: "#16825d" },
+      });
+      expect(socket.connectCalls).toBe(1);
+      expect(socket.disconnectCalls).toBe(0);
+      expect(provider.document).toBe(document);
+      expect(provider.getStatus().terminalConnectionEpoch).toBe(terminalEpoch);
+
+      socket.serverEmit(CODE_SYNC_MESSAGE_EVENT, {
+        type: CODE_SYNC_TAGS.profileUpdated,
+        protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+        participant: {
+          participantId: participant.participantId,
+          displayName: "Tutor",
+          color: "#16825d",
+        },
+      });
+      expect(provider.getStatus().participant).toEqual({
+        participantId: participant.participantId,
+        displayName: "Tutor",
+        color: "#16825d",
+      });
+
+      const updateCount = socket.messages(CODE_SYNC_TAGS.profileUpdate).length;
+      provider.updateProfile({ displayName: "Tutor", color: "#16825d" });
+      expect(socket.messages(CODE_SYNC_TAGS.profileUpdate)).toHaveLength(updateCount);
+      expect(socket.connectCalls).toBe(1);
+      expect(socket.disconnectCalls).toBe(0);
+    } finally {
+      await provider.stop();
+    }
+  });
+
   it("scopes local storage by account and lesson", () => {
     expect(lessonCodeDatabaseName(USER_ID, LESSON_ID))
       .toBe(`eduri-code-lesson-v1:${USER_ID}:${LESSON_ID}`);

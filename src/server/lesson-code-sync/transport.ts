@@ -174,6 +174,8 @@ export function attachLessonCodeSyncNamespace(
     2,
     Math.trunc(options.maxAwarenessPeers ?? 128),
   );
+  let terminalTransport:
+    ReturnType<typeof attachLessonCodeTerminalTransport> | undefined;
   const consume = (workspaceId: string, updateBytes = 0): boolean => {
     const time = now();
     let rate = rates.get(workspaceId);
@@ -379,6 +381,33 @@ export function attachLessonCodeSyncNamespace(
           return;
         }
 
+        if (message.type === CODE_SYNC_TAGS.profileUpdate) {
+          const identity = service.updateProfile(session, message.profile);
+          const current = awareness.get(session.workspaceId)?.get(socket.id);
+          if (current) {
+            awareness.get(session.workspaceId)?.set(socket.id, {
+              participant: identity,
+              state: current.state,
+            });
+          }
+          terminalTransport?.updateParticipant(socket);
+          const updated = {
+            type: CODE_SYNC_TAGS.profileUpdated,
+            protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+            participant: identity,
+          } satisfies CodeSyncServerMessage;
+          send(socket, updated, ack);
+          if (current) {
+            broadcastAwareness(
+              session.workspaceId,
+              identity,
+              current.state,
+              socket.id,
+            );
+          }
+          return;
+        }
+
         if (message.type === CODE_SYNC_TAGS.syncStep1) {
           const state = service.syncStep1(session, message.stateVector);
           state.updates.forEach((update, part) => {
@@ -480,7 +509,7 @@ export function attachLessonCodeSyncNamespace(
     });
   });
 
-  attachLessonCodeTerminalTransport(namespace, service, { now });
+  terminalTransport = attachLessonCodeTerminalTransport(namespace, service, { now });
 
   const disconnectMatching = (
     predicate: (session: AuthenticatedLessonCodeSync) => boolean,

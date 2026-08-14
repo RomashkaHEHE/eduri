@@ -4,12 +4,19 @@ import {
   type Request,
   type Response,
 } from "express";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import rateLimit from "express-rate-limit";
 import { AccessToken, TrackSource } from "livekit-server-sdk";
 import { z } from "zod";
 import { getAuth } from "../security.js";
 import { HttpError, parseBody } from "../http.js";
 import type { AppContext } from "../types.js";
+import { collaborationProfileSchema } from "../collaborationProfile.js";
+import {
+  COLLABORATION_PROFILE_COLORS,
+  normalizeCollaborationProfile,
+  type CollaborationProfile,
+} from "../../shared/collaborationProfile.js";
 import type {
   GuestRoom,
   GuestRoomLookup,
@@ -19,6 +26,7 @@ import { GuestRoomCapacityError } from "../guestRooms.js";
 import {
   deleteGuestCallRoomsBestEffort,
   ensureLiveKitCallRoom,
+  isLiveKitNotFoundError,
 } from "../livekit.js";
 import {
   BOARD_PROTOCOL_LIMITS,
@@ -37,7 +45,12 @@ const initializationSchema = z.object({
   initializationToken: z.string().regex(/^[A-Za-z0-9_-]{43}$/u),
 }).strict();
 const callTokenSchema = z.object({
-  displayName: z.string().trim().min(1).max(60).optional(),
+  deviceId: z.string().regex(/^[A-Za-z0-9_-]{32,128}$/u).optional(),
+  profile: collaborationProfileSchema.optional(),
+}).strict();
+const callProfileSchema = z.object({
+  deviceId: z.string().regex(/^[A-Za-z0-9_-]{32,128}$/u),
+  profile: collaborationProfileSchema,
 }).strict();
 const boardTicketSchema = z.object({
   deviceId: z.string().regex(/^[A-Za-z0-9_-]{32,128}$/u),
@@ -47,12 +60,38 @@ const boardTicketSchema = z.object({
     .max(BOARD_PROTOCOL_LIMITS.maxSchemaVersion).default(1),
   capabilities: z.number().int().min(0).max(0xffff_ffff)
     .default(BOARD_SYNC_SERVER_CAPABILITIES),
+  profile: collaborationProfileSchema.optional(),
 }).strict().refine(
   (value) => value.minSchemaVersion <= value.maxSchemaVersion,
   { path: ["minSchemaVersion"], message: "Invalid schema version range" },
 );
 const SHARE_KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
 const CALL_TOKEN_TTL_SECONDS = 15 * 60;
+
+function guestCallIdentity(
+  context: AppContext,
+  shareKey: string,
+  deviceId?: string,
+): { identity: string; fallbackProfile: CollaborationProfile } {
+  const connectionId = randomUUID();
+  const digest = deviceId
+    ? createHmac("sha256", context.config.authLookupKey)
+        .update("eduri-guest-call-actor\0")
+        .update(shareKey)
+        .update("\0")
+        .update(deviceId)
+        .digest()
+    : createHash("sha256").update(connectionId).digest();
+  return {
+    identity: `guest:${deviceId ? digest.toString("base64url") : connectionId}`,
+    fallbackProfile: {
+      displayName: `Гость ${digest.toString("hex").slice(0, 4).toUpperCase()}`,
+      color: COLLABORATION_PROFILE_COLORS[
+        digest[0] % COLLABORATION_PROFILE_COLORS.length
+      ],
+    },
+  };
+}
 
 export function guestRoomCreationLimit(
   nodeEnv: AppContext["config"]["nodeEnv"],
@@ -287,7 +326,7 @@ export function createGuestRoomsRouter(context: AppContext): Router {
         sendLookupFailure(res, { status: "missing" });
         return;
       }
-      const parsed = parseBody(callTokenSchema, req.body);
+      const parsed = parseBody(callTokenSchema, req.body ?? {});
       const lookup = context.guestRooms.lookup(shareKey);
       if (lookup.status !== "active") {
         sendLookupFailure(res, lookup);
@@ -342,15 +381,23 @@ export function createGuestRoomsRouter(context: AppContext): Router {
         sendLookupFailure(res, context.guestRooms.lookup(shareKey));
         return;
       }
-      const identity = `guest:${crypto.randomUUID()}`;
+      const resolvedIdentity = guestCallIdentity(
+        context,
+        shareKey,
+        parsed.deviceId,
+      );
+      const profile = parsed.profile
+        ? normalizeCollaborationProfile(parsed.profile)
+        : resolvedIdentity.fallbackProfile;
       const token = new AccessToken(livekitApiKey, livekitApiSecret, {
-        identity,
-        name: parsed.displayName ?? "Гость",
+        identity: resolvedIdentity.identity,
+        name: profile.displayName,
         ttl: CALL_TOKEN_TTL_SECONDS,
         attributes: {
           "eduri.role": "guest",
           "eduri.guestRoomId": lookup.room.id,
           "eduri.resourceId": call.id,
+          "eduri.color": profile.color,
         },
       });
       token.addGrant({
@@ -381,6 +428,84 @@ export function createGuestRoomsRouter(context: AppContext): Router {
     }
   });
 
+  router.patch("/:shareKey/call-profile", mutationLimiter, async (req, res, next) => {
+    try {
+      const shareKey = req.params.shareKey;
+      if (!SHARE_KEY_PATTERN.test(shareKey)) {
+        sendLookupFailure(res, { status: "missing" });
+        return;
+      }
+      const parsed = parseBody(callProfileSchema, req.body ?? {});
+      const lookup = context.guestRooms.lookup(shareKey);
+      if (lookup.status !== "active") {
+        sendLookupFailure(res, lookup);
+        return;
+      }
+      const call = lookup.room.resources.find((resource) => (
+        resource.kind === "call" && resource.ordinal === 1
+      ));
+      if (!call) {
+        res.status(409).json({
+          code: "CALL_NOT_ENABLED",
+          error: "Звонок не добавлен в эту комнату",
+        });
+        return;
+      }
+      const updateParticipant = context.livekitRoomService?.updateParticipant;
+      if (!updateParticipant) {
+        res.status(503).json({
+          error: "Сервис звонков временно недоступен",
+        });
+        return;
+      }
+      const roomName = context.guestRooms.resolveCallRoomName(
+        lookup.room.id,
+        call.id,
+      );
+      if (!roomName) {
+        sendLookupFailure(res, context.guestRooms.lookup(shareKey));
+        return;
+      }
+      const identity = guestCallIdentity(
+        context,
+        shareKey,
+        parsed.deviceId,
+      ).identity;
+      const profile = normalizeCollaborationProfile(parsed.profile);
+      try {
+        await updateParticipant.call(
+          context.livekitRoomService,
+          roomName,
+          identity,
+          {
+            name: profile.displayName,
+            attributes: { "eduri.color": profile.color },
+          },
+        );
+      } catch (error) {
+        if (isLiveKitNotFoundError(error)) {
+          res.status(409).json({
+            code: "CALL_PARTICIPANT_NOT_CONNECTED",
+            error: "Участник ещё не подключён к звонку",
+          });
+          return;
+        }
+        console.error("[livekit] guest participant profile update failed", {
+          roomName,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        res.status(503).json({
+          error: "Сервис звонков временно недоступен",
+        });
+        return;
+      }
+      res.setHeader("Cache-Control", "no-store");
+      res.status(204).end();
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.post("/:shareKey/board-ticket", mutationLimiter, (req, res, next) => {
     try {
       const shareKey = req.params.shareKey;
@@ -406,6 +531,9 @@ export function createGuestRoomsRouter(context: AppContext): Router {
         minSchemaVersion,
         maxSchemaVersion,
         capabilities,
+        ...(parsed.profile
+          ? { profile: normalizeCollaborationProfile(parsed.profile) }
+          : {}),
       });
       res.setHeader("Cache-Control", "no-store");
       res.json(ticket);

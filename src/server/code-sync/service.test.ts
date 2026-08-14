@@ -63,6 +63,33 @@ describe("CodeSyncService", () => {
 
   afterEach(() => db.close());
 
+  it("uses the validated profile and keeps fallback identity stable on reconnect", () => {
+    const profiled = service.authenticate({
+      shareId,
+      deviceId: "profile-device",
+      profile: { displayName: "Alice", color: "#a1b2c3" },
+    });
+    expect(profiled.participant).toMatchObject({
+      displayName: "Alice",
+      color: "#a1b2c3",
+    });
+
+    const firstFallback = service.authenticate({
+      shareId,
+      deviceId: "stable-device",
+    });
+    const reconnectedFallback = service.authenticate({
+      shareId,
+      deviceId: "stable-device",
+    });
+    expect(reconnectedFallback.participant.displayName)
+      .toBe(firstFallback.participant.displayName);
+    expect(reconnectedFallback.participant.color)
+      .toBe(firstFallback.participant.color);
+    expect(reconnectedFallback.participant.participantId)
+      .not.toBe(firstFallback.participant.participantId);
+  });
+
   it("converges independent edits through state-vector reconnect", () => {
     const left = applyInitialSync(service, leftSession);
     const right = applyInitialSync(service, rightSession);

@@ -1,5 +1,8 @@
-import * as Y from "yjs";
+import * as decoding from "lib0/decoding";
+import * as encoding from "lib0/encoding";
 import { describe, expect, it } from "vitest";
+import * as Y from "yjs";
+import { encodeAwarenessUpdate } from "y-protocols/awareness";
 import {
   applyBoardUpdate,
   encodeBoardStateVector,
@@ -18,6 +21,8 @@ import {
   BoardControlCode,
   BoardMessageType,
   BoardPermission,
+  decodeBoardProfileUpdatePayload,
+  encodeBoardProfileUpdatedPayload,
   decodeBoardFrame,
   encodeBoardFrame,
   messageIdToHex,
@@ -403,7 +408,10 @@ function readyFrame(
     type: BoardMessageType.READY,
     generation,
     schemaVersion: 1,
-    capabilities: BoardCapability.CHUNKING | BoardCapability.AWARENESS,
+    capabilities:
+      BoardCapability.CHUNKING
+      | BoardCapability.AWARENESS
+      | BoardCapability.PROFILE_UPDATE,
     awarenessClientId,
     permissions: BoardPermission.READ | BoardPermission.EDIT,
   };
@@ -411,6 +419,34 @@ function readyFrame(
 
 function sentFrames(socket: FakeSocket): BoardFrame[] {
   return socket.sent.map((bytes) => decodeBoardFrame(bytes));
+}
+
+function decodeSingleAwarenessUpdate(update: Uint8Array): {
+  readonly clientId: number;
+  readonly clock: number;
+  readonly state: Record<string, unknown> | null;
+} {
+  const decoder = decoding.createDecoder(update);
+  expect(decoding.readVarUint(decoder)).toBe(1);
+  const clientId = decoding.readVarUint(decoder);
+  const clock = decoding.readVarUint(decoder);
+  const state = JSON.parse(decoding.readVarString(decoder)) as
+    Record<string, unknown> | null;
+  expect(decoding.hasContent(decoder)).toBe(false);
+  return { clientId, clock, state };
+}
+
+function encodeSingleAwarenessUpdate(
+  clientId: number,
+  clock: number,
+  state: Record<string, unknown> | null,
+): Uint8Array {
+  const encoder = encoding.createEncoder();
+  encoding.writeVarUint(encoder, 1);
+  encoding.writeVarUint(encoder, clientId);
+  encoding.writeVarUint(encoder, clock);
+  encoding.writeVarString(encoder, JSON.stringify(state));
+  return encoding.toUint8Array(encoder);
 }
 
 function sentLogicalFrames(socket: FakeSocket): BoardFrame[] {
@@ -1245,6 +1281,333 @@ describe("BoardNetworkProvider ACK and reconnect semantics", () => {
     expect(secondSocket.closed).toBe(false);
 
     emptyServer.destroy();
+    await harness.provider.stop();
+  });
+
+  it("updates the profile in place without closing the socket or replacing local state", async () => {
+    const harness = createHarness();
+    const document = harness.provider.document;
+    const awareness = harness.provider.awareness;
+    const socket = await bringOnline(harness, 91);
+    harness.provider.setPresence({
+      cursor: { x: 12, y: 34 },
+      selection: ["shape-a"],
+    });
+    const localPresence = structuredClone(awareness.getLocalState());
+    const baseline = sentFrames(socket).length;
+
+    harness.provider.updateProfile({
+      displayName: "Updated Tutor",
+      color: "#d33f49",
+    });
+
+    const request = sentFrames(socket).slice(baseline).find(
+      (frame) =>
+        frame.type === BoardMessageType.CONTROL
+        && frame.code === BoardControlCode.PROFILE_UPDATE,
+    );
+    expect(request?.type).toBe(BoardMessageType.CONTROL);
+    if (
+      request?.type !== BoardMessageType.CONTROL
+      || request.code !== BoardControlCode.PROFILE_UPDATE
+      || !request.messageId
+    ) {
+      throw new Error("Expected PROFILE_UPDATE");
+    }
+    expect(decodeBoardProfileUpdatePayload(request.payload)).toEqual({
+      displayName: "Updated Tutor",
+      color: "#d33f49",
+    });
+
+    socket.receive({
+      type: BoardMessageType.CONTROL,
+      generation: scope.generation,
+      code: BoardControlCode.PROFILE_UPDATED,
+      messageId: request.messageId,
+      payload: encodeBoardProfileUpdatedPayload({
+        accepted: true,
+        profile: { displayName: "Updated Tutor", color: "#d33f49" },
+      }),
+    });
+
+    expect(socket.closed).toBe(false);
+    expect(harness.sockets).toHaveLength(1);
+    expect(harness.ticketCalls.count).toBe(1);
+    expect(harness.provider.document).toBe(document);
+    expect(harness.provider.awareness).toBe(awareness);
+    expect(awareness.clientID).toBe(91);
+    expect(awareness.getLocalState()).toEqual(localPresence);
+    expect(harness.provider.status.recovery).toBeNull();
+    await harness.provider.stop();
+  });
+
+  it("republishes the latest presence above the server profile clock", async () => {
+    const harness = createHarness();
+    const socket = await bringOnline(harness, 91);
+    harness.provider.updateProfile({
+      displayName: "Updated Tutor",
+      color: "#d33f49",
+    });
+    const request = sentFrames(socket).find(
+      (frame) =>
+        frame.type === BoardMessageType.CONTROL
+        && frame.code === BoardControlCode.PROFILE_UPDATE,
+    );
+    if (
+      request?.type !== BoardMessageType.CONTROL
+      || request.code !== BoardControlCode.PROFILE_UPDATE
+      || !request.messageId
+    ) {
+      throw new Error("Expected PROFILE_UPDATE");
+    }
+
+    harness.provider.setPresence({
+      cursor: { x: 56, y: 78 },
+      selection: ["shape-b", "shape-a"],
+    });
+    const pending = decodeSingleAwarenessUpdate(
+      encodeAwarenessUpdate(harness.provider.awareness, [91]),
+    );
+    socket.receive({
+      type: BoardMessageType.AWARENESS,
+      generation: scope.generation,
+      docKey: scope.documentKey,
+      awarenessClientId: 91,
+      update: encodeSingleAwarenessUpdate(91, pending.clock, {
+        displayName: "Updated Tutor",
+        color: "#d33f49",
+        cursor: { x: 12, y: 34 },
+      }),
+    });
+    const baseline = sentFrames(socket).length;
+
+    socket.receive({
+      type: BoardMessageType.CONTROL,
+      generation: scope.generation,
+      code: BoardControlCode.PROFILE_UPDATED,
+      messageId: request.messageId,
+      payload: encodeBoardProfileUpdatedPayload({
+        accepted: true,
+        profile: { displayName: "Updated Tutor", color: "#d33f49" },
+      }),
+    });
+
+    const awarenessFrames = sentFrames(socket).slice(baseline).filter(
+      (frame): frame is Extract<BoardFrame, { type: BoardMessageType.AWARENESS }> =>
+        frame.type === BoardMessageType.AWARENESS,
+    );
+    expect(awarenessFrames).toHaveLength(1);
+    expect(decodeSingleAwarenessUpdate(awarenessFrames[0].update)).toEqual({
+      clientId: 91,
+      clock: pending.clock + 1,
+      state: {
+        cursor: { x: 56, y: 78 },
+        selection: ["shape-a", "shape-b"],
+      },
+    });
+    harness.timers.advance(40);
+    expect(sentFrames(socket).slice(baseline).filter(
+      (frame) => frame.type === BoardMessageType.AWARENESS,
+    )).toHaveLength(1);
+    expect(socket.closed).toBe(false);
+    await harness.provider.stop();
+  });
+
+  it("republishes a cleared local presence after a profile update", async () => {
+    const harness = createHarness();
+    const socket = await bringOnline(harness, 91);
+    harness.provider.updateProfile({
+      displayName: "Updated Tutor",
+      color: "#d33f49",
+    });
+    const request = sentFrames(socket).find(
+      (frame) =>
+        frame.type === BoardMessageType.CONTROL
+        && frame.code === BoardControlCode.PROFILE_UPDATE,
+    );
+    if (
+      request?.type !== BoardMessageType.CONTROL
+      || request.code !== BoardControlCode.PROFILE_UPDATE
+      || !request.messageId
+    ) {
+      throw new Error("Expected PROFILE_UPDATE");
+    }
+
+    harness.provider.awareness.setLocalState(null);
+    const pending = decodeSingleAwarenessUpdate(
+      encodeAwarenessUpdate(harness.provider.awareness, [91]),
+    );
+    const baseline = sentFrames(socket).length;
+    socket.receive({
+      type: BoardMessageType.CONTROL,
+      generation: scope.generation,
+      code: BoardControlCode.PROFILE_UPDATED,
+      messageId: request.messageId,
+      payload: encodeBoardProfileUpdatedPayload({
+        accepted: true,
+        profile: { displayName: "Updated Tutor", color: "#d33f49" },
+      }),
+    });
+
+    const awareness = sentFrames(socket).slice(baseline).find(
+      (frame): frame is Extract<BoardFrame, { type: BoardMessageType.AWARENESS }> =>
+        frame.type === BoardMessageType.AWARENESS,
+    );
+    expect(awareness).toBeDefined();
+    expect(decodeSingleAwarenessUpdate(awareness!.update)).toEqual({
+      clientId: 91,
+      clock: pending.clock + 1,
+      state: null,
+    });
+    expect(socket.closed).toBe(false);
+    await harness.provider.stop();
+  });
+
+  it("surfaces a rejected in-place profile update without reconnecting", async () => {
+    const harness = createHarness();
+    const socket = await bringOnline(harness);
+    harness.provider.updateProfile({
+      displayName: "Updated Tutor",
+      color: "#d33f49",
+    });
+    const request = sentFrames(socket).find(
+      (frame) =>
+        frame.type === BoardMessageType.CONTROL
+        && frame.code === BoardControlCode.PROFILE_UPDATE,
+    );
+    if (
+      request?.type !== BoardMessageType.CONTROL
+      || request.code !== BoardControlCode.PROFILE_UPDATE
+      || !request.messageId
+    ) {
+      throw new Error("Expected PROFILE_UPDATE");
+    }
+
+    socket.receive({
+      type: BoardMessageType.CONTROL,
+      generation: scope.generation,
+      code: BoardControlCode.PROFILE_UPDATED,
+      messageId: request.messageId,
+      payload: encodeBoardProfileUpdatedPayload({
+        accepted: false,
+        error: "Profile is invalid",
+      }),
+    });
+
+    expect(harness.provider.status.lastError).toBe(
+      "Profile update rejected: Profile is invalid",
+    );
+    expect(socket.closed).toBe(false);
+    expect(harness.sockets).toHaveLength(1);
+    expect(harness.ticketCalls.count).toBe(1);
+    await harness.provider.stop();
+  });
+
+  it("coalesces a rapid profile P1 to P2 to P1 sequence to the in-flight P1", async () => {
+    const harness = createHarness();
+    const socket = await bringOnline(harness);
+    const p1 = { displayName: "Profile One", color: "#2563eb" as const };
+    const p2 = { displayName: "Profile Two", color: "#16825d" as const };
+
+    harness.provider.updateProfile(p1);
+    harness.provider.updateProfile(p2);
+    harness.provider.updateProfile(p1);
+
+    const requests = sentFrames(socket).filter(
+      (frame) =>
+        frame.type === BoardMessageType.CONTROL
+        && frame.code === BoardControlCode.PROFILE_UPDATE,
+    );
+    expect(requests).toHaveLength(1);
+    const request = requests[0];
+    if (request?.type !== BoardMessageType.CONTROL || !request.messageId) {
+      throw new Error("Expected correlated PROFILE_UPDATE");
+    }
+    expect(decodeBoardProfileUpdatePayload(request.payload)).toEqual(p1);
+
+    socket.receive({
+      type: BoardMessageType.CONTROL,
+      generation: scope.generation,
+      code: BoardControlCode.PROFILE_UPDATED,
+      messageId: request.messageId,
+      payload: encodeBoardProfileUpdatedPayload({ accepted: true, profile: p1 }),
+    });
+
+    expect(sentFrames(socket).filter(
+      (frame) =>
+        frame.type === BoardMessageType.CONTROL
+        && frame.code === BoardControlCode.PROFILE_UPDATE,
+    )).toHaveLength(1);
+    expect(socket.closed).toBe(false);
+    await harness.provider.stop();
+  });
+
+  it("retries an in-flight profile after an actual network reconnect", async () => {
+    const harness = createHarness();
+    const document = harness.provider.document;
+    const awareness = harness.provider.awareness;
+    const firstSocket = await bringOnline(harness, 91);
+    const profile = {
+      displayName: "Reconnect Profile",
+      color: "#7c3aed" as const,
+    };
+    harness.provider.updateProfile(profile);
+    const firstRequest = sentFrames(firstSocket).find(
+      (frame) =>
+        frame.type === BoardMessageType.CONTROL
+        && frame.code === BoardControlCode.PROFILE_UPDATE,
+    );
+    expect(firstRequest).toBeDefined();
+
+    firstSocket.serverClose();
+    harness.timers.advance(250);
+    await settle();
+    expect(harness.sockets).toHaveLength(2);
+    const secondSocket = harness.sockets[1];
+    secondSocket.open();
+    secondSocket.receive(readyFrame(scope.generation, 92));
+    await settle();
+
+    const secondRequest = sentFrames(secondSocket).find(
+      (frame) =>
+        frame.type === BoardMessageType.CONTROL
+        && frame.code === BoardControlCode.PROFILE_UPDATE,
+    );
+    if (secondRequest?.type !== BoardMessageType.CONTROL) {
+      throw new Error("Expected retried PROFILE_UPDATE");
+    }
+    expect(decodeBoardProfileUpdatePayload(secondRequest.payload)).toEqual(profile);
+    expect(harness.provider.document).toBe(document);
+    expect(harness.provider.awareness).toBe(awareness);
+    expect(awareness.clientID).toBe(92);
+    expect(harness.ticketCalls.count).toBe(2);
+    await harness.provider.stop();
+  });
+
+  it("closes only for an uncorrelated profile result", async () => {
+    const harness = createHarness();
+    const socket = await bringOnline(harness);
+    harness.provider.updateProfile({
+      displayName: "Correlated Profile",
+      color: "#0891b2",
+    });
+    socket.receive({
+      type: BoardMessageType.CONTROL,
+      generation: scope.generation,
+      code: BoardControlCode.PROFILE_UPDATED,
+      messageId: new Uint8Array(16).fill(0xee),
+      payload: encodeBoardProfileUpdatedPayload({
+        accepted: true,
+        profile: {
+          displayName: "Correlated Profile",
+          color: "#0891b2",
+        },
+      }),
+    });
+
+    expect(socket.closed).toBe(true);
+    expect(socket.closeCode).toBe(4002);
+    expect(socket.closeReason).toBe("Invalid Board protocol frame");
     await harness.provider.stop();
   });
 

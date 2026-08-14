@@ -1870,6 +1870,66 @@ non-Select tool; those nested states can require multiple presses.
 
 ## Presence and collaboration chrome
 
+- The active `/room/:shareId/:resourceKind` and `/lesson/:id` headers show one
+  `Профиль` icon button immediately before the site-theme button. Its small
+  swatch shows the current collaboration color. Public solo `/board` and
+  `/code`, room loading/error/ended screens, and other non-session site chrome
+  do not show this action. A guest page does not enter profile-required state
+  until both the active room and requested resource resolve; an empty room or
+  unknown resource path stays on its missing/ended surface without a profile
+  modal.
+- Entering an online guest room or authenticated lesson without a valid saved
+  profile opens `Профиль` as a mandatory modal. The guest default name is
+  `Гость`; a lesson uses the authenticated account display name when it is
+  valid; the initial color is `#2563eb`. Board, Code, and Call providers are not
+  mounted until a valid profile is saved, so no temporary generated identity
+  can appear. The mandatory modal has no close/Cancel action and ignores
+  `Escape` and backdrop dismissal. Opening it later from the header edits the
+  saved profile and is ordinarily dismissible.
+- The form contains a `Display Name` field, live initial/avatar preview, and the
+  complete in-app Board color picker. The picker offers arbitrary opaque sRGB
+  through its saturation/value plane, hue rail, keyboard axes, and lazy
+  advanced formats; it never opens a native `input[type=color]` dialog. Saving
+  requires a non-empty normalized single-line name of at most 60 Unicode
+  characters and 240 UTF-8 bytes without control or bidi-formatting characters,
+  plus a canonical lowercase six-digit `#rrggbb` color.
+- `Display Name` receives initial focus and the shared modal traps `Tab` within
+  its controls. Closing an ordinary editor through Close, Cancel, `Escape`, or
+  the backdrop restores the previously focused control. The required first-entry
+  variant has no dismiss path, including `Escape` or backdrop. At viewport width
+  760 px and below the same modal is a bottom-aligned full-width sheet with
+  bounded internal scrolling; its data and dismissal rules do not change.
+- One device-local profile is shared by every online guest room and lesson on
+  the origin. It uses the strict exact-key envelope
+  `{"version":1,"displayName":"...","color":"#rrggbb"}` under
+  `eduri-online-profile-v1`; malformed, noncanonical, extra-field, or
+  wrong-version values are rejected. Storage events, page-show, and visible-page
+  reconciliation adopt changes from another tab. A valid external profile
+  replaces the current value and closes any open editor so a stale form cannot
+  overwrite it. Removing/clearing the key removes configuration; an active
+  online surface immediately converts an open ordinary editor to required mode
+  or opens the required modal and unmounts its Board/Code/Call providers until a
+  valid profile is saved again. If localStorage is blocked or throws, the
+  current tab keeps an in-memory profile instead of blocking the online
+  workspace.
+- Saving another name or color sends a bounded, server-validated profile update
+  over the existing Board and Code connections. It does not disconnect or
+  reconnect their transport, change the Board awareness client ID, or remount
+  or replace the Board/Code Y.Doc, Monaco, camera, selection, local persistence,
+  or durable outbox. A newly issued guest or lesson Call token uses the current
+  profile. If the participant is already connected, the authenticated server
+  updates that participant's LiveKit name and color in place; the client does
+  not replace the token, room, component, or media tracks.
+- Rapid Board changes keep one correlated request in flight and only the latest
+  still-desired value pending; returning to the in-flight value cancels that
+  pending change. A real Board reconnect resends the latest unconfirmed value
+  with a fresh correlation ID. Code sends every distinct connected save in
+  Socket.IO order and uses only the latest handshake auth while disconnected.
+  Call serializes its PATCH requests and coalesces values changed while one is in
+  flight to the latest desired profile. Board/Code rejection and Call PATCH
+  failure leave the device-local profile saved, keep every collaboration/media
+  surface mounted, and expose the relevant provider/media error; they do not
+  falsely present the remote participant update as accepted.
 - Local cursor and live gesture updates are coalesced to animation frames, then
   network awareness is rate-limited to roughly one packet per 40 ms.
 - Remote cursor motion interpolates over 72 ms and shows the authenticated
@@ -1884,7 +1944,10 @@ non-Select tool; those nested states can require multiple presses.
   continues holding `Alt`, then fade together after release; cancellation
   removes them immediately.
 - Multiple devices for one user remain separate presence client IDs.
-- The server overwrites identity, role, and color fields authoritatively.
+- The server validates profile fields at Board-ticket or Code-handshake
+  admission, binds them to the connection, and overwrites identity, display
+  name, role, and color authoritatively. Awareness payloads can never choose or
+  spoof those fields.
 - The participant strip displays the first four participant initials. It has no
   overflow counter; all accepted presences still render on the canvas.
 - Remote active tool is transported but currently has no visible badge.
@@ -1964,26 +2027,92 @@ offline or has pending server sync.
 
 ### Public Code workspaces
 
+- The guest-room header action is labelled `Ссылка`. It copies the current
+  resource URL to the system clipboard; after a successful write its label and
+  icon change to `Скопирована` for 1.5 seconds, then return to `Ссылка`. A
+  failed write keeps the ordinary label and shows the existing copy error.
 - `/code` owns a durable solo Yjs document and content-addressed local binary
   cache. Its Explorer is a hierarchical tree. Every folder keeps the same
   folder icon when opened or closed. A non-empty folder is the only kind that
   shows a disclosure chevron or `aria-expanded`; clicking it or pressing
   `ArrowLeft`/`ArrowRight` collapses or expands it. An empty folder has no
   disclosure state or disclosure-key behavior, but remains a valid create,
-  upload, and drop destination. Selecting any folder, including an empty one,
-  shows an in-workspace folder action surface instead of a blank editor. Its
-  only visible actions are `Прикрепить файл`, `Создать файл`, and
-  `Создать папку`, all targeting that folder and all disabled in read-only
-  mode. Right-click, `Shift+F10`, the Context Menu key, and the Explorer
-  ellipsis open the custom action menu; create file/folder,
-  upload, rename, duplicate-file, and delete live there rather than in the
-  editor toolbar. Duplicate creates a new sibling text or binary file with a
-  collision-free name and the same content; an immutable binary identity may
-  be referenced by both files. A dragged file or folder can be dropped on a
-  folder or the Explorer background to move it into that folder or to the root.
-  File rows do not act as implicit root drop targets, and no destination
-  dropdown is used.
-- Named tests are closed by default behind the `Тесты` toolbar toggle. Opening
+  upload, and drop destination.
+- The file opened in the editor is separate from Explorer's device-local
+  selection, keyboard focus, and Shift anchor. Selection/focus/anchor and
+  folder expansion are not CRDT content, awareness, or undo items. The tree is
+  `aria-multiselectable`; every selected row exposes `aria-selected`, exactly
+  one visible row has the roving `tabIndex=0`, and opened-file and selected-row
+  styling remain distinct. Changing or clearing a selection through a modifier
+  or keyboard selection command does not implicitly replace the opened entry;
+  ordinary activation still opens a file or the folder-action surface.
+- A plain row click replaces selection and activates that entry. `Shift+click`
+  replaces selection with the inclusive range from the fixed anchor to the
+  clicked row. `Ctrl`/`Cmd+click` toggles only the clicked row and resets the
+  anchor to it. `Ctrl`/`Cmd+Shift+click` adds the inclusive anchor range to the
+  existing set. All ranges use the currently visible flattened depth-first
+  tree order. Clicking the Explorer background clears selection. Collapsing a
+  folder immediately removes its now-hidden descendants from selection and
+  resolves focus/anchor to the closest visible row; hidden destructive
+  selections are never retained.
+- `ArrowUp`/`ArrowDown` move one visible row and `Home`/`End` move to the first
+  or last visible row. With `Shift` they replace selection with the anchor
+  range; with `Ctrl`/`Cmd+Shift` they add that range; with only `Ctrl`/`Cmd`
+  they move keyboard focus without changing selection. `ArrowRight` expands a
+  collapsed non-empty folder, otherwise moves to its first visible child;
+  `ArrowLeft` collapses an expanded non-empty folder, otherwise moves to its
+  parent. The same Shift and command-modifier selection rules apply when a
+  hierarchy key moves to another row.
+- `Enter` activates the focused entry. Space toggles that row in selection.
+  `F2` starts rename only when the focused row is the sole selected entry.
+  `Ctrl`/`Cmd+A` selects every visible row, `Escape` clears selection, and
+  Delete/Backspace deletes the complete deletable selection. Explorer-local
+  `Ctrl`/`Cmd+Z`, `Ctrl`/`Cmd+Shift+Z`, and `Ctrl`/`Cmd+Y` retain the documented
+  local-only tree history behavior.
+- Plainly activating any folder, including an empty one, shows an in-workspace folder
+  action surface instead of a blank editor. Its only visible actions are
+  `Прикрепить файл`, `Создать файл`, and `Создать папку`, all targeting that
+  folder and all disabled in read-only mode. The Explorer header keeps a
+  visible trash action for the complete current selection. It is disabled
+  without a selection, during rename, in read-only mode, or whenever deletion
+  would include required `main.py`; its tooltip names a singular target,
+  reports the group count, or explains why deletion is unavailable.
+- Right-click, `Shift+F10`, the Context Menu key, and the Explorer ellipsis open
+  the custom action menu. Right-clicking a selected row preserves the complete
+  group while moving keyboard focus to that row; right-clicking an unselected
+  row replaces selection with that row. Rename and duplicate are omitted for a
+  multi-selection. Create file/folder, upload, singular rename/duplicate, and
+  group delete live in this menu rather than the editor toolbar. Duplicate
+  creates a collision-free sibling text or binary file with the same content;
+  an immutable binary identity may be referenced by both files.
+- Starting a drag on a selected row drags all selected visible roots together;
+  starting on an unselected row first makes it the sole selection. A group can
+  be dropped on a folder or the Explorer background to move it into that folder
+  or to the root. File rows do not act as implicit root drop targets, and a
+  selected entry or any destination inside a selected subtree rejects the drop.
+  Redundant descendants whose ancestor is already selected are normalized out
+  before the move.
+- Group move and group delete validate every requested entry, destination,
+  collision, cycle, depth/path bound, and required-file constraint before
+  mutating the document. The accepted group commits in one local-origin Yjs
+  transaction and is one Undo item; any failure leaves the complete group
+  unchanged. Delete expands selected folders through their complete effective
+  subtrees, including collapsed descendants, and normalizes redundant
+  ancestor/descendant selections. `main.py` cannot be deleted, and any ancestor
+  folder containing it protects the whole selection from deletion, including
+  after `main.py` is moved. Tests attached to deleted files are removed in that
+  same transaction and Undo item. Duplicate copies file contents but deliberately
+  starts with no copied tests. No destination dropdown is used.
+- Named tests belong to the currently active Python file, using its stable entry
+  ID rather than its name or path. Rename and move therefore preserve its test
+  set. Switching between Python files immediately replaces the visible tabs,
+  count, active test form, and displayed result with that file's own state,
+  without remounting the main Monaco editor or terminal. A valid concurrently
+  merged test whose target was already deleted remains preserved but hidden and
+  cannot execute. Legacy tests without a target are treated as tests of
+  `main.py`.
+- Tests are closed by default behind the `Тесты` toolbar toggle. For a text
+  file whose name ends in `.py` case-insensitively, opening
   the panel exposes stdin, expected output, a bounded-width name field visibly
   labelled `Title:`, and a compact `250..45000` ms field visibly labelled
   `Timeout:` without increment/decrement steppers. Output always uses
@@ -1993,18 +2122,46 @@ offline or has pending server sync.
   normal test form. Every test, including the only test, has a delete action;
   deleting the last test returns to the `Создать тест` state. New and legacy
   tests default to 5,000 ms. Test uses its stored deterministic stdin and
-  timeout and never opens the live terminal prompt.
-- Python runs only after an explicit shared Run/Test or terminal command. One
+  timeout and never opens the live terminal prompt. On a folder, binary file,
+  or non-Python text file the closed toggle is disabled; if the panel was open
+  before switching, it remains closable and shows a request to select a Python
+  file. The shared execution host rejects a stale or forged Test action when
+  its test ID is not attached to the accompanying Python entry ID.
+- The Explorer/editor boundary, editor/terminal boundary, and (while tests are
+  open) tests/terminal boundary are eight-pixel drag targets with a centered
+  one-pixel line; coarse pointers receive a wider transparent hit area. Mouse,
+  pen, and touch resize the adjacent panels without
+  remounting Monaco, xterm, or the Explorer. The layout switches the Explorer
+  split from columns to rows at a measured workspace width of 620 px, and the
+  tests split from columns to rows when its measured console area is narrower
+  than 700 px; these decisions use the actual container rather than viewport
+  media queries.
+- Every resize handle is a focusable ARIA separator. Directional arrow keys
+  move it by 10 px, `Shift` plus the matching arrow moves it by 40 px,
+  `Home`/`End` select its live bounds, and `Enter`, `Space`, or double-click
+  restores that split's default. Pointer cancel, focus-window loss, or unmount
+  rolls an unfinished drag back; a completed drag and keyboard changes persist
+  under the strict device-local `eduri-code-workspace-layout-v1` record. Panel
+  sizes are presentation preferences only and are not part of lesson CRDT or
+  awareness synchronization.
+- Python runs only after an explicit shared F9/Test or terminal command. One
   authorized browser host executes each server-assigned run; every participant
   sees the same ordered run state, prompt, output, program input, and test
   result. A shell `py main.py`/`python main.py` command uses a fresh disposable
   terminal Worker and a synchronized workspace snapshot. Bare `py` opens an
   interactive Python prompt which persists only until exit/EOF/stop/session
-  loss. Ordinary Run uses the 45-second client ceiling. While a run is active,
-  Run becomes Stop and interrupts that shared run rather than starting another
-  local execution. Run and Test are also disabled while the initiating client
-  waits for its document outbox and the first authoritative terminal state, so
-  repeated or cross-button clicks cannot enqueue competing starts.
+  loss. Ordinary F9 Run uses the 45-second client ceiling. The idle run button
+  is labelled `F9`; clicking it or pressing plain, non-repeating `F9` anywhere
+  inside the Code workspace starts the same ordinary shared run. The shortcut
+  is captured before Monaco and xterm, requires no `Ctrl`/`Cmd`, `Alt`, or
+  `Shift`, and leaves modified F9 events available to their focused control.
+  While a run is active the button is labelled `Stop`; clicking it interrupts
+  that shared run. F9 never stops or restarts an active run. F9 auto-repeat and
+  further F9 presses while a start request is pending or execution is active
+  are consumed without an action. F9 and Test are also disabled while the
+  initiating client waits for its document outbox and the first authoritative
+  terminal state, so repeated or cross-button actions cannot enqueue competing
+  starts. After completion or stop, the button returns to `F9`.
 - The terminal is an xterm surface with its editable command buffer on the
   active terminal row; there is no detached HTML input. It accepts the bounded
   virtual-workspace commands `help`, `pwd`, `ls`/`dir`, `cat`/`type`,
@@ -2070,9 +2227,24 @@ offline or has pending server sync.
 - `/room/:shareId/code` uses the same editor over the guest Code provider.
   Local edits enter an atomic IndexedDB update log/outbox before network send.
   Offline and reconnect require no Save or Retry action. The small cloud badge
-  reports connecting/offline state and the count of updates awaiting ACK. A
-  local persistence failure is shown immediately and makes the shared editor
-  read-only so later edits cannot be presented as durable.
+  is part of the editor's top toolbar, so it never overlays Explorer, Monaco,
+  tests, or the terminal. It reports connecting/offline state and the count of
+  updates awaiting ACK. Hover, keyboard focus, or a touch press opens a compact
+  detail popup with the connection, local durability, queued ACK count,
+  editor/terminal availability, and the provider error when present. Pointer
+  leave, blur, outside press, or `Escape` closes it. Status changes update the
+  same mounted control and open popup without moving the toolbar or flashing.
+  The popup chooses the side with useful room inside the workspace/viewport and
+  scrolls within its bounded height, so a short viewport or long provider error
+  cannot clip it behind the workspace's overflow boundary.
+  A transparent bridge across the visual gap keeps pointer hover continuous
+  while moving between the badge and the popup, including to its scrollbar.
+  The bounded popup itself is the next keyboard focus stop, so its overflow can
+  be scrolled with Arrow/Page/Home/End without a pointer; `Escape` closes it and
+  restores badge focus.
+  The lesson Code adapter uses the same indicator. A local persistence failure
+  is shown immediately in the popup and makes the shared editor read-only so
+  later edits cannot be presented as durable.
 - Monaco is bound directly to the active collaborative `Y.Text`; remote deltas
   patch only changed model ranges and do not replace its entire controlled
   value, remount Monaco, reset scroll/selection, or repaint all syntax tokens.
@@ -2091,10 +2263,14 @@ offline or has pending server sync.
   the local input value or layout. Every remote caret line and selection stays
   visible. Each caret's authenticated participant-name label is absolutely
   positioned and hidden by default; it appears only while a hover-capable
-  pointer is over that caret's transparent hit area, then hides again when the
-  pointer leaves.
-  The label never changes the Monaco or native-input value, text layout, scroll,
-  or selection. Touch and other no-hover input do not reveal cursor labels.
+  pointer is inside that caret's 18-pixel geometric hover area, then hides again
+  when the pointer leaves. Hover is calculated from pointer coordinates received
+  by the underlying Monaco or native input; the complete remote caret, selection,
+  hit-area, and label overlay remains `pointer-events: none`. Pointer down, click,
+  text selection, context-menu, and focus therefore pass through to the real
+  editor/input even directly over a remote caret. The label never changes the
+  Monaco or native-input value, text layout, scroll, or selection. Touch and
+  other no-hover input do not reveal cursor labels.
   Focus/blur/unmount clears only presence owned by that exact field.
 - Cursor/selection/focused-field data is awareness-only. Terminal prompt,
   input, output, run and test lifecycle instead use an ordered ephemeral shared
@@ -2201,6 +2377,34 @@ The panel reports:
 - server measurement time.
 
 Displayed byte units use binary multiples of 1024.
+
+## Lesson call controls
+
+- Opening or joining a lesson call does not request capture permission and does
+  not publish a microphone or camera track. Both controls start disabled on
+  every entry and re-entry; each is enabled only by its own explicit button.
+- Device settings list microphone, speaker, and camera choices. Opening the
+  settings only enumerates already visible browser devices and never turns a
+  device on. The refresh button is the explicit permission-bearing action used
+  to reveal labels or newly connected devices.
+- Selecting a microphone or camera updates LiveKit's active capture default.
+  When that track is off, selection does not publish or capture it; the selected
+  device is used if the participant later enables the corresponding control.
+  Selecting speakers redirects subscribed call audio immediately.
+- Selected device IDs are device-local presentation preferences stored under
+  `eduri-call-devices-v1`. Media enabled state is never persisted, so saved
+  device choices cannot make the next call enter unmuted. Invalid, oversized,
+  or unavailable IDs fall back safely to the browser default.
+- Speaker selection is disabled and labelled unsupported when the browser does
+  not implement `HTMLMediaElement.setSinkId` (notably Safari/iOS). The room is
+  still created normally and uses browser-default output in that case.
+- Starting screen sharing invokes the browser's protected `getDisplayMedia`
+  chooser. The participant selects a tab, window, or monitor there and may opt
+  into supported system/tab audio. A site cannot enumerate or preselect those
+  sources; cancelling the chooser leaves sharing off. While supported, the
+  browser's source-switching control remains available during sharing.
+- Device, permission, and picker failures remain dismissible inside the active
+  call and do not force a reconnect.
 
 ## Theme and responsive behavior
 

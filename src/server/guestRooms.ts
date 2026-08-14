@@ -480,6 +480,28 @@ export class GuestRoomService {
     }).immediate();
   }
 
+  resolveCallRoomName(roomId: string, resourceId: string): string | null {
+    const timestamp = iso(this.now());
+    const call = this.db.prepare(`
+      SELECT resource.resource_key, resource.call_room_generation
+      FROM guest_rooms room
+      JOIN guest_room_resources resource ON resource.room_id = room.id
+      WHERE room.id = ? AND resource.id = ? AND resource.kind = 'call'
+        AND room.expires_at > ?
+        AND (
+          room.initialization_token_hash IS NULL
+          OR room.initialized_at IS NOT NULL
+          OR room.initialization_expires_at > ?
+        )
+    `).get(roomId, resourceId, timestamp, timestamp) as {
+      resource_key: string;
+      call_room_generation: number;
+    } | undefined;
+    return call
+      ? guestCallRoomName(call.resource_key, call.call_room_generation)
+      : null;
+  }
+
   /**
    * A successful authoritative empty-room lookup can retire provisional
    * reservations which never became occupied. The logical Call resource stays

@@ -1,5 +1,6 @@
-import { Cloud, CloudOff, LoaderCircle } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { LoaderCircle } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { CollaborationProfile } from "../../shared/collaborationProfile";
 import {
   LessonCodeProvider,
   lessonCodeDatabaseName,
@@ -15,6 +16,7 @@ import "./CodeWorkspace.css";
 interface LessonCodeWorkspaceProps {
   readonly lessonId: string;
   readonly userId: string;
+  readonly profile: CollaborationProfile;
   readonly readOnly?: boolean;
 }
 
@@ -40,11 +42,15 @@ const TEXT_ONLY_BLOB_STORE = {
 export function LessonCodeWorkspace({
   lessonId,
   userId,
+  profile,
   readOnly = false,
 }: LessonCodeWorkspaceProps) {
   const deviceId = useMemo(guestDeviceId, []);
   const [status, setStatus] = useState<LessonCodeStatus>(INITIAL_STATUS);
   const [session, setSession] = useState<CodeWorkspaceSessionHandle | null>(null);
+  const profileRef = useRef(profile);
+  const providerRef = useRef<LessonCodeProvider | null>(null);
+  profileRef.current = profile;
 
   useEffect(() => {
     let cancelled = false;
@@ -53,8 +59,10 @@ export function LessonCodeWorkspace({
       lessonId,
       userId,
       deviceId,
+      profile: profileRef.current,
       databaseName,
     });
+    providerRef.current = provider;
     const handle: CodeWorkspaceSessionHandle = {
       document: provider.document,
       origin: provider.origin,
@@ -83,11 +91,16 @@ export function LessonCodeWorkspace({
     void provider.start().catch(() => undefined);
     return () => {
       cancelled = true;
+      if (providerRef.current === provider) providerRef.current = null;
       unsubscribe();
       setSession(null);
       void provider.stop();
     };
   }, [deviceId, lessonId, userId]);
+
+  useEffect(() => {
+    providerRef.current?.updateProfile(profile);
+  }, [profile]);
 
   if (!session) {
     return (
@@ -99,28 +112,26 @@ export function LessonCodeWorkspace({
     );
   }
 
-  const online = status.connection === "online";
+  const collaborationReadOnly = readOnly
+    || status.durability === "at-risk"
+    || status.connection === "error";
   return (
-    <div className="lesson-code-workspace full-code-workspace">
-      <div className={`code-sync-status code-sync-status--${status.connection}`}>
-        {online ? <Cloud size={15} /> : <CloudOff size={15} />}
-        <span>
-          {online
-            ? status.pendingUpdates > 0
-              ? `Синхронизация: ${status.pendingUpdates}`
-              : "Код синхронизирован"
-            : status.connection === "offline"
-              ? "Офлайн — правки сохраняются на устройстве"
-              : "Подключаем совместный редактор…"}
-        </span>
-        {status.error && <span className="code-sync-status__error">{status.error}</span>}
-      </div>
+    <div className="lesson-code-workspace">
       <CodeWorkspace
         session={session}
         participantId={status.participant?.participantId ?? null}
-        readOnly={readOnly}
-        terminalReadOnly={readOnly || status.connection !== "online"}
+        readOnly={collaborationReadOnly}
+        terminalReadOnly={
+          collaborationReadOnly || status.connection !== "online"
+        }
         terminalConnectionEpoch={status.terminalConnectionEpoch}
+        syncStatus={{
+          connection: status.connection,
+          durability: status.durability,
+          pendingUpdates: status.pendingUpdates,
+          error: status.error,
+          readOnly: collaborationReadOnly,
+        }}
       />
     </div>
   );

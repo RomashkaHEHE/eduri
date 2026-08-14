@@ -197,6 +197,118 @@ includes a 16-byte message ID after the optional document key. Other flag bits
 are invalid in protocol v1. The payload is code-specific opaque binary data and
 may be empty.
 
+### Live profile update controls
+
+Live profile editing is negotiated with capability bit 5,
+`PROFILE_UPDATE` (`1 << 5`, value `0x20`). A client advertises that bit in
+`AUTH` and may use the controls below only when `READY.capabilities` contains
+the bit. Sending a profile control without that negotiated capability is a
+protocol error.
+
+The client request is control code 11, `PROFILE_UPDATE`; the server response is
+control code 12, `PROFILE_UPDATED`. Both controls require a 16-byte
+`messageId`, prohibit `docKey`, and therefore use exactly control flags byte
+`0x02`. The response repeats the request's exact `messageId`. This ID correlates
+one profile result; it is not a durable update ID, an `ACK`, or an idempotency
+receipt. A client must reject a missing, unexpected, or mismatched correlation
+ID and must not treat an unrelated `PROFILE_UPDATED` as the result of a pending
+request.
+
+The current web adapter serializes this control independently from durable
+document updates. It allows exactly one profile request in flight and retains
+only the latest different desired profile behind it. Repeating the pending value
+is a no-op; changing from in-flight `P1` to `P2` and back to `P1` removes `P2`
+instead of sending it after `P1` succeeds. An accepted or recoverably rejected
+result releases the slot and sends the remaining latest value, if any. If the
+transport actually disconnects before a correlated result, reconnect keeps only
+the latest desired value and sends it after the new `READY` with a fresh
+correlation ID. It never reuses the abandoned ID as an idempotency receipt.
+
+`PROFILE_UPDATE.payload` has this exact internal layout. These fields are
+inside the outer CONTROL `payload bytes`; the internal length is an unsigned
+16-bit big-endian integer, not a varuint.
+
+| Offset | Field | Encoding and bound |
+| ---: | --- | --- |
+| 0 | payload version | unsigned byte, exactly `1` |
+| 1 | display-name byte length | unsigned 16-bit, big-endian, `1..240` |
+| 3 | display name | exactly the preceding number of strict UTF-8 bytes |
+| `3 + name length` | color | exactly 7 strict UTF-8 bytes, semantic form `#rrggbb` |
+
+The complete request payload is therefore 11 through 250 bytes. Its declared
+name length, fixed color bytes, and total payload length must agree exactly;
+truncation and trailing bytes are invalid. The semantic profile validator also
+requires a normalized, non-empty display name of at most 60 Unicode characters
+and 240 UTF-8 bytes, without control or bidi-formatting characters, and a valid
+six-digit sRGB color. A conforming sender emits the canonical NFKC-normalized,
+trimmed, whitespace-collapsed name and lowercase color. The server validates
+and normalizes again rather than trusting client presentation identity.
+
+`PROFILE_UPDATED.payload` starts with an unsigned-byte version of exactly `1`
+and an unsigned-byte status. No status other than `0` or `1` is valid:
+
+| Status | Remaining payload |
+| ---: | --- |
+| `1` (accepted) | display-name length as unsigned 16-bit big-endian `1..240`, that many strict UTF-8 name bytes, then exactly 7 strict UTF-8 color bytes |
+| `0` (rejected) | error byte length as unsigned 16-bit big-endian `1..512`, then exactly that many strict UTF-8 error bytes |
+
+An accepted result is 12 through 251 bytes and must contain the canonical
+normalized profile, including lowercase `#rrggbb`. A rejected result is 5
+through 516 bytes. Each branch requires its declared and actual total lengths
+to match exactly; truncation, trailing bytes, a zero-length name/error, invalid
+UTF-8, a noncanonical accepted profile, or a payload above the branch bound is
+invalid.
+
+Profile admission is reauthorized before the payload can be accepted. Session,
+membership, Board generation, role, or lifecycle revocation uses the ordinary
+correlated terminal control and WebSocket close for that access failure, not a
+status-0 `PROFILE_UPDATED`. A syntactically or semantically invalid bounded
+profile instead receives correlated status 0 with `Profile is invalid` and the
+socket remains open. Profile attempts share the ordinary ten-second transport
+window and additionally allow at most 30 attempts on one socket and 120 attempts
+for one stable principal across sockets. Exceeding either profile budget emits a
+correlated `RATE_LIMITED` control with `reason: "RATE_LIMITED"`,
+`retryable: true`, and bounded `retryAfterMs`, then closes with code `4429`.
+These budgets are consumed after access reauthorization and before profile
+payload validation, so malformed attempts are not free.
+
+On acceptance, the server changes only the authenticated connection's
+presentation display name and color. It keeps the same WebSocket, Board and
+generation scope, stable actor identity, role, permissions, negotiated
+awareness client ID, CRDT documents, local/durable update flow, and outbox. For
+each document where that connection currently advertises awareness, the server
+rewrites the identity fields authoritatively for the same awareness client ID
+and broadcasts the resulting awareness update, including to the sender;
+cursor, selection, active-tool, viewport, and other non-identity presence state
+remain attached to that client. No new ticket, `AUTH`, `READY`, state-vector
+sync, reconnect, or remount is part of a successful profile update. Rejection
+is atomic across the connection and every awareness document: it changes no
+authenticated presentation fields or stored awareness state and broadcasts no
+profile-derived awareness update. It is reported by the correlated status-0
+result on the same connection; the client must not adopt a new profile from
+that result.
+
+Identity rewriting has an exact awareness-clock sequence. For each document
+with stored non-null presence at clock `N`, the server first prepares the same
+state with authoritative identity fields at `N + 1`. It preflights every
+document before changing any of them and rejects the complete profile operation
+when any stored clock is at least `0xffff_fffd`; the protocol's maximum accepted
+awareness clock is `0xffff_fffe`, and one increment must remain available to the
+client. Only after every rewrite is prepared does the server commit and
+broadcast all `N + 1` updates. After receiving the correlated accepted result,
+the sender republishes its latest sanitized local presence, including an
+explicit null clear, at a clock strictly greater than `N + 1` (`N + 2` in the
+minimum sequence, or the next local clock if unsent local presence already
+advanced farther). This final publication wins over the server's identity
+rewrite without restoring an older cursor, selection, viewport, tool, gesture
+preview, or non-null state. A native adapter must preserve this ordering or
+provide an equivalent monotonic-clock sequence.
+
+`src/board/protocol/fixtures/v1.json` includes byte-exact outer frames and inner
+payloads for `PROFILE_UPDATE`, accepted `PROFILE_UPDATED`, and rejected
+`PROFILE_UPDATED`. They use the common fixture generation, message ID, profile,
+and error text and are part of the cross-language compatibility contract.
+
 An update rejected before persistence by the tenant soft quota or server
 free-disk floor uses `STORAGE_ERROR` and repeats the rejected `UPDATE.messageId`
 through flag bit 1. Its current payload is strict UTF-8 JSON with `error`,

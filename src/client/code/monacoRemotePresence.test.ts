@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import type * as Monaco from "monaco-editor";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import { CODE_SYNC_LIMITS } from "../../code/protocol/constants.js";
 import {
@@ -152,9 +152,25 @@ function encodedSelection(
   };
 }
 
+function pointerEvent(
+  type: string,
+  clientX: number,
+  clientY: number,
+  pointerType = "mouse",
+): PointerEvent {
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    clientX,
+    clientY,
+  });
+  Object.defineProperty(event, "pointerType", { value: pointerType });
+  return event as PointerEvent;
+}
+
 afterEach(() => {
   document.head.querySelectorAll("style[data-eduri-monaco-remote-presence]")
     .forEach((element) => element.remove());
+  vi.unstubAllGlobals();
 });
 
 describe("Monaco remote presence", () => {
@@ -238,7 +254,14 @@ describe("Monaco remote presence", () => {
     yDocument.destroy();
   });
 
-  it("reveals only the hovered caret label and hides it again without unsafe markup", () => {
+  it("keeps carets click-through while revealing one coordinate-hovered label", () => {
+    let hoverCapable = true;
+    const removeHoverListener = vi.fn();
+    vi.stubGlobal("matchMedia", vi.fn(() => ({
+      get matches() { return hoverCapable; },
+      addEventListener: vi.fn(),
+      removeEventListener: removeHoverListener,
+    })));
     const yDocument = new Y.Doc();
     const yText = yDocument.getText("source");
     yText.insert(0, "hello");
@@ -288,6 +311,9 @@ describe("Monaco remote presence", () => {
     expect(hostileHitbox?.style.width).toBe("18px");
     expect(aliceHitbox?.style.pointerEvents).toBe("none");
     expect(hostileHitbox?.style.pointerEvents).toBe("none");
+    expect(editor.addedWidgets.every((widget) => (
+      widget.suppressMouseDown === false
+    ))).toBe(true);
     expect(aliceHitbox?.parentElement).toBe(aliceWidget);
     expect(hostileHitbox?.parentElement).toBe(hostileWidget);
 
@@ -304,30 +330,62 @@ describe("Monaco remote presence", () => {
     expect(hostileWidget?.style.width).toBe("0px");
     expect(editor.root.textContent).not.toContain("|");
 
-    const hoverStyles = document.head.querySelector(
+    const overlayStyles = document.head.querySelector(
       "style[data-eduri-monaco-remote-presence]",
     )?.textContent ?? "";
-    expect(hoverStyles).toMatch(/@media\s*\(hover:\s*hover\)/u);
-    expect(hoverStyles).toMatch(
-      /\[data-eduri-remote-caret-hitbox(?:=["']?true["']?)?\]:hover\s*[+~]\s*\[data-eduri-remote-caret-label(?:=["']?true["']?)?\]/u,
-    );
-    expect(hoverStyles).toMatch(/pointer-events:\s*auto/u);
-    expect(hoverStyles).toMatch(/opacity:\s*1/u);
-    expect(hoverStyles).toMatch(/visibility:\s*visible/u);
+    expect(overlayStyles).toMatch(/pointer-events:\s*none\s*!important/u);
+    expect(overlayStyles).not.toMatch(/pointer-events:\s*auto/u);
+    expect(overlayStyles).not.toMatch(/:hover/u);
 
-    // The generic sibling selector can reveal only the label in the hovered
-    // widget. With no persistent JS state, leaving restores these inline
-    // hidden defaults automatically.
-    expect(aliceHitbox?.parentElement?.querySelectorAll(
-      '[data-eduri-remote-caret-label="true"]',
-    )).toHaveLength(1);
-    expect(hostileHitbox?.parentElement?.querySelectorAll(
-      '[data-eduri-remote-caret-label="true"]',
-    )).toHaveLength(1);
+    aliceHitbox!.getBoundingClientRect = () => ({
+      x: 100,
+      y: 50,
+      left: 100,
+      top: 50,
+      right: 118,
+      bottom: 80,
+      width: 18,
+      height: 30,
+      toJSON: () => ({}),
+    } as DOMRect);
+    hostileHitbox!.getBoundingClientRect = () => ({
+      x: 200,
+      y: 50,
+      left: 200,
+      top: 50,
+      right: 218,
+      bottom: 80,
+      width: 18,
+      height: 30,
+      toJSON: () => ({}),
+    } as DOMRect);
+
+    editor.root.dispatchEvent(pointerEvent("pointermove", 105, 60));
+    expect(aliceLabel?.style.opacity).toBe("1");
+    expect(aliceLabel?.style.visibility).toBe("visible");
+    expect(aliceWidget?.dataset.hovered).toBe("true");
+    expect(hostileLabel?.style.opacity).toBe("0");
+
+    editor.root.dispatchEvent(pointerEvent("pointermove", 205, 60, "touch"));
+    expect(aliceLabel?.style.opacity).toBe("0");
+    expect(hostileLabel?.style.opacity).toBe("0");
+
+    hoverCapable = false;
+    editor.root.dispatchEvent(pointerEvent("pointermove", 205, 60));
+    expect(hostileLabel?.style.opacity).toBe("0");
+    hoverCapable = true;
+    editor.root.dispatchEvent(pointerEvent("pointermove", 205, 60));
+    expect(hostileLabel?.style.opacity).toBe("1");
+
+    editor.root.dispatchEvent(pointerEvent("pointerleave", 0, 0));
     expect(aliceLabel?.style.opacity).toBe("0");
     expect(hostileLabel?.style.opacity).toBe("0");
 
     renderer.destroy();
+    expect(removeHoverListener).toHaveBeenCalledWith(
+      "change",
+      expect.any(Function),
+    );
     expect(aliceWidget?.isConnected).toBe(false);
     expect(hostileWidget?.isConnected).toBe(false);
     expect(document.head.querySelector(

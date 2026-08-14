@@ -93,6 +93,7 @@ export function compareCodeTestOutput(
 
 export interface CodeTestCaseSnapshot {
   id: string;
+  entryId: string;
   name: string;
   rank: string;
   timeoutMs: number;
@@ -102,6 +103,7 @@ export interface CodeTestCaseSnapshot {
 
 export interface CodeTestCaseDraft {
   id?: string;
+  entryId?: string;
   name: string;
   rank?: string;
   timeoutMs?: number;
@@ -865,8 +867,14 @@ export function applyCodeWorkspaceStableFileCommands(
   }
 
   Y.transact(document, () => {
+    const tests = codeWorkspaceTestCases(document);
     for (const command of normalizedCommands) {
-      if (command.kind === "remove-file") entries.delete(command.entryId);
+      if (command.kind !== "remove-file") continue;
+      entries.delete(command.entryId);
+      for (const [testId, test] of tests) {
+        const targetEntryId = test.get("entryId") ?? CODE_WORKSPACE_MAIN_ENTRY_ID;
+        if (targetEntryId === command.entryId) tests.delete(testId);
+      }
     }
     for (const command of normalizedCommands) {
       if (command.kind === "replace-file") {
@@ -889,33 +897,72 @@ export function applyCodeWorkspaceStableFileCommands(
   }, origin);
 }
 
+export function removeCodeWorkspaceEntries(
+  document: Y.Doc,
+  entryIds: readonly string[],
+  origin?: unknown,
+): readonly string[] {
+  if (entryIds.length > CODE_WORKSPACE_MAX_ENTRIES) {
+    throw new CodeWorkspaceError("ENTRY_LIMIT", "Workspace command limit reached");
+  }
+  if (entryIds.length === 0) return [];
+
+  const requestedIds = new Set<string>();
+  for (const entryId of entryIds) {
+    if (!ENTRY_ID_PATTERN.test(entryId)) {
+      throw new CodeWorkspaceError("INVALID_ENTRY", "Workspace entry ID is invalid");
+    }
+    requestedIds.add(entryId);
+  }
+
+  const entries = codeWorkspaceEntries(document);
+  const rawEntries = rawCodeWorkspaceEntries(document);
+  if (entries.size !== rawEntries.length) {
+    throw new CodeWorkspaceError("INVALID_DOCUMENT", "Workspace entries are invalid");
+  }
+  const effectiveEntries = normalizeCodeWorkspaceEntries(rawEntries);
+  const effectiveById = new Map(effectiveEntries.map((entry) => [entry.id, entry]));
+  const childrenByParent = new Map<string, string[]>();
+  for (const entry of effectiveEntries) {
+    if (entry.parentId === null) continue;
+    const children = childrenByParent.get(entry.parentId) ?? [];
+    children.push(entry.id);
+    childrenByParent.set(entry.parentId, children);
+  }
+
+  const removed = new Set<string>();
+  const pending = [...requestedIds]
+    .filter((entryId) => effectiveById.has(entryId));
+  while (pending.length > 0) {
+    const entryId = pending.pop()!;
+    if (removed.has(entryId)) continue;
+    removed.add(entryId);
+    for (const childId of childrenByParent.get(entryId) ?? []) {
+      pending.push(childId);
+    }
+  }
+  if (removed.has(CODE_WORKSPACE_MAIN_ENTRY_ID)) {
+    throw new CodeWorkspaceError("INVALID_ENTRY", "main.py cannot be removed");
+  }
+  const removedIds = [...removed].sort(compareStableIds);
+  if (removedIds.length === 0) return [];
+  Y.transact(document, () => {
+    for (const id of removedIds) entries.delete(id);
+    const tests = codeWorkspaceTestCases(document);
+    for (const [testId, test] of tests) {
+      const targetEntryId = test.get("entryId") ?? CODE_WORKSPACE_MAIN_ENTRY_ID;
+      if (removed.has(String(targetEntryId))) tests.delete(testId);
+    }
+  }, origin);
+  return removedIds;
+}
+
 export function removeCodeWorkspaceEntry(
   document: Y.Doc,
   entryId: string,
   origin?: unknown,
 ): readonly string[] {
-  const entries = codeWorkspaceEntries(document);
-  if (!entries.has(entryId)) return [];
-  const effectiveEntries = listCodeWorkspaceEntries(document);
-  const removed = new Set<string>([entryId]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const entry of effectiveEntries) {
-      if (
-        !removed.has(entry.id)
-        && entry.parentId !== null
-        && removed.has(entry.parentId)
-      ) {
-        removed.add(entry.id);
-        changed = true;
-      }
-    }
-  }
-  Y.transact(document, () => {
-    for (const id of removed) entries.delete(id);
-  }, origin);
-  return [...removed];
+  return removeCodeWorkspaceEntries(document, [entryId], origin);
 }
 
 export function renameCodeWorkspaceEntry(
@@ -945,50 +992,108 @@ export function renameCodeWorkspaceEntry(
   Y.transact(document, () => entry.set("name", name), origin);
 }
 
+export function moveCodeWorkspaceEntries(
+  document: Y.Doc,
+  entryIds: readonly string[],
+  nextParentId: string | null,
+  origin?: unknown,
+): readonly string[] {
+  if (entryIds.length > CODE_WORKSPACE_MAX_ENTRIES) {
+    throw new CodeWorkspaceError("ENTRY_LIMIT", "Workspace command limit reached");
+  }
+  if (entryIds.length === 0) return [];
+
+  const requestedIds = new Set<string>();
+  for (const entryId of entryIds) {
+    if (!ENTRY_ID_PATTERN.test(entryId)) {
+      throw new CodeWorkspaceError("INVALID_ENTRY", "Workspace entry ID is invalid");
+    }
+    requestedIds.add(entryId);
+  }
+
+  const entries = codeWorkspaceEntries(document);
+  const rawEntries = rawCodeWorkspaceEntries(document);
+  if (entries.size !== rawEntries.length) {
+    throw new CodeWorkspaceError("INVALID_DOCUMENT", "Workspace entries are invalid");
+  }
+  const effectiveEntries = normalizeCodeWorkspaceEntries(rawEntries);
+  const effectiveById = new Map(effectiveEntries.map((entry) => [entry.id, entry]));
+  for (const entryId of requestedIds) {
+    if (!effectiveById.has(entryId)) {
+      throw new CodeWorkspaceError("INVALID_ENTRY", "Workspace entry does not exist");
+    }
+  }
+  if (nextParentId !== null) {
+    const parent = effectiveById.get(nextParentId);
+    if (!parent || parent.kind !== "folder") {
+      throw new CodeWorkspaceError("MISSING_PARENT", "Workspace folder does not exist");
+    }
+  }
+
+  const movedRoots = [...requestedIds].filter((entryId) => {
+    let parentId = effectiveById.get(entryId)!.parentId;
+    while (parentId !== null) {
+      if (requestedIds.has(parentId)) return false;
+      parentId = effectiveById.get(parentId)?.parentId ?? null;
+    }
+    return true;
+  }).sort(compareStableIds);
+  const movedRootIds = new Set(movedRoots);
+  let cursor = nextParentId;
+  while (cursor !== null) {
+    if (movedRootIds.has(cursor)) {
+      throw new CodeWorkspaceError("INVALID_ENTRY", "Workspace move would create a cycle");
+    }
+    cursor = effectiveById.get(cursor)?.parentId ?? null;
+  }
+
+  const changedRoots = movedRoots.filter((entryId) => (
+    effectiveById.get(entryId)!.parentId !== nextParentId
+  ));
+  if (changedRoots.length === 0) return [];
+  const changedRootIds = new Set(changedRoots);
+  const occupiedNames = new Map<string, string>();
+  for (const entry of effectiveEntries) {
+    if (entry.parentId !== nextParentId || changedRootIds.has(entry.id)) continue;
+    occupiedNames.set(comparableName(entry.name), entry.id);
+  }
+  for (const entryId of changedRoots) {
+    const entry = effectiveById.get(entryId)!;
+    const comparable = comparableName(entry.name);
+    if (occupiedNames.has(comparable)) {
+      throw new CodeWorkspaceError(
+        "DUPLICATE_NAME",
+        "A sibling entry already uses this name",
+      );
+    }
+    occupiedNames.set(comparable, entryId);
+  }
+
+  const expectedParentChanges = new Map(changedRoots.map((entryId) => (
+    [entryId, nextParentId] as const
+  )));
+  assertProspectiveTree(
+    rawEntries,
+    rawEntries.map((entry) => expectedParentChanges.has(entry.id)
+      ? { ...entry, parentId: nextParentId }
+      : entry),
+    expectedParentChanges,
+  );
+  Y.transact(document, () => {
+    for (const entryId of changedRoots) {
+      entries.get(entryId)!.set("parentId", nextParentId);
+    }
+  }, origin);
+  return changedRoots;
+}
+
 export function moveCodeWorkspaceEntry(
   document: Y.Doc,
   entryId: string,
   nextParentId: string | null,
   origin?: unknown,
 ): void {
-  const entries = codeWorkspaceEntries(document);
-  const entry = entries.get(entryId);
-  if (!entry) {
-    throw new CodeWorkspaceError("INVALID_ENTRY", "Workspace entry does not exist");
-  }
-  assertParent(entries, nextParentId);
-  if (entryId === nextParentId) {
-    throw new CodeWorkspaceError("INVALID_ENTRY", "An entry cannot contain itself");
-  }
-  const effectiveEntries = listCodeWorkspaceEntries(document);
-  const effectiveById = new Map(effectiveEntries.map((candidate) => (
-    [candidate.id, candidate]
-  )));
-  let cursor = nextParentId;
-  const seen = new Set<string>();
-  while (cursor !== null) {
-    if (cursor === entryId || seen.has(cursor)) {
-      throw new CodeWorkspaceError("INVALID_ENTRY", "Workspace move would create a cycle");
-    }
-    seen.add(cursor);
-    cursor = effectiveById.get(cursor)?.parentId ?? null;
-  }
-  const name = entry.get("name");
-  if (typeof name !== "string") {
-    throw new CodeWorkspaceError("INVALID_ENTRY", "Workspace entry name is invalid");
-  }
-  assertUniqueName(document, nextParentId, name, entryId);
-  const rawEntries = rawCodeWorkspaceEntries(document);
-  assertProspectiveTree(
-    rawEntries,
-    rawEntries.map((candidate) => candidate.id === entryId
-      ? { ...candidate, parentId: nextParentId }
-      : candidate),
-    new Map([[entryId, nextParentId]]),
-  );
-  Y.transact(document, () => {
-    entry.set("parentId", nextParentId);
-  }, origin);
+  moveCodeWorkspaceEntries(document, [entryId], nextParentId, origin);
 }
 
 export function workspaceFilePaths(
@@ -1029,6 +1134,11 @@ function readTestCase(
   value: Y.Map<unknown>,
 ): CodeTestCaseSnapshot | null {
   const name = value.get("name");
+  const storedEntryId = value.get("entryId");
+  // Test cases created before per-file binding belonged to main.py.
+  const entryId = storedEntryId === undefined
+    ? CODE_WORKSPACE_MAIN_ENTRY_ID
+    : storedEntryId;
   const rank = value.get("rank");
   const storedTimeoutMs = value.get("timeoutMs");
   const timeoutMs = storedTimeoutMs === undefined
@@ -1038,6 +1148,8 @@ function readTestCase(
   const expectedOutput = value.get("expectedOutput");
   if (
     !ENTRY_ID_PATTERN.test(id)
+    || typeof entryId !== "string"
+    || !ENTRY_ID_PATTERN.test(entryId)
     || typeof name !== "string"
     || !name.trim()
     || name.length > CODE_WORKSPACE_MAX_NAME_CODE_UNITS
@@ -1056,6 +1168,7 @@ function readTestCase(
   }
   return {
     id,
+    entryId,
     name,
     rank,
     timeoutMs,
@@ -1083,10 +1196,12 @@ function assertPlainCollaborativeText(
 
 export function listCodeTestCases(
   document: Y.Doc,
+  entryId?: string,
 ): readonly CodeTestCaseSnapshot[] {
   return [...codeWorkspaceTestCases(document).entries()]
     .map(([id, value]) => readTestCase(id, value))
     .filter((value): value is CodeTestCaseSnapshot => value !== null)
+    .filter((value) => entryId === undefined || value.entryId === entryId)
     .sort((left, right) => (
       left.rank.localeCompare(right.rank) || left.id.localeCompare(right.id)
     ));
@@ -1102,17 +1217,24 @@ export function addCodeTestCase(
     throw new CodeWorkspaceError("TEST_LIMIT", "Test case limit reached");
   }
   const id = draft.id ?? crypto.randomUUID();
+  const entryId = draft.entryId ?? CODE_WORKSPACE_MAIN_ENTRY_ID;
   const name = draft.name.normalize("NFKC").trim();
   const stdinValue = draft.stdin ?? "";
   const expectedValue = draft.expectedOutput ?? "";
   const timeoutMs = draft.timeoutMs ?? CODE_TEST_TIMEOUT_DEFAULT_MS;
   if (
     !ENTRY_ID_PATTERN.test(id)
+    || !ENTRY_ID_PATTERN.test(entryId)
     || tests.has(id)
     || !name
     || name.length > CODE_WORKSPACE_MAX_NAME_CODE_UNITS
   ) {
     throw new CodeWorkspaceError("INVALID_ENTRY", "Invalid test case");
+  }
+  const target = listCodeWorkspaceEntries(document)
+    .find((entry) => entry.id === entryId);
+  if (!target || target.kind !== "file" || target.contentKind !== "text") {
+    throw new CodeWorkspaceError("INVALID_ENTRY", "Test target file does not exist");
   }
   if (
     stdinValue.length > CODE_WORKSPACE_MAX_TEST_TEXT_CODE_UNITS
@@ -1134,6 +1256,7 @@ export function addCodeTestCase(
     if (stdinValue) stdin.insert(0, stdinValue);
     if (expectedValue) expectedOutput.insert(0, expectedValue);
     test.set("name", name);
+    test.set("entryId", entryId);
     test.set("rank", draft.rank ?? `z:${id}`);
     // Retain the field for Yjs schema compatibility, but all tests use the
     // single normalized line-comparison rule.
@@ -1149,7 +1272,7 @@ export function addCodeTestCase(
 export function updateCodeTestCase(
   document: Y.Doc,
   testId: string,
-  patch: Partial<Omit<CodeTestCaseDraft, "id">>,
+  patch: Partial<Omit<CodeTestCaseDraft, "id" | "entryId">>,
   origin?: unknown,
 ): void {
   const test = codeWorkspaceTestCases(document).get(testId);
@@ -1224,6 +1347,10 @@ export function validateCodeWorkspaceDocument(document: Y.Doc): void {
   }
   const snapshots = normalizeCodeWorkspaceEntries(rawSnapshots);
   const byId = new Map(snapshots.map((entry) => [entry.id, entry]));
+  const main = byId.get(CODE_WORKSPACE_MAIN_ENTRY_ID);
+  if (!main || main.kind !== "file") {
+    throw new CodeWorkspaceError("INVALID_DOCUMENT", "main.py is required");
+  }
   let totalText = 0;
   for (const entry of snapshots) {
     if (normalizeCodeWorkspaceName(entry.name) !== entry.name) {

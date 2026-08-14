@@ -21,6 +21,7 @@ import {
   BOARD_RECOVERY_MIME_TYPE,
   createBoardRecoveryBundleParts,
 } from "../../board/persistence";
+import type { CollaborationProfile } from "../../shared/collaborationProfile";
 import { currentCsrfToken } from "../api";
 import { requestDurableBrowserStorage } from "../offline";
 import {
@@ -97,12 +98,14 @@ interface LessonBoardProps {
   readonly lessonId: string;
   readonly userId: string;
   readonly lesson: LessonSummary;
+  readonly profile: CollaborationProfile;
   readonly onCriticalDataRiskChange?: (active: boolean) => void;
 }
 
 interface GuestBoardProps {
   readonly shareId: string;
   readonly deviceId: string;
+  readonly profile: CollaborationProfile;
   readonly onCriticalDataRiskChange?: (active: boolean) => void;
   readonly onTerminal?: (kind: "expired" | "not-found") => void;
 }
@@ -115,6 +118,7 @@ interface CollaborativeBoardProps {
   readonly metricsLessonId?: string;
   readonly assetEndpoint?: string;
   readonly guest: boolean;
+  readonly profile: CollaborationProfile;
   readonly onCriticalDataRiskChange?: (active: boolean) => void;
   readonly onTerminal?: (kind: "expired" | "not-found") => void;
 }
@@ -292,10 +296,20 @@ function browserSocket(url: string, subprotocol: string): BoardSocket {
   return new WebSocket(url, subprotocol) as unknown as BoardSocket;
 }
 
-function lessonTicketOptions(lessonId: string): HttpBoardBootstrapOptions {
+function lessonTicketOptions(
+  lessonId: string,
+  getProfile: () => CollaborationProfile,
+): HttpBoardBootstrapOptions {
   return {
     endpoint: BOARD_TICKET_ENDPOINT,
     lessonId,
+    requestBody: () => ({
+      lessonId,
+      minSchemaVersion: 1,
+      maxSchemaVersion: 1,
+      capabilities: BOARD_BROWSER_CAPABILITIES,
+      profile: getProfile(),
+    }),
     capabilities: BOARD_BROWSER_CAPABILITIES,
     csrfToken: currentCsrfToken,
     fetch: window.fetch.bind(window),
@@ -306,15 +320,17 @@ function lessonTicketOptions(lessonId: string): HttpBoardBootstrapOptions {
 function guestTicketOptions(
   shareId: string,
   deviceId: string,
+  getProfile: () => CollaborationProfile,
 ): HttpBoardBootstrapOptions {
   return {
     endpoint: `/api/guest/rooms/${encodeURIComponent(shareId)}/board-ticket`,
-    requestBody: {
+    requestBody: () => ({
       deviceId,
       minSchemaVersion: 1,
       maxSchemaVersion: 1,
       capabilities: BOARD_BROWSER_CAPABILITIES,
-    },
+      profile: getProfile(),
+    }),
     minSchemaVersion: 1,
     maxSchemaVersion: 1,
     capabilities: BOARD_BROWSER_CAPABILITIES,
@@ -350,6 +366,7 @@ function createSession(
   options: HttpBoardBootstrapOptions,
   initialTicket?: BoardBootstrapTicket,
   assetEndpoint?: string,
+  isInitialTicketValid?: () => boolean,
 ): ActiveBoardSession {
   const document = openPageDocument(new Y.Doc());
   const localOrigin = createLocalCommandOrigin(crypto.randomUUID());
@@ -396,7 +413,12 @@ function createSession(
     maxSchemaVersion: bootstrap.schemaVersion,
   };
   const ticketSource = initialTicket
-    ? createBootstrappedBoardTicketSource(scopedOptions, scope, initialTicket)
+    ? createBootstrappedBoardTicketSource(
+        scopedOptions,
+        scope,
+        initialTicket,
+        isInitialTicketValid,
+      )
     : createHttpBoardTicketSource({
         ...scopedOptions,
         scope,
@@ -1135,16 +1157,21 @@ function CollaborativeBoard({
   metricsLessonId,
   assetEndpoint,
   guest,
+  profile,
   onCriticalDataRiskChange,
   onTerminal,
 }: CollaborativeBoardProps) {
+  const profileKey = `${profile.displayName}\u0000${profile.color}`;
   const [attempt, setAttempt] = useState(0);
   const [state, setState] = useState<GateState>({ kind: "checking" });
   const activeRef = useRef<ActiveBoardSession | null>(null);
   const lessonRef = useRef(lesson);
   const onTerminalRef = useRef(onTerminal);
+  const appliedProfileKeyRef = useRef(profileKey);
+  const currentProfileKeyRef = useRef(profileKey);
   lessonRef.current = lesson;
   onTerminalRef.current = onTerminal;
+  currentProfileKeyRef.current = profileKey;
 
   useEffect(() => {
     let cancelled = false;
@@ -1189,6 +1216,7 @@ function CollaborativeBoard({
       }
 
       try {
+        const bootstrapProfileKey = currentProfileKeyRef.current;
         const bootstrap = await requestHttpBoardBootstrap(ticketOptions);
         const catalogInput = catalogFromBootstrap(
           cacheUserId,
@@ -1213,6 +1241,7 @@ function CollaborativeBoard({
           ticketOptions,
           bootstrap,
           assetEndpoint,
+          () => currentProfileKeyRef.current === bootstrapProfileKey,
         );
         activeRef.current = created;
         setState({ kind: "active", session: created });
@@ -1245,6 +1274,13 @@ function CollaborativeBoard({
     guest,
     ticketOptions,
   ]);
+
+  useEffect(() => {
+    if (state.kind !== "active") return;
+    if (appliedProfileKeyRef.current === profileKey) return;
+    appliedProfileKeyRef.current = profileKey;
+    state.session.provider.updateProfile(profile);
+  }, [profile, profileKey, state]);
 
   if (state.kind === "checking") {
     return <div className="board-v2-gate"><span className="spinner" /></div>;
@@ -1279,10 +1315,13 @@ export function LessonBoard({
   lessonId,
   userId,
   lesson,
+  profile,
   onCriticalDataRiskChange,
 }: LessonBoardProps) {
+  const profileRef = useRef(profile);
+  profileRef.current = profile;
   const options = useMemo(
-    () => lessonTicketOptions(lessonId),
+    () => lessonTicketOptions(lessonId, () => profileRef.current),
     [lessonId],
   );
   return (
@@ -1293,6 +1332,7 @@ export function LessonBoard({
       ticketOptions={options}
       metricsLessonId={lessonId}
       guest={false}
+      profile={profile}
       onCriticalDataRiskChange={onCriticalDataRiskChange}
     />
   );
@@ -1301,11 +1341,14 @@ export function LessonBoard({
 export function GuestBoard({
   shareId,
   deviceId,
+  profile,
   onCriticalDataRiskChange,
   onTerminal,
 }: GuestBoardProps) {
+  const profileRef = useRef(profile);
+  profileRef.current = profile;
   const options = useMemo(
-    () => guestTicketOptions(shareId, deviceId),
+    () => guestTicketOptions(shareId, deviceId, () => profileRef.current),
     [deviceId, shareId],
   );
   return (
@@ -1317,6 +1360,7 @@ export function GuestBoard({
         `/api/guest/rooms/${encodeURIComponent(shareId)}/board-assets`
       }
       guest
+      profile={profile}
       onCriticalDataRiskChange={onCriticalDataRiskChange}
       onTerminal={onTerminal}
     />

@@ -104,4 +104,43 @@ describe("Modal focus lifecycle", () => {
     expect(close).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledWith("аб");
   });
+
+  it("links its description and keeps a non-dismissible dialog open", async () => {
+    const close = vi.fn();
+    await act(async () => {
+      root.render(createElement(
+        Modal,
+        {
+          open: true,
+          title: "Profile",
+          description: "Choose a display name",
+          dismissible: false,
+          onClose: close,
+        },
+        createElement("input", { "aria-label": "Display Name" }),
+      ));
+    });
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+
+    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]');
+    const descriptionId = dialog?.getAttribute("aria-describedby");
+    expect(descriptionId).toBeTruthy();
+    expect(document.getElementById(descriptionId ?? "")?.textContent)
+      .toBe("Choose a display name");
+    expect(dialog?.querySelector('[aria-label="Закрыть"]')).toBeNull();
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent("keydown", {
+        bubbles: true,
+        key: "Escape",
+      }));
+      document.body.querySelector<HTMLElement>(".modal-backdrop")
+        ?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    });
+
+    expect(close).not.toHaveBeenCalled();
+    expect(document.body.querySelector('[role="dialog"]')).not.toBeNull();
+  });
 });

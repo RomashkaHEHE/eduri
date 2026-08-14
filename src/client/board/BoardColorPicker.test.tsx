@@ -259,9 +259,62 @@ describe("BoardColorPicker", () => {
     expect(events.gestureEnd).toHaveBeenCalledOnce();
   });
 
-  it("closes PageUp/PageDown hue gestures and commits unowned changes discretely", async () => {
+  it("handles hue keyboard bounds and autorepeat as one gesture", async () => {
     const events = createEvents();
-    await renderPicker(events);
+    await renderPicker(events, { initialColor: "#2563eb" });
+    const hue = container.querySelector<HTMLInputElement>(
+      ".board-color-picker__hue",
+    );
+    if (!hue) throw new Error("Hue slider not rendered");
+
+    await act(async () => {
+      hue.dispatchEvent(new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        key: "Home",
+      }));
+      flushAnimationFrames();
+      hue.dispatchEvent(new KeyboardEvent("keyup", {
+        bubbles: true,
+        cancelable: true,
+        key: "Home",
+      }));
+    });
+    expect(hue.value).toBe("0");
+    expect(events.preview).toHaveBeenLastCalledWith("#eb2525");
+    expect(events.commit).toHaveBeenLastCalledWith("#eb2525");
+
+    events.preview.mockClear();
+    events.commit.mockClear();
+    events.gestureStart.mockClear();
+    events.gestureEnd.mockClear();
+
+    await act(async () => {
+      for (let index = 0; index < 3; index += 1) {
+        hue.dispatchEvent(new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          key: "ArrowRight",
+          repeat: index > 0,
+        }));
+      }
+      flushAnimationFrames();
+      hue.dispatchEvent(new KeyboardEvent("keyup", {
+        bubbles: true,
+        cancelable: true,
+        key: "ArrowRight",
+      }));
+    });
+    expect(hue.value).toBe("3");
+    expect(events.preview).toHaveBeenCalledOnce();
+    expect(events.commit).toHaveBeenCalledOnce();
+    expect(events.gestureStart).toHaveBeenCalledOnce();
+    expect(events.gestureEnd).toHaveBeenCalledOnce();
+  });
+
+  it("applies hue page keys and commits unowned changes discretely", async () => {
+    const events = createEvents();
+    await renderPicker(events, { initialColor: "#00ff00" });
     const hue = container.querySelector<HTMLInputElement>(
       ".board-color-picker__hue",
     );
@@ -273,7 +326,6 @@ describe("BoardColorPicker", () => {
         cancelable: true,
         key: "PageDown",
       }));
-      setInputValue(hue, "300");
       flushAnimationFrames();
       hue.dispatchEvent(new KeyboardEvent("keyup", {
         bubbles: true,
@@ -281,7 +333,7 @@ describe("BoardColorPicker", () => {
         key: "PageDown",
       }));
     });
-    expect(events.commit).toHaveBeenLastCalledWith("#ff00ff");
+    expect(hue.value).toBe("110");
 
     await act(async () => {
       hue.dispatchEvent(new KeyboardEvent("keydown", {
@@ -289,14 +341,14 @@ describe("BoardColorPicker", () => {
         cancelable: true,
         key: "PageUp",
       }));
-      setInputValue(hue, "120");
+      flushAnimationFrames();
       hue.dispatchEvent(new KeyboardEvent("keyup", {
         bubbles: true,
         cancelable: true,
         key: "PageUp",
       }));
     });
-    expect(events.commit).toHaveBeenLastCalledWith("#00ff00");
+    expect(hue.value).toBe("120");
 
     await act(async () => setInputValue(hue, "240"));
     expect(events.commit).toHaveBeenLastCalledWith("#0000ff");
@@ -804,6 +856,47 @@ describe("BoardColorPicker", () => {
     expect(events.commit).toHaveBeenCalledOnce();
     expect(events.alphaPreview).toHaveBeenCalledOnce();
     expect(events.alphaCommit).toHaveBeenCalledOnce();
+  });
+
+  it("uses RTL arrow direction and explicit bounds for alpha keyboard input", async () => {
+    const events = createEvents();
+    await renderPicker(events, { initialAlpha: 0.5 });
+    const alpha = container.querySelector<HTMLInputElement>(
+      ".board-color-picker__alpha",
+    );
+    if (!alpha) throw new Error("Alpha rail not rendered");
+
+    const press = async (key: string) => {
+      await act(async () => {
+        alpha.dispatchEvent(new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          key,
+        }));
+        flushAnimationFrames();
+        alpha.dispatchEvent(new KeyboardEvent("keyup", {
+          bubbles: true,
+          cancelable: true,
+          key,
+        }));
+      });
+    };
+
+    await press("ArrowLeft");
+    expect(alpha.value).toBe("0.51");
+    expect(events.alphaCommit).toHaveBeenLastCalledWith(0.51);
+
+    await press("ArrowRight");
+    expect(alpha.value).toBe("0.5");
+    expect(events.alphaCommit).toHaveBeenLastCalledWith(0.5);
+
+    await press("Home");
+    expect(alpha.value).toBe("0");
+    expect(events.alphaCommit).toHaveBeenLastCalledWith(0);
+
+    await press("End");
+    expect(alpha.value).toBe("1");
+    expect(events.alphaCommit).toHaveBeenLastCalledWith(1);
   });
 
   it("flushes alpha preview but does not commit it on blur", async () => {

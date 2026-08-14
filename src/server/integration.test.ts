@@ -461,7 +461,9 @@ describe("tenant isolation and learning workflows", () => {
 
   it("issues a short-lived room-scoped LiveKit token only to lesson participants", async () => {
     const createRoom = vi.fn(async () => undefined);
+    const updateParticipant = vi.fn(async () => undefined);
     harness.context.livekitRoomService!.createRoom = createRoom;
+    harness.context.livekitRoomService!.updateParticipant = updateParticipant;
     await tutorA.agent
       .post(`/api/lessons/${resourcesA1.lessonId}/call-token`)
       .expect(403);
@@ -480,6 +482,9 @@ describe("tenant isolation and learning workflows", () => {
     const tutorResponse = await tutorA.agent
       .post(`/api/lessons/${resourcesA1.lessonId}/call-token`)
       .set("x-csrf-token", tutorA.csrf)
+      .send({
+        profile: { displayName: "  Tutor   Alias ", color: "#ABCDEF" },
+      })
       .expect(200)
       .expect("Cache-Control", "no-store");
     const studentResponse = await studentA1.session.agent
@@ -512,10 +517,11 @@ describe("tenant isolation and learning workflows", () => {
     expect(tutorClaims).toMatchObject({
       iss: LIVEKIT_API_KEY,
       sub: `tutor:${tutorA.user.id}`,
-      name: tutorA.user.displayName,
+      name: "Tutor Alias",
       attributes: {
         "eduri.role": "tutor",
         "eduri.lessonId": resourcesA1.lessonId,
+        "eduri.color": "#abcdef",
       },
       video: {
         room: tutorResponse.body.roomName,
@@ -540,6 +546,38 @@ describe("tenant isolation and learning workflows", () => {
     expect(Number(tutorClaims.exp) - Number(tutorClaims.nbf)).toBe(15 * 60);
     expect(tutorClaims.video).not.toHaveProperty("roomAdmin");
     expect(tutorClaims.video).not.toHaveProperty("roomCreate");
+
+    await tutorA.agent
+      .patch(`/api/lessons/${resourcesA1.lessonId}/call-profile`)
+      .set("x-csrf-token", tutorA.csrf)
+      .send({
+        profile: { displayName: "  Updated   tutor ", color: "#D33F49" },
+      })
+      .expect(204)
+      .expect("Cache-Control", "no-store");
+    expect(updateParticipant).toHaveBeenCalledWith(
+      tutorResponse.body.roomName,
+      `tutor:${tutorA.user.id}`,
+      {
+        name: "Updated tutor",
+        attributes: { "eduri.color": "#d33f49" },
+      },
+    );
+
+    await tutorB.agent
+      .patch(`/api/lessons/${resourcesA1.lessonId}/call-profile`)
+      .set("x-csrf-token", tutorB.csrf)
+      .send({ profile: { displayName: "Other tutor", color: "#2563eb" } })
+      .expect(404);
+    await tutorA.agent
+      .patch(`/api/lessons/${resourcesA1.lessonId}/call-profile`)
+      .set("x-csrf-token", tutorA.csrf)
+      .send({
+        identity: `student:${studentA1.id}`,
+        profile: { displayName: "Injected identity", color: "#2563eb" },
+      })
+      .expect(400);
+    expect(updateParticipant).toHaveBeenCalledTimes(1);
   });
 
   it("shows a student only lessons, materials, and assignments assigned to that account", async () => {

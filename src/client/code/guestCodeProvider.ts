@@ -17,6 +17,10 @@ import {
   type CodeSyncServerMessage,
 } from "../../code/protocol/index.js";
 import {
+  normalizeCollaborationProfile,
+  type CollaborationProfile,
+} from "../../shared/collaborationProfile.js";
+import {
   validateCodeWorkspaceDocument,
 } from "../../code/core/index.js";
 import {
@@ -74,6 +78,7 @@ export interface GuestCodePeerAwareness {
 
 export interface CodeSyncSocket {
   readonly connected: boolean;
+  auth?: GuestCodeSocketAuth;
   on(event: string, listener: (...args: any[]) => void): this;
   off(event: string, listener: (...args: any[]) => void): this;
   emit(event: string, ...args: any[]): this;
@@ -81,14 +86,21 @@ export interface CodeSyncSocket {
   disconnect(): this;
 }
 
+export interface GuestCodeSocketAuth {
+  readonly shareId: string;
+  readonly deviceId: string;
+  readonly profile?: CollaborationProfile;
+}
+
 export interface GuestCodeProviderOptions {
   readonly shareId: string;
   readonly resourceId: string;
   readonly deviceId: string;
+  readonly profile?: CollaborationProfile;
   readonly databaseName?: string;
   readonly socketFactory?: (
     namespace: string,
-    auth: { readonly shareId: string; readonly deviceId: string },
+    auth: GuestCodeSocketAuth,
   ) => CodeSyncSocket;
   readonly createId?: () => string;
   readonly ackTimeoutMs?: number;
@@ -130,6 +142,11 @@ interface ParsedAwareness {
   readonly state: CodeAwarenessState | null;
 }
 
+interface ParsedProfileUpdated {
+  readonly type: typeof CODE_SYNC_TAGS.profileUpdated;
+  readonly participant: CodeParticipantIdentity;
+}
+
 interface ParsedControl {
   readonly type: typeof CODE_SYNC_TAGS.control;
   readonly code: CodeSyncControlCode;
@@ -143,6 +160,7 @@ type ParsedServerMessage =
   | ParsedRemoteUpdate
   | ParsedAck
   | ParsedAwareness
+  | ParsedProfileUpdated
   | ParsedControl;
 
 const PARTICIPANT_COLOR = /^#[0-9a-f]{6}$/iu;
@@ -272,6 +290,12 @@ function parseServerMessage(raw: unknown): ParsedServerMessage | null {
       ? { type: CODE_SYNC_TAGS.awareness, participant: identity, state }
       : null;
   }
+  if (input.type === CODE_SYNC_TAGS.profileUpdated) {
+    const identity = participant(input.participant);
+    return identity
+      ? { type: CODE_SYNC_TAGS.profileUpdated, participant: identity }
+      : null;
+  }
   if (input.type === CODE_SYNC_TAGS.control) {
     const codes: readonly CodeSyncControlCode[] = [
       "expired",
@@ -297,7 +321,7 @@ function parseServerMessage(raw: unknown): ParsedServerMessage | null {
 
 function defaultSocketFactory(
   namespace: string,
-  auth: { readonly shareId: string; readonly deviceId: string },
+  auth: GuestCodeSocketAuth,
 ): CodeSyncSocket {
   return io(namespace, {
     auth,
@@ -370,9 +394,14 @@ export class GuestCodeProvider {
   private syncComplete = false;
   private queuedLocalWrites = 0;
   private startPromise: Promise<void> | null = null;
+  private profile: CollaborationProfile | undefined;
+  private socketStarted = false;
   private stopped = false;
 
   constructor(private readonly options: GuestCodeProviderOptions) {
+    this.profile = options.profile
+      ? normalizeCollaborationProfile(options.profile)
+      : undefined;
     this.createId = options.createId ?? (() => crypto.randomUUID());
     this.ackTimeoutMs = options.ackTimeoutMs ?? 10_000;
     this.awarenessThrottleMs = options.awarenessThrottleMs ?? 120;
@@ -407,7 +436,7 @@ export class GuestCodeProvider {
     );
     this.socket = (options.socketFactory ?? defaultSocketFactory)(
       CODE_SYNC_NAMESPACE,
-      { shareId: options.shareId, deviceId: options.deviceId },
+      this.socketAuth(),
     );
     this.terminalActionOutbox = createTerminalActionOutbox({
       connected: () => this.socket.connected && !this.stopped,
@@ -423,6 +452,22 @@ export class GuestCodeProvider {
     if (this.startPromise) return this.startPromise;
     this.startPromise = this.initialize();
     return this.startPromise;
+  }
+
+  updateProfile(profile: CollaborationProfile): void {
+    const next = normalizeCollaborationProfile(profile);
+    if (
+      this.profile?.displayName === next.displayName
+      && this.profile.color === next.color
+    ) return;
+    this.profile = next;
+    this.socket.auth = this.socketAuth();
+    if (!this.socketStarted || this.stopped || !this.socket.connected) return;
+    this.socket.emit(CODE_SYNC_MESSAGE_EVENT, {
+      type: CODE_SYNC_TAGS.profileUpdate,
+      protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+      profile: next,
+    } satisfies CodeSyncClientMessage);
   }
 
   getStatus(): GuestCodeStatus {
@@ -522,6 +567,7 @@ export class GuestCodeProvider {
   async stop(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
+    this.socketStarted = false;
     this.clearAckTimer();
     if (this.awarenessTimer !== null) clearTimeout(this.awarenessTimer);
     this.awarenessTimer = null;
@@ -543,6 +589,7 @@ export class GuestCodeProvider {
   async clearLocalData(): Promise<void> {
     if (!this.stopped) {
       this.stopped = true;
+      this.socketStarted = false;
       this.clearAckTimer();
       if (this.awarenessTimer !== null) clearTimeout(this.awarenessTimer);
       this.awarenessTimer = null;
@@ -575,6 +622,7 @@ export class GuestCodeProvider {
       this.emitStatus();
       this.addSocketListeners();
       this.patchStatus({ connection: "connecting" });
+      this.socketStarted = true;
       this.socket.connect();
     } catch (error) {
       this.patchStatus({
@@ -586,6 +634,14 @@ export class GuestCodeProvider {
       });
       throw error;
     }
+  }
+
+  private socketAuth(): GuestCodeSocketAuth {
+    return {
+      shareId: this.options.shareId,
+      deviceId: this.options.deviceId,
+      ...(this.profile ? { profile: this.profile } : {}),
+    };
   }
 
   private addSocketListeners(): void {
@@ -808,6 +864,21 @@ export class GuestCodeProvider {
           state: message.state,
         });
       }
+      this.emitAwareness();
+      return;
+    }
+    if (message.type === CODE_SYNC_TAGS.profileUpdated) {
+      const ownId = this.status.participant?.participantId;
+      if (message.participant.participantId === ownId) {
+        this.patchStatus({ participant: message.participant });
+        return;
+      }
+      const peer = this.peers.get(message.participant.participantId);
+      if (!peer) return;
+      this.peers.set(message.participant.participantId, {
+        participant: message.participant,
+        state: peer.state,
+      });
       this.emitAwareness();
       return;
     }

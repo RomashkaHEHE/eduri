@@ -108,6 +108,13 @@ afterEach(async () => {
 });
 
 describe("SoloCodePage session promotion", () => {
+  it("does not expose collaboration profile controls in solo mode", async () => {
+    await renderPage();
+
+    expect(container?.querySelector(".online-profile-button")).toBeNull();
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+  });
+
   it("keeps Code read-only and delays navigation until promotion is durable", async () => {
     let finishPromotion!: (value: GuestRoom) => void;
     mocks.promote.mockReturnValue(new Promise<GuestRoom>((resolve) => {

@@ -46,22 +46,10 @@ const FALLBACK_COLOR = "#2563eb" as const;
 const EXACT_CONTENT_WIDGET_POSITION = (
   0 as Monaco.editor.ContentWidgetPositionPreference
 );
-const REMOTE_CARET_HOVER_STYLES = `
-@media (hover: hover) {
-  [data-eduri-remote-caret-hitbox="true"] {
-    pointer-events: auto !important;
-  }
-
-  [data-eduri-remote-caret-hitbox="true"]:hover
-    ~ [data-eduri-remote-caret-label="true"] {
-    opacity: 1 !important;
-    transition-delay: 0s !important;
-    visibility: visible !important;
-  }
-
-  [data-eduri-remote-caret-hitbox="true"]:hover {
-    cursor: text;
-  }
+const REMOTE_CARET_OVERLAY_STYLES = `
+[data-eduri-remote-caret="true"],
+[data-eduri-remote-caret="true"] * {
+  pointer-events: none !important;
 }`;
 let nextRendererId = 1;
 
@@ -172,7 +160,7 @@ export function decodeExactYTextSelection(
 
 class RemoteCaretWidget implements Monaco.editor.IContentWidget {
   readonly allowEditorOverflow = true;
-  readonly suppressMouseDown = true;
+  readonly suppressMouseDown = false;
   private readonly root: HTMLSpanElement;
   private readonly caret: HTMLSpanElement;
   private readonly hitbox: HTMLSpanElement;
@@ -185,6 +173,7 @@ class RemoteCaretWidget implements Monaco.editor.IContentWidget {
   ) {
     this.root = ownerDocument.createElement("span");
     this.root.dataset.eduriRemoteCaret = "true";
+    this.root.dataset.hovered = "false";
     this.root.setAttribute("aria-hidden", "true");
     Object.assign(this.root.style, {
       display: "block",
@@ -273,6 +262,23 @@ class RemoteCaretWidget implements Monaco.editor.IContentWidget {
     this.label.style.color = readableTextColor(color);
     this.label.textContent = displayName.slice(0, 128);
   }
+
+  containsPoint(clientX: number, clientY: number): boolean {
+    const bounds = this.hitbox.getBoundingClientRect();
+    return bounds.width > 0
+      && bounds.height > 0
+      && clientX >= bounds.left
+      && clientX <= bounds.right
+      && clientY >= bounds.top
+      && clientY <= bounds.bottom;
+  }
+
+  setHovered(hovered: boolean): void {
+    this.root.dataset.hovered = hovered ? "true" : "false";
+    this.label.style.opacity = hovered ? "1" : "0";
+    this.label.style.transitionDelay = hovered ? "0s" : "";
+    this.label.style.visibility = hovered ? "visible" : "hidden";
+  }
 }
 
 /**
@@ -306,6 +312,43 @@ export function createMonacoRemotePresenceRenderer(
   let peers: readonly MonacoRemotePresencePeer[] = [];
   let lastSignature: string | null = null;
   let destroyed = false;
+  let lastPointer: {
+    readonly clientX: number;
+    readonly clientY: number;
+    readonly pointerType: string;
+  } | null = null;
+  const editorDom = editor.getDomNode();
+  const hoverQuery = ownerDocument.defaultView?.matchMedia?.("(hover: hover)")
+    ?? null;
+  const refreshCaretHover = (): void => {
+    const pointer = lastPointer;
+    const hovered = hoverQuery?.matches
+      && pointer !== null
+      && pointer.pointerType !== "touch"
+      ? [...widgets.values()].reverse().find(({ widget }) => (
+          widget.containsPoint(pointer.clientX, pointer.clientY)
+        ))?.widget ?? null
+      : null;
+    for (const { widget } of widgets.values()) {
+      widget.setHovered(widget === hovered);
+    }
+  };
+  const pointerMoveListener = (event: PointerEvent): void => {
+    lastPointer = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+      pointerType: event.pointerType || "mouse",
+    };
+    refreshCaretHover();
+  };
+  const pointerLeaveListener = (): void => {
+    lastPointer = null;
+    refreshCaretHover();
+  };
+  const hoverChangeListener = (): void => refreshCaretHover();
+  editorDom?.addEventListener("pointermove", pointerMoveListener);
+  editorDom?.addEventListener("pointerleave", pointerLeaveListener);
+  hoverQuery?.addEventListener?.("change", hoverChangeListener);
 
   const render = (): void => {
     if (destroyed) return;
@@ -411,13 +454,13 @@ export function createMonacoRemotePresenceRenderer(
         options: {
           inlineClassName: className,
           inlineClassNameAffectsLetterSpacing: false,
-          hoverMessage: { value: selection.displayName.slice(0, 128) },
           zIndex: 20,
         },
       });
     }
-    style.textContent = [REMOTE_CARET_HOVER_STYLES, ...rules].join("\n");
+    style.textContent = [REMOTE_CARET_OVERLAY_STYLES, ...rules].join("\n");
     decorations.set(modelDecorations);
+    refreshCaretHover();
   };
 
   const onText = (): void => render();
@@ -432,6 +475,9 @@ export function createMonacoRemotePresenceRenderer(
     modelDisposeSubscription.dispose();
     editorDisposeSubscription.dispose();
     editorModelSubscription.dispose();
+    editorDom?.removeEventListener("pointermove", pointerMoveListener);
+    editorDom?.removeEventListener("pointerleave", pointerLeaveListener);
+    hoverQuery?.removeEventListener?.("change", hoverChangeListener);
     decorations.clear();
     for (const record of widgets.values()) {
       editor.removeContentWidget(record.widget);

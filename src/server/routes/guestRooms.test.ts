@@ -162,6 +162,15 @@ describe("guest room HTTP API", () => {
     expect(initializationToken).toMatch(/^[A-Za-z0-9_-]{43}$/u);
     expect(JSON.stringify(draft.body.room)).not.toContain(initializationToken);
 
+    await request(app)
+      .post(`/api/guest/rooms/${shareId}/board-ticket`)
+      .set("Origin", "http://eduri.test")
+      .send({
+        deviceId: "a".repeat(32),
+        profile: { displayName: "Guest\nAdmin", color: "#abcdef" },
+      })
+      .expect(400);
+
     const ticketResponse = await request(app)
       .post(`/api/guest/rooms/${shareId}/board-ticket`)
       .set("Origin", "http://eduri.test")
@@ -170,6 +179,10 @@ describe("guest room HTTP API", () => {
         minSchemaVersion: 1,
         maxSchemaVersion: 1,
         capabilities: 0xffff_ffff,
+        profile: {
+          displayName: "  Guest   Alias ",
+          color: "#A1B2C3",
+        },
       })
       .expect(200);
     const ticket = ticketResponse.body as BoardSyncTicketResponse;
@@ -184,6 +197,10 @@ describe("guest room HTTP API", () => {
     });
     expect(authenticated.access.userId)
       .toMatch(/^guest_[A-Za-z0-9_-]{43}$/u);
+    expect(authenticated.access).toMatchObject({
+      displayName: "Guest Alias",
+      color: "#a1b2c3",
+    });
 
     const guestReplica = new Y.Doc();
     Y.applyUpdate(
@@ -294,6 +311,15 @@ describe("guest room HTTP API", () => {
 
   it("does not extend room activity when it only issues a call token", async () => {
     const createRoom = vi.fn(async () => undefined);
+    let expectedParticipantIdentity = "";
+    const updateParticipant = vi.fn(async (
+      _room: string,
+      identity: string,
+    ) => {
+      if (expectedParticipantIdentity && identity !== expectedParticipantIdentity) {
+        throw { status: 404 };
+      }
+    });
     const { app, context } = harness({
       liveKit: true,
       liveKitRoomService: {
@@ -301,6 +327,7 @@ describe("guest room HTTP API", () => {
         listRooms: async () => [],
         deleteRoom: async () => undefined,
         removeParticipant: async () => undefined,
+        updateParticipant,
       },
     });
     const created = await request(app)
@@ -340,7 +367,10 @@ describe("guest room HTTP API", () => {
     const tokenResponse = await request(app)
       .post(`/api/guest/rooms/${shareId}/call-token`)
       .set("Origin", "http://eduri.test")
-      .send({ displayName: "Guest" })
+      .send({
+        deviceId: "c".repeat(32),
+        profile: { displayName: "  Guest   Alias ", color: "#ABCDEF" },
+      })
       .expect(200)
       .expect((response) => {
         expect(response.body.roomName)
@@ -352,6 +382,14 @@ describe("guest room HTTP API", () => {
       "guest-room-test-api-key",
       "guest-room-test-api-secret-at-least-32-bytes",
     ).verify(tokenResponse.body.token);
+    expect(claims).toMatchObject({
+      sub: expect.stringMatching(/^guest:[A-Za-z0-9_-]{43}$/u),
+      name: "Guest Alias",
+      attributes: {
+        "eduri.role": "guest",
+        "eduri.color": "#abcdef",
+      },
+    });
     expect(claims.video).toMatchObject({
       room: `eduri-guest-${call.resource_key}`,
       roomJoin: true,
@@ -368,6 +406,48 @@ describe("guest room HTTP API", () => {
     });
     expect(claims.video).not.toHaveProperty("roomCreate");
     expect(claims.video).not.toHaveProperty("roomAdmin");
+    expectedParticipantIdentity = String(claims.sub);
+
+    await request(app)
+      .patch(`/api/guest/rooms/${shareId}/call-profile`)
+      .set("Origin", "http://eduri.test")
+      .send({
+        deviceId: "c".repeat(32),
+        profile: { displayName: "Updated guest", color: "#D33F49" },
+      })
+      .expect(204)
+      .expect("Cache-Control", "no-store");
+    expect(updateParticipant).toHaveBeenCalledWith(
+      `eduri-guest-${call.resource_key}`,
+      claims.sub,
+      {
+        name: "Updated guest",
+        attributes: { "eduri.color": "#d33f49" },
+      },
+    );
+
+    await request(app)
+      .patch(`/api/guest/rooms/${shareId}/call-profile`)
+      .set("Origin", "http://eduri.test")
+      .send({
+        deviceId: "d".repeat(32),
+        profile: { displayName: "Spoofed guest", color: "#2563eb" },
+      })
+      .expect(409)
+      .expect((response) => {
+        expect(response.body.code).toBe("CALL_PARTICIPANT_NOT_CONNECTED");
+      });
+    expect(updateParticipant.mock.calls[1]?.[1]).not.toBe(claims.sub);
+
+    await request(app)
+      .patch(`/api/guest/rooms/${shareId}/call-profile`)
+      .set("Origin", "http://eduri.test")
+      .send({
+        deviceId: "c".repeat(32),
+        identity: claims.sub,
+        profile: { displayName: "Injected identity", color: "#2563eb" },
+      })
+      .expect(400);
 
     expect(createRoom).toHaveBeenCalledWith({
       name: `eduri-guest-${call.resource_key}`,

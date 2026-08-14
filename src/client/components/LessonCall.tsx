@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   LiveKitRoom,
   ParticipantTile,
@@ -15,6 +22,7 @@ import {
   AlertTriangle,
   CircleCheck,
   CircleX,
+  RefreshCw,
   LoaderCircle,
   Maximize2,
   Mic,
@@ -22,20 +30,30 @@ import {
   MonitorUp,
   PhoneOff,
   RotateCcw,
+  Settings,
   Video,
   VideoOff,
 } from "lucide-react";
-import { ConnectionError, ConnectionState, Track } from "livekit-client";
+import {
+  ConnectionError,
+  ConnectionState,
+  Room,
+  Track,
+} from "livekit-client";
 import type { LessonSummary } from "../../shared/types";
+import type { CollaborationProfile } from "../../shared/collaborationProfile";
 import { api, type CallCredentials } from "../api";
 
 interface LessonCallProps {
   lessonId: string;
   status: LessonSummary["status"];
+  profile: CollaborationProfile;
 }
 
 export interface CallWorkspaceProps {
   requestCredentials: () => Promise<CallCredentials>;
+  profile?: CollaborationProfile;
+  updateParticipantProfile?: (profile: CollaborationProfile) => Promise<void>;
   autoJoin?: boolean;
   unavailable?: {
     title: string;
@@ -46,6 +64,75 @@ export interface CallWorkspaceProps {
 
 type CallStage = "idle" | "requesting" | "active" | "left" | "disconnected";
 type ControlKind = "microphone" | "camera" | "screen";
+type SelectableDeviceKind = "audioinput" | "audiooutput" | "videoinput";
+
+interface CallDevicePreferences {
+  readonly audioInput: string;
+  readonly audioOutput: string;
+  readonly videoInput: string;
+}
+
+const CALL_DEVICE_PREFERENCES_KEY = "eduri-call-devices-v1";
+const DEFAULT_DEVICE_PREFERENCES: CallDevicePreferences = Object.freeze({
+  audioInput: "default",
+  audioOutput: "default",
+  videoInput: "default",
+});
+
+function collaborationProfileKey(
+  profile: CollaborationProfile | undefined,
+): string | null {
+  return profile ? JSON.stringify([profile.displayName, profile.color]) : null;
+}
+
+function validDeviceId(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 512
+    && !/[\u0000-\u001f\u007f]/u.test(value);
+}
+
+function readDevicePreferences(): CallDevicePreferences {
+  if (typeof window === "undefined") return DEFAULT_DEVICE_PREFERENCES;
+  try {
+    const raw = window.localStorage.getItem(CALL_DEVICE_PREFERENCES_KEY);
+    if (!raw || raw.length > 2_048) return DEFAULT_DEVICE_PREFERENCES;
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return DEFAULT_DEVICE_PREFERENCES;
+    const candidate = parsed as Record<string, unknown>;
+    if (candidate.version !== 1) return DEFAULT_DEVICE_PREFERENCES;
+    return {
+      audioInput: validDeviceId(candidate.audioInput)
+        ? candidate.audioInput
+        : "default",
+      audioOutput: validDeviceId(candidate.audioOutput)
+        ? candidate.audioOutput
+        : "default",
+      videoInput: validDeviceId(candidate.videoInput)
+        ? candidate.videoInput
+        : "default",
+    };
+  } catch {
+    return DEFAULT_DEVICE_PREFERENCES;
+  }
+}
+
+function writeDevicePreferences(preferences: CallDevicePreferences): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(CALL_DEVICE_PREFERENCES_KEY, JSON.stringify({
+      version: 1,
+      ...preferences,
+    }));
+  } catch {
+    // Device preferences are best-effort presentation state.
+  }
+}
+
+function supportsAudioOutputSelection(): boolean {
+  return typeof HTMLMediaElement !== "undefined"
+    && typeof HTMLMediaElement.prototype.setSinkId === "function";
+}
 
 function errorMessage(reason: unknown) {
   if (reason instanceof DOMException) {
@@ -64,6 +151,7 @@ function errorMessage(reason: unknown) {
 
 function mediaDeviceMessage(kind?: MediaDeviceKind) {
   if (kind === "audioinput") return "Микрофон недоступен. Проверьте разрешение браузера и выбранное устройство.";
+  if (kind === "audiooutput") return "Не удалось выбрать устройство вывода звука. Этот браузер может не поддерживать переключение динамиков.";
   if (kind === "videoinput") return "Камера недоступна. Проверьте разрешение браузера и выбранное устройство.";
   return "Не удалось включить камеру или микрофон.";
 }
@@ -104,14 +192,193 @@ function CallControl({
   );
 }
 
+function deviceFallbackLabel(kind: SelectableDeviceKind, index: number): string {
+  if (kind === "audioinput") return `Микрофон ${index + 1}`;
+  if (kind === "audiooutput") return `Динамики ${index + 1}`;
+  return `Камера ${index + 1}`;
+}
+
+function deviceOptions(
+  kind: SelectableDeviceKind,
+  devices: readonly MediaDeviceInfo[],
+  selected: string,
+): readonly { readonly id: string; readonly label: string }[] {
+  const seen = new Set<string>();
+  const options: { id: string; label: string }[] = [];
+  for (const device of devices) {
+    if (!validDeviceId(device.deviceId) || seen.has(device.deviceId)) continue;
+    seen.add(device.deviceId);
+    options.push({
+      id: device.deviceId,
+      label: device.label.trim() || deviceFallbackLabel(kind, options.length),
+    });
+  }
+  if (!seen.has("default")) {
+    options.unshift({ id: "default", label: "По умолчанию" });
+    seen.add("default");
+  }
+  if (validDeviceId(selected) && !seen.has(selected)) {
+    options.push({ id: selected, label: "Выбранное устройство недоступно" });
+  }
+  return options;
+}
+
+function CallDeviceSettings({
+  id,
+  room,
+  preferences,
+  disabled,
+  onChange,
+  onError,
+}: {
+  id: string;
+  room: Room;
+  preferences: CallDevicePreferences;
+  disabled: boolean;
+  onChange: (kind: SelectableDeviceKind, deviceId: string) => void;
+  onError: (message: string | null) => void;
+}) {
+  const [devices, setDevices] = useState<readonly MediaDeviceInfo[]>([]);
+  const [refreshing, setRefreshing] = useState(false);
+  const [switching, setSwitching] = useState<SelectableDeviceKind | null>(null);
+  const requestGeneration = useRef(0);
+
+  const refresh = useCallback(async (requestPermissions: boolean) => {
+    const generation = ++requestGeneration.current;
+    setRefreshing(true);
+    try {
+      const next = await Room.getLocalDevices(undefined, requestPermissions);
+      if (requestGeneration.current === generation) setDevices(next);
+    } catch (reason) {
+      if (requestPermissions && requestGeneration.current === generation) {
+        onError(errorMessage(reason));
+      }
+    } finally {
+      if (requestGeneration.current === generation) setRefreshing(false);
+    }
+  }, [onError]);
+
+  useEffect(() => {
+    void refresh(false);
+    const mediaDevices = navigator.mediaDevices;
+    if (!mediaDevices?.addEventListener) return;
+    const handleDeviceChange = () => void refresh(false);
+    mediaDevices.addEventListener("devicechange", handleDeviceChange);
+    return () => {
+      requestGeneration.current += 1;
+      mediaDevices.removeEventListener("devicechange", handleDeviceChange);
+    };
+  }, [refresh]);
+
+  const selectDevice = useCallback(async (
+    kind: SelectableDeviceKind,
+    deviceId: string,
+  ) => {
+    if (!validDeviceId(deviceId)) return;
+    setSwitching(kind);
+    onError(null);
+    try {
+      const switched = await room.switchActiveDevice(
+        kind,
+        deviceId,
+        deviceId !== "default",
+      );
+      if (!switched) throw new Error("Device switch was rejected");
+      onChange(kind, deviceId);
+    } catch {
+      onError(mediaDeviceMessage(kind));
+    } finally {
+      setSwitching(null);
+    }
+  }, [onChange, onError, room]);
+
+  const audioOutputSupported = supportsAudioOutputSelection();
+  const rows = [
+    {
+      kind: "audioinput" as const,
+      label: "Микрофон",
+      selected: preferences.audioInput,
+      supported: true,
+    },
+    {
+      kind: "audiooutput" as const,
+      label: "Динамики",
+      selected: preferences.audioOutput,
+      supported: audioOutputSupported,
+    },
+    {
+      kind: "videoinput" as const,
+      label: "Камера",
+      selected: preferences.videoInput,
+      supported: true,
+    },
+  ];
+
+  return (
+    <div
+      id={id}
+      className="call-device-settings"
+      role="dialog"
+      aria-label="Устройства звонка"
+    >
+      <header>
+        <strong>Устройства</strong>
+        <button
+          type="button"
+          className="call-device-settings__refresh"
+          aria-label="Разрешить доступ и обновить устройства"
+          title="Разрешить доступ и обновить устройства"
+          disabled={disabled || refreshing || switching !== null}
+          onClick={() => void refresh(true)}
+        >
+          <RefreshCw className={refreshing ? "spin" : undefined} size={15} />
+        </button>
+      </header>
+      {rows.map((row) => {
+        const options = deviceOptions(
+          row.kind,
+          devices.filter((device) => device.kind === row.kind),
+          row.selected,
+        );
+        return (
+          <label key={row.kind}>
+            <span>{row.label}</span>
+            <select
+              aria-label={row.label}
+              value={row.supported ? row.selected : "unsupported"}
+              disabled={disabled || switching !== null || !row.supported}
+              onChange={(event) => void selectDevice(row.kind, event.target.value)}
+            >
+              {!row.supported && <option value="unsupported">Не поддерживается</option>}
+              {row.supported && options.map((option) => (
+                <option key={option.id} value={option.id}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
 function ActiveCall({
   mediaError,
   onMediaError,
   onLeave,
+  devicePreferences,
+  onDevicePreferenceChange,
+  profile,
+  initialProfileKey,
+  updateParticipantProfile,
 }: {
   mediaError: string | null;
   onMediaError: (message: string | null) => void;
   onLeave: () => void;
+  devicePreferences: CallDevicePreferences;
+  onDevicePreferenceChange: (kind: SelectableDeviceKind, deviceId: string) => void;
+  profile?: CollaborationProfile;
+  initialProfileKey: string | null;
+  updateParticipantProfile?: (profile: CollaborationProfile) => Promise<void>;
 }) {
   const room = useRoomContext();
   const connectionState = useConnectionState();
@@ -129,9 +396,102 @@ function ActiveCall({
   const screenTracks = useTracks([Track.Source.ScreenShare], { onlySubscribed: false });
   const [busyControl, setBusyControl] = useState<ControlKind | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsId = useId();
   const frameRef = useRef<HTMLDivElement>(null);
+  const settingsAreaRef = useRef<HTMLDivElement>(null);
+  const settingsButtonRef = useRef<HTMLButtonElement>(null);
+  const profileUpdateMounted = useRef(true);
+  const profileUpdateConnected = useRef(
+    connectionState === ConnectionState.Connected,
+  );
+  const profileUpdateEverConnected = useRef(
+    connectionState === ConnectionState.Connected,
+  );
+  const profileUpdateRunning = useRef(false);
+  const appliedProfileKey = useRef(initialProfileKey);
+  const desiredProfile = useRef(profile ? {
+    profile,
+    key: collaborationProfileKey(profile)!,
+  } : null);
+  const updateProfileRef = useRef(updateParticipantProfile);
+  const profileErrorRef = useRef(onMediaError);
   const localIdentity = localParticipant.identity;
   const remoteCount = participants.filter((participant) => participant.identity !== localIdentity).length;
+
+  const flushProfileUpdate = useCallback(async () => {
+    if (profileUpdateRunning.current) return;
+    profileUpdateRunning.current = true;
+    let failedProfileKey: string | null = null;
+    try {
+      while (
+        profileUpdateMounted.current
+        && profileUpdateConnected.current
+      ) {
+        const desired = desiredProfile.current;
+        const updateProfile = updateProfileRef.current;
+        if (
+          !desired
+          || !updateProfile
+          || desired.key === appliedProfileKey.current
+        ) {
+          break;
+        }
+        try {
+          await updateProfile(desired.profile);
+        } catch (reason) {
+          failedProfileKey = desired.key;
+          if (profileUpdateMounted.current) {
+            profileErrorRef.current(errorMessage(reason));
+          }
+          break;
+        }
+        if (profileUpdateMounted.current) {
+          appliedProfileKey.current = desired.key;
+        }
+      }
+    } finally {
+      profileUpdateRunning.current = false;
+      const pending = desiredProfile.current;
+      if (
+        profileUpdateMounted.current
+        && profileUpdateConnected.current
+        && pending
+        && pending.key !== appliedProfileKey.current
+        && pending.key !== failedProfileKey
+      ) {
+        void flushProfileUpdate();
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    profileUpdateMounted.current = true;
+    updateProfileRef.current = updateParticipantProfile;
+    profileErrorRef.current = onMediaError;
+    desiredProfile.current = profile ? {
+      profile,
+      key: collaborationProfileKey(profile)!,
+    } : null;
+    const connected = connectionState === ConnectionState.Connected;
+    if (
+      connected
+      && !profileUpdateConnected.current
+      && profileUpdateEverConnected.current
+    ) {
+      appliedProfileKey.current = null;
+    }
+    if (connected) profileUpdateEverConnected.current = true;
+    profileUpdateConnected.current = connected;
+    if (profileUpdateConnected.current) void flushProfileUpdate();
+  }, [connectionState, flushProfileUpdate, onMediaError, profile, updateParticipantProfile]);
+
+  useEffect(() => {
+    profileUpdateMounted.current = true;
+    return () => {
+      profileUpdateMounted.current = false;
+    };
+  }, []);
 
   const { mainTrack, pipTrack, isSharing } = useMemo(() => {
     const remoteScreen = screenTracks.find((track) => track.participant.identity !== localIdentity);
@@ -151,6 +511,31 @@ function ActiveCall({
     return () => document.removeEventListener("fullscreenchange", updateFullscreen);
   }, []);
 
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (
+        event.target instanceof Node
+        && !settingsAreaRef.current?.contains(event.target)
+        && !settingsButtonRef.current?.contains(event.target)
+      ) {
+        setSettingsOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setSettingsOpen(false);
+      settingsButtonRef.current?.focus();
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [settingsOpen]);
+
   const toggleMedia = useCallback(async (kind: ControlKind) => {
     setBusyControl(kind);
     onMediaError(null);
@@ -160,10 +545,12 @@ function ActiveCall({
       if (kind === "screen") {
         await localParticipant.setScreenShareEnabled(!isScreenShareEnabled, isScreenShareEnabled ? undefined : {
           audio: true,
+          video: true,
           contentHint: "detail",
-          selfBrowserSurface: "exclude",
+          selfBrowserSurface: "include",
           surfaceSwitching: "include",
           systemAudio: "include",
+          preferCurrentTab: false,
         });
       }
     } catch (reason) {
@@ -227,6 +614,19 @@ function ActiveCall({
         </div>
       )}
 
+      <div ref={settingsAreaRef} className="call-device-settings-area">
+        {settingsOpen && (
+          <CallDeviceSettings
+            id={settingsId}
+            room={room}
+            preferences={devicePreferences}
+            disabled={controlsDisabled || busyControl !== null}
+            onChange={onDevicePreferenceChange}
+            onError={onMediaError}
+          />
+        )}
+      </div>
+
       <div className="call-controls" aria-label="Управление звонком">
         <CallControl
           active={isMicrophoneEnabled}
@@ -247,7 +647,7 @@ function ActiveCall({
         <CallControl
           active={isScreenShareEnabled}
           disabled={controlsDisabled || busyControl !== null || !screenShareSupported}
-          label={screenShareSupported ? (isScreenShareEnabled ? "Остановить демонстрацию" : "Показать экран") : "Демонстрация экрана недоступна"}
+          label={screenShareSupported ? (isScreenShareEnabled ? "Остановить демонстрацию" : "Выбрать экран") : "Демонстрация экрана недоступна"}
           onClick={() => void toggleMedia("screen")}
         >
           {busyControl === "screen" ? <LoaderCircle className="spin" size={18} /> : <MonitorUp size={18} />}
@@ -255,6 +655,19 @@ function ActiveCall({
         <CallControl active={isFullscreen} label={isFullscreen ? "Свернуть звонок" : "Развернуть звонок"} onClick={() => void toggleFullscreen()}>
           <Maximize2 size={18} />
         </CallControl>
+        <button
+          ref={settingsButtonRef}
+          type="button"
+          className={`call-control${settingsOpen ? " is-active" : ""}`}
+          aria-label="Настроить устройства"
+          title="Настроить устройства"
+          aria-expanded={settingsOpen}
+          aria-controls={settingsId}
+          disabled={controlsDisabled || busyControl !== null}
+          onClick={() => setSettingsOpen((current) => !current)}
+        >
+          <Settings size={18} />
+        </button>
         <CallControl danger label="Покинуть звонок" onClick={() => { void room.disconnect(); onLeave(); }}>
           <PhoneOff size={18} />
         </CallControl>
@@ -267,13 +680,17 @@ function ActiveCall({
 
 export function CallWorkspace({
   requestCredentials,
+  profile,
+  updateParticipantProfile,
   autoJoin = false,
   unavailable,
 }: CallWorkspaceProps) {
   const [stage, setStage] = useState<CallStage>("idle");
   const [credentials, setCredentials] = useState<CallCredentials | null>(null);
+  const [initialProfileKey, setInitialProfileKey] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [mediaError, setMediaError] = useState<string | null>(null);
+  const [devicePreferences, setDevicePreferences] = useState(readDevicePreferences);
   const intentionalLeave = useRef(false);
   const autoJoinAttempted = useRef(false);
 
@@ -282,20 +699,24 @@ export function CallWorkspace({
     setStage("requesting");
     setError(null);
     setMediaError(null);
+    const requestedProfileKey = collaborationProfileKey(profile);
     try {
       const result = await requestCredentials();
       setCredentials(result);
+      setInitialProfileKey(requestedProfileKey);
       setStage("active");
     } catch (reason) {
       setCredentials(null);
+      setInitialProfileKey(null);
       setError(errorMessage(reason));
       setStage("idle");
     }
-  }, [requestCredentials]);
+  }, [profile, requestCredentials]);
 
   const leave = useCallback(() => {
     intentionalLeave.current = true;
     setCredentials(null);
+    setInitialProfileKey(null);
     setMediaError(null);
     setStage("left");
   }, []);
@@ -304,11 +725,27 @@ export function CallWorkspace({
     const message = errorMessage(reason);
     if (reason instanceof ConnectionError) {
       setCredentials(null);
+      setInitialProfileKey(null);
       setError(message);
       setStage("disconnected");
       return;
     }
     setMediaError(message);
+  }, []);
+
+  const changeDevicePreference = useCallback((
+    kind: SelectableDeviceKind,
+    deviceId: string,
+  ) => {
+    setDevicePreferences((current) => {
+      const next = kind === "audioinput"
+        ? { ...current, audioInput: deviceId }
+        : kind === "audiooutput"
+          ? { ...current, audioOutput: deviceId }
+          : { ...current, videoInput: deviceId };
+      writeDevicePreferences(next);
+      return next;
+    });
   }, []);
 
   useEffect(() => {
@@ -350,7 +787,7 @@ export function CallWorkspace({
           {interrupted ? <AlertTriangle size={24} /> : <Video size={25} />}
         </div>
         <strong>{interrupted ? "Связь прервалась" : left ? "Вы вышли из звонка" : "Видеозвонок"}</strong>
-        <span>{interrupted ? "Подключитесь повторно" : left ? "Можно вернуться в любой момент" : "Камера и микрофон включатся после входа"}</span>
+        <span>{interrupted ? "Подключитесь повторно" : left ? "Можно вернуться в любой момент" : "Камера и микрофон после входа выключены"}</span>
         {error && <div className="call-lobby-error" role="alert">{error}</div>}
         <button type="button" className="call-join-button" disabled={stage === "requesting"} onClick={() => void join()}>
           {stage === "requesting" ? <LoaderCircle className="spin" size={17} /> : left || interrupted ? <RotateCcw size={17} /> : <Video size={17} />}
@@ -367,24 +804,48 @@ export function CallWorkspace({
       token={credentials.token}
       serverUrl={credentials.url}
       connect
-      audio
-      video
-      options={{ adaptiveStream: true, dynacast: true }}
+      audio={false}
+      video={false}
+      options={{
+        adaptiveStream: true,
+        dynacast: true,
+        audioCaptureDefaults: { deviceId: devicePreferences.audioInput },
+        videoCaptureDefaults: { deviceId: devicePreferences.videoInput },
+        ...(supportsAudioOutputSelection()
+          ? { audioOutput: { deviceId: devicePreferences.audioOutput } }
+          : {}),
+      }}
       onError={handleRoomError}
       onMediaDeviceFailure={(_failure, kind) => setMediaError(mediaDeviceMessage(kind))}
       onDisconnected={() => {
         setCredentials(null);
+        setInitialProfileKey(null);
         setStage(intentionalLeave.current ? "left" : "disconnected");
       }}
     >
-      <ActiveCall mediaError={mediaError} onMediaError={setMediaError} onLeave={leave} />
+      <ActiveCall
+        mediaError={mediaError}
+        onMediaError={setMediaError}
+        onLeave={leave}
+        devicePreferences={devicePreferences}
+        onDevicePreferenceChange={changeDevicePreference}
+        profile={profile}
+        initialProfileKey={initialProfileKey}
+        updateParticipantProfile={updateParticipantProfile}
+      />
     </LiveKitRoom>
   );
 }
 
-export function LessonCall({ lessonId, status }: LessonCallProps) {
+export function LessonCall({ lessonId, status, profile }: LessonCallProps) {
   const requestCredentials = useCallback(
-    () => api.lessons.callToken(lessonId),
+    () => api.lessons.callToken(lessonId, profile),
+    [lessonId, profile],
+  );
+  const updateParticipantProfile = useCallback(
+    (nextProfile: CollaborationProfile) => (
+      api.lessons.updateCallProfile(lessonId, nextProfile)
+    ),
     [lessonId],
   );
   const unavailable = status === "completed"
@@ -403,6 +864,8 @@ export function LessonCall({ lessonId, status }: LessonCallProps) {
   return (
     <CallWorkspace
       requestCredentials={requestCredentials}
+      profile={profile}
+      updateParticipantProfile={updateParticipantProfile}
       unavailable={unavailable}
     />
   );

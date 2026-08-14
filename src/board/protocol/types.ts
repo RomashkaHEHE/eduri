@@ -20,6 +20,7 @@ export enum BoardCapability {
   ASSET_CONTROL = 1 << 2,
   RECOVERY_FORK = 1 << 3,
   PAGE_SHARDING = 1 << 4,
+  PROFILE_UPDATE = 1 << 5,
 }
 
 export const KNOWN_BOARD_CAPABILITIES =
@@ -27,7 +28,8 @@ export const KNOWN_BOARD_CAPABILITIES =
   BoardCapability.AWARENESS |
   BoardCapability.ASSET_CONTROL |
   BoardCapability.RECOVERY_FORK |
-  BoardCapability.PAGE_SHARDING;
+  BoardCapability.PAGE_SHARDING |
+  BoardCapability.PROFILE_UPDATE;
 
 export enum BoardPermission {
   READ = 1 << 0,
@@ -45,6 +47,8 @@ export enum BoardControlCode {
   RATE_LIMITED = 8,
   STORAGE_ERROR = 9,
   SERVER_ERROR = 10,
+  PROFILE_UPDATE = 11,
+  PROFILE_UPDATED = 12,
 }
 
 export type BoardMessageId = Uint8Array;

@@ -4,6 +4,7 @@ import {
   CODE_TEST_TIMEOUT_DEFAULT_MS,
   CODE_TEST_TIMEOUT_MAX_MS,
   CODE_TEST_TIMEOUT_MIN_MS,
+  CODE_WORKSPACE_MAIN_ENTRY_ID,
   CODE_WORKSPACE_MAX_DEPTH,
   CODE_WORKSPACE_MAX_PATH_CODE_UNITS,
   CodeWorkspaceError,
@@ -17,7 +18,9 @@ import {
   initializeCodeWorkspace,
   listCodeWorkspaceEntries,
   listCodeTestCases,
+  moveCodeWorkspaceEntries,
   moveCodeWorkspaceEntry,
+  removeCodeWorkspaceEntries,
   removeCodeWorkspaceEntry,
   renameCodeWorkspaceEntry,
   replaceCodeWorkspaceText,
@@ -63,6 +66,130 @@ describe("code workspace core", () => {
     expect(listCodeWorkspaceEntries(document)).toEqual([]);
   });
 
+  it("does not remove a folder containing the required main.py", () => {
+    const document = new Y.Doc();
+    initializeCodeWorkspace(document, "seed");
+    const folder = addCodeWorkspaceEntry(document, {
+      id: "source",
+      kind: "folder",
+      name: "source",
+    }, "seed");
+    moveCodeWorkspaceEntry(document, "main-py", folder, "seed");
+
+    expect(() => removeCodeWorkspaceEntry(document, folder, "local"))
+      .toThrowError("main.py cannot be removed");
+    expect(workspaceFilePaths(document).get("main-py")).toBe("source/main.py");
+    expect(codeWorkspaceEntries(document).has(folder)).toBe(true);
+  });
+
+  it("removes overlapping and independent selections in one transaction", () => {
+    const document = new Y.Doc();
+    initializeCodeWorkspace(document, "seed");
+    addCodeWorkspaceEntry(document, {
+      id: "source",
+      kind: "folder",
+      name: "source",
+    }, "seed");
+    addCodeWorkspaceEntry(document, {
+      id: "nested",
+      kind: "folder",
+      parentId: "source",
+      name: "nested",
+    }, "seed");
+    addCodeWorkspaceEntry(document, {
+      id: "source-file",
+      kind: "file",
+      parentId: "nested",
+      name: "source.py",
+    }, "seed");
+    addCodeWorkspaceEntry(document, {
+      id: "other",
+      kind: "folder",
+      name: "other",
+    }, "seed");
+    addCodeWorkspaceEntry(document, {
+      id: "other-file",
+      kind: "file",
+      parentId: "other",
+      name: "other.py",
+    }, "seed");
+    const origin = Object.freeze({ type: "batch-delete" });
+    let transactions = 0;
+    document.on("afterTransaction", (transaction) => {
+      if (transaction.origin === origin) transactions += 1;
+    });
+
+    expect(removeCodeWorkspaceEntries(
+      document,
+      ["nested", "source", "other", "nested", "already-missing"],
+      origin,
+    )).toEqual(["nested", "other", "other-file", "source", "source-file"]);
+    expect(transactions).toBe(1);
+    expect(listCodeWorkspaceEntries(document).map((entry) => entry.id))
+      .toEqual(["main-py"]);
+  });
+
+  it("rejects a batch containing main.py without emitting a partial update", () => {
+    const document = new Y.Doc();
+    initializeCodeWorkspace(document, "seed");
+    addCodeWorkspaceEntry(document, {
+      id: "source",
+      kind: "folder",
+      name: "source",
+    }, "seed");
+    moveCodeWorkspaceEntry(document, "main-py", "source", "seed");
+    addCodeWorkspaceEntry(document, {
+      id: "disposable",
+      kind: "file",
+      name: "disposable.py",
+    }, "seed");
+    const before = Y.encodeStateVector(document);
+    let updates = 0;
+    document.on("update", () => {
+      updates += 1;
+    });
+
+    expect(() => removeCodeWorkspaceEntries(
+      document,
+      ["disposable", "source"],
+      "local",
+    )).toThrowError("main.py cannot be removed");
+    expect(Y.encodeStateVector(document)).toEqual(before);
+    expect(updates).toBe(0);
+    expect(codeWorkspaceEntries(document).has("disposable")).toBe(true);
+    expect(codeWorkspaceEntries(document).has("source")).toBe(true);
+  });
+
+  it("undoes and redoes an entire batch deletion as one history item", () => {
+    const document = new Y.Doc();
+    initializeCodeWorkspace(document, "seed");
+    for (const id of ["first", "second"]) {
+      addCodeWorkspaceEntry(document, {
+        id,
+        kind: "file",
+        name: `${id}.py`,
+      }, "seed");
+    }
+    const origin = Object.freeze({ type: "batch-history" });
+    const undoManager = new Y.UndoManager(codeWorkspaceEntries(document), {
+      trackedOrigins: new Set([origin]),
+    });
+
+    undoManager.stopCapturing();
+    removeCodeWorkspaceEntries(document, ["first", "second"], origin);
+    undoManager.stopCapturing();
+    expect(codeWorkspaceEntries(document).has("first")).toBe(false);
+    expect(codeWorkspaceEntries(document).has("second")).toBe(false);
+
+    undoManager.undo();
+    expect(codeWorkspaceEntries(document).has("first")).toBe(true);
+    expect(codeWorkspaceEntries(document).has("second")).toBe(true);
+    undoManager.redo();
+    expect(codeWorkspaceEntries(document).has("first")).toBe(false);
+    expect(codeWorkspaceEntries(document).has("second")).toBe(false);
+    undoManager.destroy();
+  });
+
   it("moves entries by stable parent ID and prevents cycles", () => {
     const document = new Y.Doc();
     const source = addCodeWorkspaceEntry(document, {
@@ -85,6 +212,265 @@ describe("code workspace core", () => {
     expect(workspaceFilePaths(document).get(file)).toBe("target/main.py");
     expect(() => moveCodeWorkspaceEntry(document, target, file))
       .toThrowError(CodeWorkspaceError);
+  });
+
+  it("moves only the highest selected roots and preserves their subtrees", () => {
+    const document = new Y.Doc();
+    initializeCodeWorkspace(document, "seed");
+    for (const [id, name] of [
+      ["source", "source"],
+      ["target", "target"],
+    ] as const) {
+      addCodeWorkspaceEntry(document, {
+        id,
+        kind: "folder",
+        name,
+      }, "seed");
+    }
+    addCodeWorkspaceEntry(document, {
+      id: "nested",
+      kind: "folder",
+      parentId: "source",
+      name: "nested",
+    }, "seed");
+    addCodeWorkspaceEntry(document, {
+      id: "child",
+      kind: "file",
+      parentId: "nested",
+      name: "child.py",
+    }, "seed");
+    addCodeWorkspaceEntry(document, {
+      id: "loose",
+      kind: "file",
+      name: "loose.py",
+    }, "seed");
+    const origin = Object.freeze({ type: "batch-move" });
+    let transactions = 0;
+    document.on("afterTransaction", (transaction) => {
+      if (transaction.origin === origin) transactions += 1;
+    });
+
+    expect(moveCodeWorkspaceEntries(
+      document,
+      ["child", "source", "nested", "loose", "source"],
+      "target",
+      origin,
+    )).toEqual(["loose", "source"]);
+    expect(transactions).toBe(1);
+    expect(new Map(listCodeWorkspaceEntries(document).map((entry) => (
+      [entry.id, entry.parentId]
+    )))).toEqual(new Map([
+      ["child", "nested"],
+      ["loose", "target"],
+      ["main-py", null],
+      ["nested", "source"],
+      ["source", "target"],
+      ["target", null],
+    ]));
+  });
+
+  it("undoes and redoes an entire batch move as one history item", () => {
+    const document = new Y.Doc();
+    initializeCodeWorkspace(document, "seed");
+    addCodeWorkspaceEntry(document, {
+      id: "target",
+      kind: "folder",
+      name: "target",
+    }, "seed");
+    for (const id of ["first", "second"]) {
+      addCodeWorkspaceEntry(document, {
+        id,
+        kind: "file",
+        name: `${id}.py`,
+      }, "seed");
+    }
+    const origin = Object.freeze({ type: "batch-history" });
+    const undoManager = new Y.UndoManager(codeWorkspaceEntries(document), {
+      trackedOrigins: new Set([origin]),
+    });
+
+    undoManager.stopCapturing();
+    moveCodeWorkspaceEntries(document, ["first", "second"], "target", origin);
+    undoManager.stopCapturing();
+    expect(listCodeWorkspaceEntries(document)
+      .filter((entry) => entry.id === "first" || entry.id === "second")
+      .map((entry) => entry.parentId)).toEqual(["target", "target"]);
+
+    undoManager.undo();
+    expect(listCodeWorkspaceEntries(document)
+      .filter((entry) => entry.id === "first" || entry.id === "second")
+      .map((entry) => entry.parentId)).toEqual([null, null]);
+    undoManager.redo();
+    expect(listCodeWorkspaceEntries(document)
+      .filter((entry) => entry.id === "first" || entry.id === "second")
+      .map((entry) => entry.parentId)).toEqual(["target", "target"]);
+    undoManager.destroy();
+  });
+
+  it("rejects an invalid batch move atomically", () => {
+    const document = new Y.Doc();
+    initializeCodeWorkspace(document, "seed");
+    for (const [id, name] of [
+      ["left", "left"],
+      ["right", "right"],
+      ["target", "target"],
+    ] as const) {
+      addCodeWorkspaceEntry(document, {
+        id,
+        kind: "folder",
+        name,
+      }, "seed");
+    }
+    addCodeWorkspaceEntry(document, {
+      id: "left-file",
+      kind: "file",
+      parentId: "left",
+      name: "answer.py",
+    }, "seed");
+    addCodeWorkspaceEntry(document, {
+      id: "right-file",
+      kind: "file",
+      parentId: "right",
+      name: "ANSWER.py",
+    }, "seed");
+    addCodeWorkspaceEntry(document, {
+      id: "occupied",
+      kind: "file",
+      parentId: "target",
+      name: "occupied.py",
+    }, "seed");
+    addCodeWorkspaceEntry(document, {
+      id: "incoming-occupied",
+      kind: "file",
+      parentId: "left",
+      name: "OCCUPIED.py",
+    }, "seed");
+    const before = Y.encodeStateVector(document);
+    let updates = 0;
+    document.on("update", () => {
+      updates += 1;
+    });
+
+    expect(() => moveCodeWorkspaceEntries(
+      document,
+      ["left-file", "right-file"],
+      "target",
+      "local",
+    )).toThrowError(CodeWorkspaceError);
+    expect(Y.encodeStateVector(document)).toEqual(before);
+    expect(updates).toBe(0);
+    expect(workspaceFilePaths(document).get("left-file")).toBe("left/answer.py");
+    expect(workspaceFilePaths(document).get("right-file")).toBe("right/ANSWER.py");
+
+    expect(() => moveCodeWorkspaceEntries(
+      document,
+      ["left", "missing-entry"],
+      "target",
+      "local",
+    )).toThrowError(CodeWorkspaceError);
+    expect(Y.encodeStateVector(document)).toEqual(before);
+    expect(updates).toBe(0);
+
+    expect(() => moveCodeWorkspaceEntries(
+      document,
+      ["incoming-occupied", "right-file"],
+      "target",
+      "local",
+    )).toThrowError(CodeWorkspaceError);
+    expect(workspaceFilePaths(document).get("right-file")).toBe("right/ANSWER.py");
+    expect(Y.encodeStateVector(document)).toEqual(before);
+    expect(updates).toBe(0);
+  });
+
+  it("rejects a batch when one moved subtree would exceed the path bound", () => {
+    const document = new Y.Doc();
+    initializeCodeWorkspace(document, "seed");
+    let targetId: string | null = null;
+    for (let index = 0; index < 8; index += 1) {
+      const id = `target-${index}`;
+      addCodeWorkspaceEntry(document, {
+        id,
+        kind: "folder",
+        parentId: targetId,
+        name: `${id}-${"x".repeat(110)}`,
+      }, "seed");
+      targetId = id;
+    }
+    addCodeWorkspaceEntry(document, {
+      id: "deep-source",
+      kind: "folder",
+      name: "source",
+    }, "seed");
+    addCodeWorkspaceEntry(document, {
+      id: "deep-child",
+      kind: "file",
+      parentId: "deep-source",
+      name: `${"y".repeat(100)}.py`,
+    }, "seed");
+    addCodeWorkspaceEntry(document, {
+      id: "valid-file",
+      kind: "file",
+      name: "valid.py",
+    }, "seed");
+    const before = Y.encodeStateVector(document);
+    let updates = 0;
+    document.on("update", () => {
+      updates += 1;
+    });
+
+    expect(() => moveCodeWorkspaceEntries(
+      document,
+      ["valid-file", "deep-source"],
+      targetId,
+      "local",
+    )).toThrowError(CodeWorkspaceError);
+    expect(Y.encodeStateVector(document)).toEqual(before);
+    expect(updates).toBe(0);
+    expect(listCodeWorkspaceEntries(document)
+      .find((entry) => entry.id === "valid-file")?.parentId).toBeNull();
+    expect(listCodeWorkspaceEntries(document)
+      .find((entry) => entry.id === "deep-source")?.parentId).toBeNull();
+  });
+
+  it("rejects moving a selected subtree into itself and skips complete no-ops", () => {
+    const document = new Y.Doc();
+    initializeCodeWorkspace(document, "seed");
+    addCodeWorkspaceEntry(document, {
+      id: "source",
+      kind: "folder",
+      name: "source",
+    }, "seed");
+    addCodeWorkspaceEntry(document, {
+      id: "nested",
+      kind: "folder",
+      parentId: "source",
+      name: "nested",
+    }, "seed");
+    const before = Y.encodeStateVector(document);
+    let updates = 0;
+    document.on("update", () => {
+      updates += 1;
+    });
+
+    expect(() => moveCodeWorkspaceEntries(
+      document,
+      ["source", "nested"],
+      "nested",
+      "local",
+    )).toThrowError(CodeWorkspaceError);
+    expect(moveCodeWorkspaceEntries(
+      document,
+      ["source", "nested", "source"],
+      null,
+      "local",
+    )).toEqual([]);
+    expect(removeCodeWorkspaceEntries(
+      document,
+      ["missing-entry", "missing-entry"],
+      "local",
+    )).toEqual([]);
+    expect(Y.encodeStateVector(document)).toEqual(before);
+    expect(updates).toBe(0);
   });
 
   it("rejects traversal, separators, and case-folded sibling collisions", () => {
@@ -162,6 +548,7 @@ describe("code workspace core", () => {
     storedTest.set("comparisonMode", "tokens");
     expect(listCodeTestCases(document)).toEqual([{
       id,
+      entryId: CODE_WORKSPACE_MAIN_ENTRY_ID,
       name: "Пример 1",
       rank: "z:sample-1",
       timeoutMs: CODE_TEST_TIMEOUT_DEFAULT_MS,
@@ -169,6 +556,65 @@ describe("code workspace core", () => {
       expectedOutput: "5",
     }]);
     expect(() => validateCodeWorkspaceDocument(document)).not.toThrow();
+  });
+
+  it("binds each test to a stable file ID and defaults legacy tests to main.py", () => {
+    const document = new Y.Doc();
+    initializeCodeWorkspace(document, "seed");
+    const secondaryId = addCodeWorkspaceEntry(document, {
+      id: "solution-py",
+      kind: "file",
+      name: "solution.py",
+      text: "print(2)\n",
+    }, "seed");
+    const mainTestId = addCodeTestCase(document, {
+      id: "main-test",
+      name: "Main",
+    }, "seed");
+    const secondaryTestId = addCodeTestCase(document, {
+      id: "solution-test",
+      entryId: secondaryId,
+      name: "Solution",
+    }, "seed");
+
+    codeWorkspaceTestCases(document).get(mainTestId)?.delete("entryId");
+    expect(listCodeTestCases(document, CODE_WORKSPACE_MAIN_ENTRY_ID)
+      .map((test) => test.id)).toEqual([mainTestId]);
+    expect(listCodeTestCases(document, secondaryId)).toEqual([
+      expect.objectContaining({ id: secondaryTestId, entryId: secondaryId }),
+    ]);
+
+    renameCodeWorkspaceEntry(document, secondaryId, "renamed.py", "local");
+    expect(listCodeTestCases(document, secondaryId)[0]?.id).toBe(secondaryTestId);
+    expect(removeCodeWorkspaceEntry(document, secondaryId, "local"))
+      .toEqual([secondaryId]);
+    expect(listCodeTestCases(document).map((test) => test.id))
+      .toEqual([mainTestId]);
+  });
+
+  it("preserves valid orphan test bindings from concurrent merges", () => {
+    const document = new Y.Doc();
+    initializeCodeWorkspace(document, "seed");
+    const secondaryId = addCodeWorkspaceEntry(document, {
+      id: "concurrent-py",
+      kind: "file",
+      name: "concurrent.py",
+    }, "seed");
+    const testId = addCodeTestCase(document, {
+      id: "concurrent-test",
+      entryId: secondaryId,
+      name: "Concurrent",
+    }, "seed");
+
+    codeWorkspaceEntries(document).delete(secondaryId);
+    expect(listCodeTestCases(document)).toContainEqual(
+      expect.objectContaining({ id: testId, entryId: secondaryId }),
+    );
+    expect(() => validateCodeWorkspaceDocument(document)).not.toThrow();
+
+    codeWorkspaceTestCases(document).get(testId)?.set("entryId", "../unsafe");
+    expect(() => validateCodeWorkspaceDocument(document))
+      .toThrowError(CodeWorkspaceError);
   });
 
   it("rejects embedded or formatted content in collaborative code and test text", () => {
@@ -301,6 +747,27 @@ describe("code workspace core", () => {
     entry.set("name", "../main.py");
     expect(() => validateCodeWorkspaceDocument(document))
       .toThrowError(CodeWorkspaceError);
+  });
+
+  it("requires main-py to remain a file during structural validation", () => {
+    const missingMain = new Y.Doc();
+    initializeCodeWorkspace(missingMain, "seed");
+    codeWorkspaceEntries(missingMain).delete("main-py");
+    expect(() => validateCodeWorkspaceDocument(missingMain))
+      .toThrowError("main.py is required");
+
+    const folderMain = new Y.Doc();
+    initializeCodeWorkspace(folderMain, "seed");
+    const entries = codeWorkspaceEntries(folderMain);
+    entries.delete("main-py");
+    const folder = new Y.Map<unknown>();
+    folder.set("kind", "folder");
+    folder.set("parentId", null);
+    folder.set("name", "main.py");
+    folder.set("rank", "a0");
+    entries.set("main-py", folder);
+    expect(() => validateCodeWorkspaceDocument(folderMain))
+      .toThrowError("main.py is required");
   });
 
   it("keeps binary file bytes outside the CRDT behind a content identity", () => {

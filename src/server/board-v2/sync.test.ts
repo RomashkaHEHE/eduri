@@ -23,10 +23,13 @@ import type {
 import {
   BOARD_PROTOCOL_LIMITS,
   BOARD_SUBPROTOCOL,
+  BoardCapability,
   BoardControlCode,
   BoardMessageType,
   BoardPermission,
+  decodeBoardProfileUpdatedPayload,
   decodeBoardFrame,
+  encodeBoardProfileUpdatePayload,
   encodeBoardFrame,
   messageIdToHex,
   type BoardFrame,
@@ -50,6 +53,7 @@ import {
 } from "../guestRooms.js";
 import {
   authorizeAwarenessUpdate,
+  BoardAwarenessRegistry,
   encodeAwarenessState,
   parseAwarenessUpdate,
 } from "./sync-awareness.js";
@@ -371,6 +375,7 @@ async function requestTicket(
   harness: SyncHarness,
   session: TestSession,
   lessonId: string,
+  profile?: { readonly displayName: string; readonly color: `#${string}` },
 ): Promise<BoardSyncTicketResponse> {
   const response = await request(harness.httpUrl)
     .post("/api/board-v2/sync-ticket")
@@ -382,6 +387,7 @@ async function requestTicket(
       minSchemaVersion: 1,
       maxSchemaVersion: 1,
       capabilities: BOARD_SYNC_SERVER_CAPABILITIES,
+      ...(profile ? { profile } : {}),
     })
     .expect(200)
     .expect("Cache-Control", "no-store");
@@ -661,8 +667,9 @@ async function authenticateSocket(
   harness: SyncHarness,
   session: TestSession,
   lessonId: string,
+  profile?: { readonly displayName: string; readonly color: `#${string}` },
 ): Promise<AuthenticatedSocket> {
-  const ticket = await requestTicket(harness, session, lessonId);
+  const ticket = await requestTicket(harness, session, lessonId, profile);
   const ws = await openSocket(harness);
   const readyPromise = nextFrame(
     ws,
@@ -958,6 +965,98 @@ describe("authoritative Board awareness", () => {
       identity,
     )).toThrow(/too many values/iu);
   });
+
+  it("preflights every document before committing profile identity updates", () => {
+    const registry = new BoardAwarenessRegistry();
+    const clientId = 45;
+    const previousIdentity = {
+      userId: "real-user",
+      displayName: "Before",
+      role: "tutor" as const,
+      color: "#2563eb",
+    };
+    for (const [documentIdentity, clock] of [
+      ["board:1:manifest", 1],
+      ["board:1:page:default", 0xffff_fffd],
+    ] as const) {
+      registry.accept(
+        documentIdentity,
+        authorizeAwarenessUpdate(
+          encodeAwarenessState(clientId, clock, {
+            cursor: { x: clock === 1 ? 1 : 2, y: 3 },
+          }),
+          clientId,
+          previousIdentity,
+        ),
+      );
+    }
+    const before = new Map([
+      ["board:1:manifest", registry.current("board:1:manifest")],
+      ["board:1:page:default", registry.current("board:1:page:default")],
+    ]);
+
+    expect(() => registry.updateIdentitiesAtomically(
+      ["board:1:manifest", "board:1:page:default"],
+      clientId,
+      { ...previousIdentity, displayName: "After", color: "#d33f49" },
+    )).toThrow(/clock cannot advance/iu);
+    expect(registry.current("board:1:manifest"))
+      .toEqual(before.get("board:1:manifest"));
+    expect(registry.current("board:1:page:default"))
+      .toEqual(before.get("board:1:page:default"));
+  });
+
+  it("commits a prepared profile identity to every document together", () => {
+    const registry = new BoardAwarenessRegistry();
+    const clientId = 46;
+    const previousIdentity = {
+      userId: "real-user",
+      displayName: "Before",
+      role: "tutor" as const,
+      color: "#2563eb",
+    };
+    for (const [documentIdentity, clock] of [
+      ["board:2:manifest", 3],
+      ["board:2:page:default", 8],
+    ] as const) {
+      registry.accept(
+        documentIdentity,
+        authorizeAwarenessUpdate(
+          encodeAwarenessState(clientId, clock, {
+            cursor: { x: clock, y: clock + 1 },
+            selection: [documentIdentity],
+          }),
+          clientId,
+          previousIdentity,
+        ),
+      );
+    }
+
+    const updates = registry.updateIdentitiesAtomically(
+      ["board:2:manifest", "board:2:page:default"],
+      clientId,
+      { ...previousIdentity, displayName: "After", color: "#d33f49" },
+    );
+    for (const [documentIdentity, expectedClock] of [
+      ["board:2:manifest", 4],
+      ["board:2:page:default", 9],
+    ] as const) {
+      const parsed = parseAwarenessUpdate(updates.get(documentIdentity)!);
+      expect(parsed).toMatchObject({
+        clientId,
+        clock: expectedClock,
+        state: {
+          displayName: "After",
+          color: "#d33f49",
+          cursor: { x: expectedClock - 1, y: expectedClock },
+          selection: [documentIdentity],
+        },
+      });
+      expect(registry.current(documentIdentity)).toEqual([
+        updates.get(documentIdentity),
+      ]);
+    }
+  });
 });
 
 describe("Board active-document cache", () => {
@@ -1167,6 +1266,58 @@ describe("Board v2 ticket and raw WebSocket transport", () => {
           error: expect.any(String),
         });
       });
+  });
+
+  it("carries a normalized collaboration profile through ticket authentication", async () => {
+    const fixture = createLessonFixture(harness);
+    await request(harness.httpUrl)
+      .post("/api/board-v2/sync-ticket")
+      .set("Origin", ORIGIN)
+      .set("Cookie", fixture.tutor.cookie)
+      .set("x-csrf-token", fixture.tutor.csrf)
+      .send({
+        lessonId: fixture.lessonId,
+        profile: { displayName: "Tutor\u202eAdmin", color: "#abcdef" },
+      })
+      .expect(400);
+
+    const response = await request(harness.httpUrl)
+      .post("/api/board-v2/sync-ticket")
+      .set("Origin", ORIGIN)
+      .set("Cookie", fixture.tutor.cookie)
+      .set("x-csrf-token", fixture.tutor.csrf)
+      .send({
+        lessonId: fixture.lessonId,
+        profile: { displayName: "  Tutor   Alias ", color: "#ABCDEF" },
+      })
+      .expect(200);
+    const ticket = response.body as BoardSyncTicketResponse;
+    const service = harness.server.eduriContext.boardV2Sync!;
+    const authenticated = service.authenticate({
+      type: BoardMessageType.AUTH,
+      ticket: ticket.ticket,
+      generation: ticket.generation,
+      minSchemaVersion: 1,
+      maxSchemaVersion: 1,
+      capabilities: ticket.capabilities,
+    });
+    expect(authenticated.access).toMatchObject({
+      displayName: "Tutor Alias",
+      color: "#abcdef",
+    });
+    expect(service.reauthorize({
+      boardId: authenticated.access.boardId,
+      generation: authenticated.access.generation,
+      userId: authenticated.access.userId,
+      sessionHash: authenticated.access.sessionHash,
+      profile: {
+        displayName: authenticated.access.displayName,
+        color: authenticated.access.color,
+      },
+    })).toMatchObject({
+      displayName: "Tutor Alias",
+      color: "#abcdef",
+    });
   });
 
   it("returns retryable 429 responses when active ticket caps are reached", async () => {
@@ -2852,6 +3003,7 @@ describe("Board v2 ticket and raw WebSocket transport", () => {
       harness,
       fixture.tutor,
       fixture.lessonId,
+      { displayName: "Tutor Cursor", color: "#a1b2c3" },
     );
     const student = await authenticateSocket(
       harness,
@@ -2883,6 +3035,8 @@ describe("Board v2 ticket and raw WebSocket transport", () => {
     const state = parseAwarenessUpdate((await received).update).state;
     expect(state).toMatchObject({
       userId: fixture.tutorId,
+      displayName: "Tutor Cursor",
+      color: "#a1b2c3",
       role: "tutor",
       cursor: { x: 11, y: 22 },
     });
@@ -2908,6 +3062,509 @@ describe("Board v2 ticket and raw WebSocket transport", () => {
     expect((await control).code).toBe(BoardControlCode.SERVER_ERROR);
     await expect(close).resolves.toBe(4400);
     student.ws.close();
+  });
+
+  it("updates a lesson profile and awareness in place, rejects bad input, and rechecks the session", async () => {
+    const fixture = createLessonFixture(harness);
+    const tutor = await authenticateSocket(
+      harness,
+      fixture.tutor,
+      fixture.lessonId,
+      { displayName: "Tutor Before", color: "#2563eb" },
+    );
+    const student = await authenticateSocket(
+      harness,
+      fixture.student,
+      fixture.lessonId,
+    );
+    await syncDocument(tutor, "manifest");
+    await syncDocument(student, "manifest");
+
+    const initialPresence = nextFrame(
+      student.ws,
+      (frame): frame is Extract<BoardFrame, { type: BoardMessageType.AWARENESS }> =>
+        frame.type === BoardMessageType.AWARENESS
+        && frame.awarenessClientId === tutor.ready.awarenessClientId,
+    );
+    tutor.ws.send(encodeBoardFrame({
+      type: BoardMessageType.AWARENESS,
+      generation: tutor.ticket.generation,
+      docKey: "manifest",
+      awarenessClientId: tutor.ready.awarenessClientId,
+      update: encodeAwarenessState(tutor.ready.awarenessClientId, 1, {
+        cursor: { x: 11, y: 22 },
+        selection: ["shape-a"],
+      }),
+    }));
+    expect(parseAwarenessUpdate((await initialPresence).update).state)
+      .toMatchObject({
+        userId: fixture.tutorId,
+        displayName: "Tutor Before",
+        color: "#2563eb",
+        cursor: { x: 11, y: 22 },
+      });
+
+    const profile = {
+      displayName: "Tutor After",
+      color: "#d33f49" as const,
+    };
+    const messageId = new Uint8Array(randomBytes(16));
+    const result = nextFrame(
+      tutor.ws,
+      (frame): frame is Extract<BoardFrame, { type: BoardMessageType.CONTROL }> =>
+        frame.type === BoardMessageType.CONTROL
+        && frame.code === BoardControlCode.PROFILE_UPDATED,
+    );
+    const selfPresence = nextFrame(
+      tutor.ws,
+      (frame): frame is Extract<BoardFrame, { type: BoardMessageType.AWARENESS }> =>
+        frame.type === BoardMessageType.AWARENESS
+        && frame.awarenessClientId === tutor.ready.awarenessClientId,
+    );
+    const peerPresence = nextFrame(
+      student.ws,
+      (frame): frame is Extract<BoardFrame, { type: BoardMessageType.AWARENESS }> =>
+        frame.type === BoardMessageType.AWARENESS
+        && frame.awarenessClientId === tutor.ready.awarenessClientId,
+    );
+    tutor.ws.send(encodeBoardFrame({
+      type: BoardMessageType.CONTROL,
+      generation: tutor.ticket.generation,
+      code: BoardControlCode.PROFILE_UPDATE,
+      messageId,
+      payload: encodeBoardProfileUpdatePayload(profile),
+    }));
+
+    const acknowledged = await result;
+    expect(messageIdToHex(acknowledged.messageId!)).toBe(messageIdToHex(messageId));
+    expect(decodeBoardProfileUpdatedPayload(acknowledged.payload)).toEqual({
+      accepted: true,
+      profile,
+    });
+    for (const presence of [await selfPresence, await peerPresence]) {
+      expect(presence.awarenessClientId).toBe(tutor.ready.awarenessClientId);
+      expect(parseAwarenessUpdate(presence.update)).toMatchObject({
+        clientId: tutor.ready.awarenessClientId,
+        clock: 2,
+        state: {
+          userId: fixture.tutorId,
+          displayName: "Tutor After",
+          color: "#d33f49",
+          role: "tutor",
+          cursor: { x: 11, y: 22 },
+          selection: ["shape-a"],
+        },
+      });
+    }
+    expect(tutor.ws.readyState).toBe(WebSocket.OPEN);
+    expect(student.ws.readyState).toBe(WebSocket.OPEN);
+
+    const malformedId = new Uint8Array(randomBytes(16));
+    const malformedResult = nextFrame(
+      tutor.ws,
+      (frame): frame is Extract<BoardFrame, { type: BoardMessageType.CONTROL }> =>
+        frame.type === BoardMessageType.CONTROL
+        && frame.code === BoardControlCode.PROFILE_UPDATED,
+    );
+    tutor.ws.send(encodeBoardFrame({
+      type: BoardMessageType.CONTROL,
+      generation: tutor.ticket.generation,
+      code: BoardControlCode.PROFILE_UPDATE,
+      messageId: malformedId,
+      payload: Uint8Array.of(
+        1, 0, 1, 65,
+        35, 122, 122, 122, 122, 122, 122,
+      ),
+    }));
+    expect(decodeBoardProfileUpdatedPayload((await malformedResult).payload))
+      .toEqual({ accepted: false, error: "Profile is invalid" });
+    expect(tutor.ws.readyState).toBe(WebSocket.OPEN);
+
+    const oversizedResult = nextFrame(
+      tutor.ws,
+      (frame): frame is Extract<BoardFrame, { type: BoardMessageType.CONTROL }> =>
+        frame.type === BoardMessageType.CONTROL
+        && frame.code === BoardControlCode.PROFILE_UPDATED,
+    );
+    tutor.ws.send(encodeBoardFrame({
+      type: BoardMessageType.CONTROL,
+      generation: tutor.ticket.generation,
+      code: BoardControlCode.PROFILE_UPDATE,
+      messageId: new Uint8Array(randomBytes(16)),
+      payload: new Uint8Array(251).fill(1),
+    }));
+    expect(decodeBoardProfileUpdatedPayload((await oversizedResult).payload))
+      .toEqual({ accepted: false, error: "Profile is invalid" });
+    expect(tutor.ws.readyState).toBe(WebSocket.OPEN);
+
+    harness.server.eduriContext.db.prepare(
+      "DELETE FROM sessions WHERE session_hash = ?",
+    ).run(fixture.tutor.sessionHash);
+    const revoked = nextFrame(
+      tutor.ws,
+      (frame): frame is Extract<BoardFrame, { type: BoardMessageType.CONTROL }> =>
+        frame.type === BoardMessageType.CONTROL
+        && frame.code === BoardControlCode.SESSION_REVOKED,
+    );
+    const closed = nextClose(tutor.ws);
+    tutor.ws.send(encodeBoardFrame({
+      type: BoardMessageType.CONTROL,
+      generation: tutor.ticket.generation,
+      code: BoardControlCode.PROFILE_UPDATE,
+      messageId: new Uint8Array(randomBytes(16)),
+      payload: Uint8Array.of(1, 0),
+    }));
+    expect((await revoked).code).toBe(BoardControlCode.SESSION_REVOKED);
+    await expect(closed).resolves.toBe(4401);
+    student.ws.close();
+  });
+
+  it("rejects a profile atomically when one of multiple awareness clocks is exhausted", async () => {
+    const fixture = createLessonFixture(harness);
+    const previousProfile = {
+      displayName: "Tutor Before",
+      color: "#2563eb" as const,
+    };
+    const tutor = await authenticateSocket(
+      harness,
+      fixture.tutor,
+      fixture.lessonId,
+      previousProfile,
+    );
+    const student = await authenticateSocket(
+      harness,
+      fixture.student,
+      fixture.lessonId,
+    );
+    const docKeys = ["manifest", tutor.ticket.defaultPageDocKey] as const;
+    for (const docKey of docKeys) {
+      (await syncDocument(tutor, docKey)).destroy();
+      (await syncDocument(student, docKey)).destroy();
+    }
+
+    const clocks = [1, 0xffff_fffe] as const;
+    for (const [index, docKey] of docKeys.entries()) {
+      const received = nextFrame(
+        student.ws,
+        (frame): frame is Extract<BoardFrame, { type: BoardMessageType.AWARENESS }> =>
+          frame.type === BoardMessageType.AWARENESS
+          && frame.docKey === docKey
+          && frame.awarenessClientId === tutor.ready.awarenessClientId,
+      );
+      tutor.ws.send(encodeBoardFrame({
+        type: BoardMessageType.AWARENESS,
+        generation: tutor.ticket.generation,
+        docKey,
+        awarenessClientId: tutor.ready.awarenessClientId,
+        update: encodeAwarenessState(
+          tutor.ready.awarenessClientId,
+          clocks[index]!,
+          { cursor: { x: index + 1, y: index + 2 } },
+        ),
+      }));
+      expect(parseAwarenessUpdate((await received).update).state).toMatchObject({
+        userId: fixture.tutorId,
+        displayName: previousProfile.displayName,
+        color: previousProfile.color,
+      });
+    }
+
+    const messageId = new Uint8Array(randomBytes(16));
+    const result = nextFrame(
+      tutor.ws,
+      (frame): frame is Extract<BoardFrame, { type: BoardMessageType.CONTROL }> =>
+        frame.type === BoardMessageType.CONTROL
+        && frame.code === BoardControlCode.PROFILE_UPDATED,
+    );
+    const noPartialBroadcast = expectNoFrame(
+      student.ws,
+      (frame) =>
+        frame.type === BoardMessageType.AWARENESS
+        && frame.awarenessClientId === tutor.ready.awarenessClientId
+        && parseAwarenessUpdate(frame.update).state?.displayName === "Tutor After",
+      200,
+    );
+    tutor.ws.send(encodeBoardFrame({
+      type: BoardMessageType.CONTROL,
+      generation: tutor.ticket.generation,
+      code: BoardControlCode.PROFILE_UPDATE,
+      messageId,
+      payload: encodeBoardProfileUpdatePayload({
+        displayName: "Tutor After",
+        color: "#d33f49",
+      }),
+    }));
+
+    expect(decodeBoardProfileUpdatedPayload((await result).payload)).toEqual({
+      accepted: false,
+      error: "Profile awareness could not be updated",
+    });
+    await noPartialBroadcast;
+    expect(tutor.ws.readyState).toBe(WebSocket.OPEN);
+
+    const connectionIdentity = nextFrame(
+      student.ws,
+      (frame): frame is Extract<BoardFrame, { type: BoardMessageType.AWARENESS }> =>
+        frame.type === BoardMessageType.AWARENESS
+        && frame.docKey === docKeys[0]
+        && frame.awarenessClientId === tutor.ready.awarenessClientId,
+    );
+    tutor.ws.send(encodeBoardFrame({
+      type: BoardMessageType.AWARENESS,
+      generation: tutor.ticket.generation,
+      docKey: docKeys[0],
+      awarenessClientId: tutor.ready.awarenessClientId,
+      update: encodeAwarenessState(tutor.ready.awarenessClientId, 2, {
+        cursor: { x: 10, y: 20 },
+      }),
+    }));
+    expect(parseAwarenessUpdate((await connectionIdentity).update).state)
+      .toMatchObject({
+        userId: fixture.tutorId,
+        displayName: previousProfile.displayName,
+        color: previousProfile.color,
+        cursor: { x: 10, y: 20 },
+      });
+
+    const observer = await authenticateSocket(
+      harness,
+      fixture.student,
+      fixture.lessonId,
+    );
+    for (const [index, docKey] of docKeys.entries()) {
+      const snapshot = nextFrame(
+        observer.ws,
+        (frame): frame is Extract<BoardFrame, { type: BoardMessageType.AWARENESS }> =>
+          frame.type === BoardMessageType.AWARENESS
+          && frame.docKey === docKey
+          && frame.awarenessClientId === tutor.ready.awarenessClientId,
+      );
+      (await syncDocument(observer, docKey)).destroy();
+      const parsed = parseAwarenessUpdate((await snapshot).update);
+      expect(parsed.clock).toBe(index === 0 ? 2 : clocks[index]);
+      expect(parsed.state).toMatchObject({
+        userId: fixture.tutorId,
+        displayName: previousProfile.displayName,
+        color: previousProfile.color,
+      });
+    }
+    observer.ws.close();
+    tutor.ws.close();
+    student.ws.close();
+  });
+
+  it("treats PROFILE_UPDATE without its negotiated capability as a protocol failure", async () => {
+    const fixture = createLessonFixture(harness);
+    const capabilities =
+      BOARD_SYNC_SERVER_CAPABILITIES & ~BoardCapability.PROFILE_UPDATE;
+    const ticketResponse = await request(harness.httpUrl)
+      .post("/api/board-v2/sync-ticket")
+      .set("Origin", ORIGIN)
+      .set("Cookie", fixture.tutor.cookie)
+      .set("x-csrf-token", fixture.tutor.csrf)
+      .send({
+        lessonId: fixture.lessonId,
+        minSchemaVersion: 1,
+        maxSchemaVersion: 1,
+        capabilities,
+      })
+      .expect(200);
+    const ticket = ticketResponse.body as BoardSyncTicketResponse;
+    const ws = await openSocket(harness);
+    const ready = nextFrame(
+      ws,
+      (frame): frame is Extract<BoardFrame, { type: BoardMessageType.READY }> =>
+        frame.type === BoardMessageType.READY,
+    );
+    ws.send(encodeBoardFrame({
+      type: BoardMessageType.AUTH,
+      ticket: ticket.ticket,
+      generation: ticket.generation,
+      minSchemaVersion: 1,
+      maxSchemaVersion: 1,
+      capabilities,
+    }));
+    expect((await ready).capabilities & BoardCapability.PROFILE_UPDATE).toBe(0);
+
+    const control = nextFrame(
+      ws,
+      (frame): frame is Extract<BoardFrame, { type: BoardMessageType.CONTROL }> =>
+        frame.type === BoardMessageType.CONTROL
+        && frame.code === BoardControlCode.SERVER_ERROR,
+    );
+    const closed = nextClose(ws);
+    ws.send(encodeBoardFrame({
+      type: BoardMessageType.CONTROL,
+      generation: ticket.generation,
+      code: BoardControlCode.PROFILE_UPDATE,
+      messageId: new Uint8Array(randomBytes(16)),
+      payload: encodeBoardProfileUpdatePayload({
+        displayName: "Capability Probe",
+        color: "#0891b2",
+      }),
+    }));
+
+    const failure = await control;
+    expect(failure.messageId).toBeUndefined();
+    expect(JSON.parse(new TextDecoder().decode(failure.payload))).toMatchObject({
+      error: "Profile updates were not negotiated",
+    });
+    await expect(closed).resolves.toBe(4400);
+  });
+
+  it("closes a connection after its profile update rate limit is exceeded", async () => {
+    const fixture = createLessonFixture(harness);
+    const tutor = await authenticateSocket(
+      harness,
+      fixture.tutor,
+      fixture.lessonId,
+    );
+    const profile = {
+      displayName: "Rate Profile",
+      color: "#16825d" as const,
+    };
+
+    for (let index = 0; index < 30; index += 1) {
+      const messageId = new Uint8Array(randomBytes(16));
+      const result = nextFrame(
+        tutor.ws,
+        (frame): frame is Extract<BoardFrame, { type: BoardMessageType.CONTROL }> =>
+          frame.type === BoardMessageType.CONTROL
+          && frame.code === BoardControlCode.PROFILE_UPDATED
+          && frame.messageId !== undefined
+          && messageIdToHex(frame.messageId) === messageIdToHex(messageId),
+      );
+      tutor.ws.send(encodeBoardFrame({
+        type: BoardMessageType.CONTROL,
+        generation: tutor.ticket.generation,
+        code: BoardControlCode.PROFILE_UPDATE,
+        messageId,
+        payload: encodeBoardProfileUpdatePayload(profile),
+      }));
+      expect(decodeBoardProfileUpdatedPayload((await result).payload)).toEqual({
+        accepted: true,
+        profile,
+      });
+    }
+
+    const limitedId = new Uint8Array(randomBytes(16));
+    const control = nextFrame(
+      tutor.ws,
+      (frame): frame is Extract<BoardFrame, { type: BoardMessageType.CONTROL }> =>
+        frame.type === BoardMessageType.CONTROL
+        && frame.code === BoardControlCode.RATE_LIMITED,
+    );
+    const closed = nextClose(tutor.ws);
+    tutor.ws.send(encodeBoardFrame({
+      type: BoardMessageType.CONTROL,
+      generation: tutor.ticket.generation,
+      code: BoardControlCode.PROFILE_UPDATE,
+      messageId: limitedId,
+      payload: encodeBoardProfileUpdatePayload(profile),
+    }));
+
+    const limited = await control;
+    expect(messageIdToHex(limited.messageId!)).toBe(messageIdToHex(limitedId));
+    const payload = JSON.parse(new TextDecoder().decode(limited.payload)) as {
+      retryAfterMs: number;
+    };
+    expect(payload).toMatchObject({
+      error: "Profile update rate exceeded",
+      reason: "RATE_LIMITED",
+      retryable: true,
+      retryAfterMs: expect.any(Number),
+    });
+    expect(payload.retryAfterMs).toBeGreaterThan(0);
+    expect(payload.retryAfterMs).toBeLessThanOrEqual(10_000);
+    await expect(closed).resolves.toBe(4429);
+  });
+
+  it("updates a guest Board profile on the authenticated socket", async () => {
+    const created = await request(harness.httpUrl)
+      .post("/api/guest/rooms")
+      .set("Origin", ORIGIN)
+      .send({ initialResource: "board" })
+      .expect(201);
+    const shareId = created.body.room.shareId as string;
+    const ticketResponse = await request(harness.httpUrl)
+      .post(`/api/guest/rooms/${shareId}/board-ticket`)
+      .set("Origin", ORIGIN)
+      .send({
+        deviceId: "guest-profile-update-device-0000000000",
+        minSchemaVersion: 1,
+        maxSchemaVersion: 1,
+        capabilities: BOARD_SYNC_SERVER_CAPABILITIES,
+        profile: { displayName: "Guest Before", color: "#2563eb" },
+      })
+      .expect(200);
+    const ticket = ticketResponse.body as BoardSyncTicketResponse;
+    const ws = await openSocket(harness);
+    const readyPromise = nextFrame(
+      ws,
+      (frame): frame is Extract<BoardFrame, { type: BoardMessageType.READY }> =>
+        frame.type === BoardMessageType.READY,
+    );
+    ws.send(encodeBoardFrame({
+      type: BoardMessageType.AUTH,
+      ticket: ticket.ticket,
+      generation: ticket.generation,
+      minSchemaVersion: 1,
+      maxSchemaVersion: 1,
+      capabilities: ticket.capabilities,
+    }));
+    const ready = await readyPromise;
+    const authenticated = { ws, ready, ticket };
+    await syncDocument(authenticated, ticket.defaultPageDocKey);
+    ws.send(encodeBoardFrame({
+      type: BoardMessageType.AWARENESS,
+      generation: ticket.generation,
+      docKey: ticket.defaultPageDocKey,
+      awarenessClientId: ready.awarenessClientId,
+      update: encodeAwarenessState(ready.awarenessClientId, 1, {
+        cursor: { x: 4, y: 8 },
+      }),
+    }));
+
+    const profile = {
+      displayName: "Guest After",
+      color: "#0891b2" as const,
+    };
+    const result = nextFrame(
+      ws,
+      (frame): frame is Extract<BoardFrame, { type: BoardMessageType.CONTROL }> =>
+        frame.type === BoardMessageType.CONTROL
+        && frame.code === BoardControlCode.PROFILE_UPDATED,
+    );
+    const presence = nextFrame(
+      ws,
+      (frame): frame is Extract<BoardFrame, { type: BoardMessageType.AWARENESS }> =>
+        frame.type === BoardMessageType.AWARENESS
+        && frame.awarenessClientId === ready.awarenessClientId,
+    );
+    ws.send(encodeBoardFrame({
+      type: BoardMessageType.CONTROL,
+      generation: ticket.generation,
+      code: BoardControlCode.PROFILE_UPDATE,
+      messageId: new Uint8Array(randomBytes(16)),
+      payload: encodeBoardProfileUpdatePayload(profile),
+    }));
+
+    expect(decodeBoardProfileUpdatedPayload((await result).payload)).toEqual({
+      accepted: true,
+      profile,
+    });
+    expect(parseAwarenessUpdate((await presence).update)).toMatchObject({
+      clientId: ready.awarenessClientId,
+      clock: 2,
+      state: {
+        displayName: "Guest After",
+        color: "#0891b2",
+        role: "guest",
+        cursor: { x: 4, y: 8 },
+      },
+    });
+    expect(ws.readyState).toBe(WebSocket.OPEN);
+    ws.close();
   });
 
   it("rechecks the session on every UPDATE and reconnects completed lessons read-only", async () => {

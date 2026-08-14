@@ -1,4 +1,4 @@
-import { createHmac, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 
 import * as decoding from "lib0/decoding";
 import * as Y from "yjs";
@@ -19,6 +19,10 @@ import {
   BoardPermission,
   type AuthFrame,
 } from "../../board/protocol/index.js";
+import {
+  COLLABORATION_PROFILE_COLORS,
+  type CollaborationProfile,
+} from "../../shared/collaborationProfile.js";
 import { nowIso, safeEqual } from "../security.js";
 import type { AppContext, AuthContext, Role } from "../types.js";
 import {
@@ -52,7 +56,8 @@ export const BOARD_SYNC_TICKET_PATH = "/api/board-v2/sync-ticket";
 export const BOARD_SYNC_SERVER_CAPABILITIES =
   BoardCapability.CHUNKING
   | BoardCapability.AWARENESS
-  | BoardCapability.PAGE_SHARDING;
+  | BoardCapability.PAGE_SHARDING
+  | BoardCapability.PROFILE_UPDATE;
 
 const MANIFEST_DOCUMENT_KEY = "manifest";
 const DEFAULT_PAGE_NAME = "Страница 1";
@@ -97,6 +102,7 @@ export interface BoardSyncTicketRequest {
   minSchemaVersion: number;
   maxSchemaVersion: number;
   capabilities: number;
+  profile?: CollaborationProfile;
 }
 
 export interface GuestBoardSyncTicketRequest {
@@ -105,6 +111,7 @@ export interface GuestBoardSyncTicketRequest {
   minSchemaVersion: number;
   maxSchemaVersion: number;
   capabilities: number;
+  profile?: CollaborationProfile;
 }
 
 export interface BoardSyncTicketResponse {
@@ -139,6 +146,7 @@ export interface BoardSyncAccess {
   userId: string;
   sessionHash: string;
   displayName: string;
+  color: `#${string}`;
   role: Exclude<Role, "admin"> | "guest";
 }
 
@@ -152,6 +160,7 @@ export interface BoardSyncConnectionIdentity {
   generation: number;
   userId: string;
   sessionHash: string;
+  profile?: CollaborationProfile;
 }
 
 export interface AuthorizedBoardMetrics {
@@ -234,6 +243,26 @@ function permissionsForLesson(
     | (status === "scheduled" || status === "active"
       ? BoardPermission.EDIT
       : 0);
+}
+
+function defaultCollaborationProfile(
+  stableId: string,
+  displayName: string,
+): CollaborationProfile {
+  const digest = createHash("sha256").update(stableId).digest();
+  return {
+    displayName,
+    color: COLLABORATION_PROFILE_COLORS[
+      digest[0] % COLLABORATION_PROFILE_COLORS.length
+    ],
+  };
+}
+
+function withCollaborationProfile(
+  access: BoardSyncAccess,
+  profile?: CollaborationProfile,
+): BoardSyncAccess {
+  return profile ? { ...access, ...profile } : access;
 }
 
 function guestBoardIdentity(
@@ -540,6 +569,10 @@ export class BoardSyncService {
       );
     }
     const permissions = permissionsForLesson(bootstrapped.lesson.status);
+    const profile = request.profile ?? defaultCollaborationProfile(
+      auth.user.id,
+      auth.user.displayName,
+    );
     const issued = this.issueBoardTicket({
       boardId: bootstrapped.board.id,
       lessonId: bootstrapped.lesson.id,
@@ -549,6 +582,7 @@ export class BoardSyncService {
       minSchemaVersion: request.minSchemaVersion,
       maxSchemaVersion: request.maxSchemaVersion,
       capabilities,
+      profile,
     });
     const defaultPageDocKey = `page:${bootstrapped.pageId}`;
     return {
@@ -669,6 +703,10 @@ export class BoardSyncService {
       request.shareKey,
       request.deviceId,
     );
+    const profile = request.profile ?? defaultCollaborationProfile(
+      identity.userId,
+      identity.displayName,
+    );
     const issued = this.issueBoardTicket({
       boardId: bootstrapped.board.id,
       lessonId: `guest-room:${roomLookup.room.id}`,
@@ -678,6 +716,7 @@ export class BoardSyncService {
       minSchemaVersion: request.minSchemaVersion,
       maxSchemaVersion: request.maxSchemaVersion,
       capabilities,
+      profile,
     });
     const defaultPageDocKey = `page:${bootstrapped.pageId}`;
     return {
@@ -718,12 +757,12 @@ export class BoardSyncService {
     ) {
       fail("INVALID_TICKET", "AUTH fields do not match the ticket scope");
     }
-    const access = this.requireBoardAccess({
+    const access = withCollaborationProfile(this.requireBoardAccess({
       boardId: scope.boardId,
       generation: scope.generation,
       userId: scope.userId,
       sessionHash: scope.sessionHash,
-    });
+    }), scope.profile);
     if (
       access.schemaVersion < frame.minSchemaVersion
       || access.schemaVersion > frame.maxSchemaVersion
@@ -737,7 +776,10 @@ export class BoardSyncService {
     identity: BoardSyncConnectionIdentity,
     requireEdit = false,
   ): BoardSyncAccess {
-    const access = this.requireBoardAccess(identity);
+    const access = withCollaborationProfile(
+      this.requireBoardAccess(identity),
+      identity.profile,
+    );
     if (requireEdit && (access.permissions & BoardPermission.EDIT) === 0) {
       fail("READ_ONLY", "Board is read-only");
     }
@@ -1104,6 +1146,7 @@ export class BoardSyncService {
       userId: actor.id,
       sessionHash: actor.session_hash,
       displayName: actor.display_name,
+      color: defaultCollaborationProfile(actor.id, actor.display_name).color,
       role: actor.role as Exclude<Role, "admin">,
     };
   }
@@ -1170,6 +1213,7 @@ export class BoardSyncService {
       userId: identity.userId,
       sessionHash: identity.sessionHash,
       displayName: `Гость ${identity.userId.slice(-4)}`,
+      color: defaultCollaborationProfile(identity.userId, "").color,
       role: "guest",
     };
   }

@@ -24,22 +24,10 @@ import { CODE_SYNC_LIMITS } from "../../code/protocol/constants.js";
 const PARTICIPANT_COLOR = /^#[0-9a-f]{6}$/iu;
 const FALLBACK_COLOR = "#2563eb" as const;
 const MAX_COLLIDING_CARET_OFFSET = 5;
-const NATIVE_REMOTE_CARET_HOVER_STYLES = `
-@media (hover: hover) {
-  [data-eduri-native-remote-hitbox="true"] {
-    pointer-events: auto !important;
-  }
-
-  [data-eduri-native-remote-hitbox="true"]:hover
-    + [data-eduri-native-remote-label="true"] {
-    opacity: 1 !important;
-    transition-delay: 0s !important;
-    visibility: visible !important;
-  }
-
-  [data-eduri-native-remote-hitbox="true"]:hover {
-    cursor: text;
-  }
+const NATIVE_REMOTE_CARET_OVERLAY_STYLES = `
+[data-eduri-native-remote-overlay="true"],
+[data-eduri-native-remote-overlay="true"] * {
+  pointer-events: none !important;
 }`;
 
 export interface NativeInputPresencePeer {
@@ -73,6 +61,8 @@ export interface UseNativeInputPresenceOptions {
 
 export interface UseNativeInputPresenceResult {
   readonly containerRef: RefCallback<HTMLDivElement>;
+  readonly onContainerPointerMove: PointerEventHandler<HTMLDivElement>;
+  readonly onContainerPointerLeave: PointerEventHandler<HTMLDivElement>;
   readonly inputProps: NativeInputPresenceBinding;
   readonly overlay: ReactNode;
 }
@@ -255,19 +245,23 @@ function PresenceCaret({
   color,
   displayName,
   collisionOffset,
+  hovered,
 }: {
   readonly color: `#${string}`;
   readonly displayName: string;
   readonly collisionOffset: number;
+  readonly hovered: boolean;
 }) {
   const caretLeft = -1
     + Math.min(collisionOffset, MAX_COLLIDING_CARET_OFFSET) * 2;
   return (
     <span
       data-eduri-native-remote-caret="true"
+      data-hovered={hovered ? "true" : "false"}
       style={{
         display: "inline-block",
         height: "1em",
+        pointerEvents: "none",
         position: "relative",
         verticalAlign: "text-bottom",
         width: 0,
@@ -280,6 +274,7 @@ function PresenceCaret({
           borderRadius: 1,
           height: "1.25em",
           left: caretLeft,
+          pointerEvents: "none",
           position: "absolute",
           top: "-0.15em",
           width: 2,
@@ -311,15 +306,17 @@ function PresenceCaret({
           left: caretLeft,
           lineHeight: "12px",
           maxWidth: 120,
-          opacity: 0,
+          opacity: hovered ? 1 : 0,
           overflow: "hidden",
           padding: "0 3px",
           pointerEvents: "none",
           position: "absolute",
           textOverflow: "ellipsis",
           top: "-1.45em",
-          transition: "opacity 120ms ease, visibility 0s linear 120ms",
-          visibility: "hidden",
+          transition: hovered
+            ? "opacity 120ms ease"
+            : "opacity 120ms ease, visibility 0s linear 120ms",
+          visibility: hovered ? "visible" : "hidden",
           whiteSpace: "nowrap",
           zIndex: 2,
         }}
@@ -335,11 +332,13 @@ function PresenceText({
   color,
   displayName,
   collisionOffset,
+  hovered,
 }: {
   readonly input: CodeScalarInputPresence;
   readonly color: `#${string}`;
   readonly displayName: string;
   readonly collisionOffset: number;
+  readonly hovered: boolean;
 }) {
   const { draft, selection } = input;
   const selectionStart = Math.min(selection.anchor, selection.head);
@@ -361,6 +360,7 @@ function PresenceText({
           color={color}
           displayName={displayName}
           collisionOffset={collisionOffset}
+          hovered={hovered}
         />,
       );
     }
@@ -398,6 +398,12 @@ export function useNativeInputPresence({
   const targetRef = useRef(target);
   const publishRef = useRef(publish);
   const [metrics, setMetrics] = useState<MirrorMetrics | null>(null);
+  const [hoveredPeerId, setHoveredPeerId] = useState<string | null>(null);
+  const lastPointerRef = useRef<{
+    readonly clientX: number;
+    readonly clientY: number;
+    readonly pointerType: string;
+  } | null>(null);
   targetRef.current = target;
   publishRef.current = publish;
 
@@ -445,6 +451,59 @@ export function useNativeInputPresence({
     containerElementRef.current = element;
     updateMetrics();
   }, [updateMetrics]);
+
+  const refreshCaretHover = useCallback(() => {
+    const container = containerElementRef.current;
+    const pointer = lastPointerRef.current;
+    const hoverQuery = container?.ownerDocument.defaultView
+      ?.matchMedia?.("(hover: hover)");
+    let nextPeerId: string | null = null;
+    if (
+      container
+      && pointer
+      && pointer.pointerType !== "touch"
+      && hoverQuery?.matches
+    ) {
+      const hitboxes = [...container.querySelectorAll<HTMLElement>(
+        '[data-eduri-native-remote-hitbox="true"]',
+      )];
+      for (let index = hitboxes.length - 1; index >= 0; index -= 1) {
+        const hitbox = hitboxes[index]!;
+        const bounds = hitbox.getBoundingClientRect();
+        if (
+          bounds.width <= 0
+          || bounds.height <= 0
+          || pointer.clientX < bounds.left
+          || pointer.clientX > bounds.right
+          || pointer.clientY < bounds.top
+          || pointer.clientY > bounds.bottom
+        ) continue;
+        nextPeerId = hitbox.closest<HTMLElement>(
+          "[data-eduri-native-remote-peer]",
+        )?.dataset.eduriNativeRemotePeer ?? null;
+        break;
+      }
+    }
+    setHoveredPeerId((current) => current === nextPeerId ? current : nextPeerId);
+  }, []);
+
+  const handleContainerPointerMove = useCallback<
+    PointerEventHandler<HTMLDivElement>
+  >((event) => {
+    lastPointerRef.current = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+      pointerType: event.pointerType || "mouse",
+    };
+    refreshCaretHover();
+  }, [refreshCaretHover]);
+
+  const handleContainerPointerLeave = useCallback<
+    PointerEventHandler<HTMLDivElement>
+  >(() => {
+    lastPointerRef.current = null;
+    setHoveredPeerId(null);
+  }, []);
 
   const publishCurrent = useCallback((force = false) => {
     const input = inputRef.current;
@@ -509,6 +568,9 @@ export function useNativeInputPresence({
     () => visibleNativeInputPresencePeers(peers, target),
     [peers, target],
   );
+  useLayoutEffect(() => {
+    refreshCaretHover();
+  }, [metrics, refreshCaretHover, visiblePeers]);
   const overlay = visiblePeers.length > 0 && metrics
     ? (
       <span
@@ -527,7 +589,7 @@ export function useNativeInputPresence({
         }}
       >
         <style data-eduri-native-remote-presence-styles="true">
-          {NATIVE_REMOTE_CARET_HOVER_STYLES}
+          {NATIVE_REMOTE_CARET_OVERLAY_STYLES}
         </style>
         {(() => {
           const collisions = new Map<string, number>();
@@ -577,6 +639,7 @@ export function useNativeInputPresence({
                   color={safeColor(peer.participant.color)}
                   displayName={peer.participant.displayName}
                   collisionOffset={collisionOffset}
+                  hovered={hoveredPeerId === peer.participant.participantId}
                 />
               </span>
             );
@@ -588,6 +651,8 @@ export function useNativeInputPresence({
 
   return {
     containerRef,
+    onContainerPointerMove: handleContainerPointerMove,
+    onContainerPointerLeave: handleContainerPointerLeave,
     inputProps: {
       ref: inputRefCallback,
       onFocus: handleFocus,
@@ -621,6 +686,8 @@ export function NativeInputPresence({
       ref={presence.containerRef}
       className={className}
       style={{ ...style, minWidth: 0, position: "relative" }}
+      onPointerMove={presence.onContainerPointerMove}
+      onPointerLeave={presence.onContainerPointerLeave}
     >
       {children(presence.inputProps)}
       {presence.overlay}

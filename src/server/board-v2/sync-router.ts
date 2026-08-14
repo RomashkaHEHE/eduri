@@ -10,6 +10,8 @@ import {
   requireCsrf,
 } from "../http.js";
 import type { AppContext } from "../types.js";
+import { collaborationProfileSchema } from "../collaborationProfile.js";
+import { normalizeCollaborationProfile } from "../../shared/collaborationProfile.js";
 import {
   BOARD_SYNC_SERVER_CAPABILITIES,
   BoardSyncServiceError,
@@ -25,6 +27,7 @@ const ticketRequestSchema = z.object({
     .default(1),
   capabilities: z.number().int().min(0).max(0xffff_ffff)
     .default(BOARD_SYNC_SERVER_CAPABILITIES),
+  profile: collaborationProfileSchema.optional(),
 }).strict().refine(
   (request) => request.minSchemaVersion <= request.maxSchemaVersion,
   {
@@ -211,6 +214,9 @@ export function createBoardSyncRouter(context: AppContext): Router {
           maxSchemaVersion: parsed.maxSchemaVersion ?? 1,
           capabilities:
             parsed.capabilities ?? BOARD_SYNC_SERVER_CAPABILITIES,
+          ...(parsed.profile
+            ? { profile: normalizeCollaborationProfile(parsed.profile) }
+            : {}),
         });
         res.setHeader("Cache-Control", "no-store");
         res.setHeader("Pragma", "no-cache");

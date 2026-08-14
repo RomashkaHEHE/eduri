@@ -111,6 +111,54 @@ describe("SharedTerminalStateMachine", () => {
     expect(disconnected.state.transcript).toContain("исполнитель отключился");
   });
 
+  it("updates active owner and host identity without stopping the process", () => {
+    const machine = new SharedTerminalStateMachine();
+    const started = machine.dispatch(left, action({
+      type: "start-run",
+      entryId: "main-py",
+      entrypoint: "main.py",
+    }, "profile-run"));
+    const runId = started.state.activeRun!.runId;
+    const updatedActor = {
+      ...left,
+      displayName: "Renamed",
+      color: "#a1b2c3",
+    };
+
+    const updated = machine.updateActor(updatedActor);
+
+    expect(updated).toMatchObject({
+      changed: true,
+      state: {
+        mode: "busy",
+        activeRun: { runId },
+        host: {
+          participantId: left.participantId,
+          displayName: "Renamed",
+          color: "#a1b2c3",
+        },
+      },
+      delta: { baseSeq: started.state.seq, seq: started.state.seq + 1 },
+    });
+    expect(updated.state.transcript).toBe(started.state.transcript);
+    expect(machine.dispatch(updatedActor, action({
+      type: "host-output",
+      runId,
+      chunk: "still running\n",
+    }, "profile-output"))).toMatchObject({
+      changed: true,
+      state: { mode: "busy", activeRun: { runId } },
+    });
+
+    const inputMachine = new SharedTerminalStateMachine();
+    inputMachine.dispatch(left, action({ type: "claim" }, "profile-claim"));
+    expect(inputMachine.updateActor(updatedActor).state.input.owner).toEqual({
+      participantId: left.participantId,
+      displayName: "Renamed",
+      color: "#a1b2c3",
+    });
+  });
+
   it("routes input() through one request and revokes it atomically on interrupt", () => {
     const machine = new SharedTerminalStateMachine();
     const started = machine.dispatch(left, action({

@@ -27,7 +27,8 @@ The canonical model is renderer/editor independent and uses Yjs update-v1:
   fractional rank, and metadata;
 - one `Y.Text` document per editable text file, loaded lazily;
 - immutable content-addressed blobs for binary/uploaded files;
-- ordered test cases with collaborative `stdin` and expected output text;
+- ordered test cases bound to a stable text-file entry ID, with collaborative
+  `stdin` and expected output text;
 - terminal sessions and live cursor/selection state are ephemeral and never
   replayed as document mutations.
 
@@ -74,8 +75,68 @@ ephemeral draft plus one UTF-16 selection; terminal presence identifies the
 shared input surface but carries no terminal state. Focus ownership is tokened,
 so cleanup from an unmounted field cannot clear a newer focused field. Every
 awareness state is bounded and ephemeral. Participant ID, display name, and
-color come from the authenticated server session and are never accepted from
-the client payload.
+color come from the server-authoritative connection identity and are never
+accepted from the awareness payload.
+
+Online Code uses the shared device-local collaboration profile stored as the
+strict `eduri-online-profile-v1` envelope. It contains exactly a normalized,
+non-empty single-line `displayName` (at most 60 Unicode characters and 240
+UTF-8 bytes, without control or bidi-formatting characters) and a canonical
+lowercase six-digit `#rrggbb` color. The first guest-room or lesson entry with
+no valid profile is blocked by a non-dismissible profile modal before the Code,
+Board, or Call provider mounts. The active online header exposes the profile
+button immediately before Theme; solo `/code` and `/board` do not expose it.
+The modal uses the complete in-app Board color picker. Strict parsing rejects
+malformed, noncanonical, wrong-version, and extra-field storage records;
+storage/page-visibility reconciliation shares valid edits between tabs and
+closes an open stale editor. External key deletion returns an active online
+route to its mandatory gate and unmounts the collaboration providers until a
+new valid profile is saved, while blocked storage retains an in-memory fallback.
+
+Guest and lesson Code socket authentication carries the profile as a bounded
+credential field. The server validates and normalizes it, then supplies the
+resulting display name/color authoritatively to editor/test awareness and the
+shared terminal participant; awareness cannot override identity. The profile
+field remains optional at wire ingress for older-client compatibility, where
+the existing generated guest or authenticated-account identity is used, but
+the profile-gated current web client always sends it. Profile values never
+change a participant ID, account, role, lesson membership, resource capability,
+or edit permission.
+
+Editing the profile always updates socket authentication for a future recovery
+connection. While connected, every distinct saved value is also sent immediately
+as one strict, bounded `PROFILE_UPDATE` over the existing guest/lesson Code
+socket; an identical consecutive value is a local no-op. The server reauthorizes
+the participant, validates the profile, retains the same participant ID, and
+answers with `PROFILE_UPDATED`. It publishes the resulting identity through the
+existing awareness stream plus an ordered terminal owner/host delta. The sender
+`PROFILE_UPDATED` echo updates its own authoritative participant identity;
+peers receive an ordinary awareness identity replacement on the existing peer
+presence without changing that peer's awareness state.
+
+Code profile controls deliberately have no request/correlation ID. Socket.IO's
+ordered event delivery and ordered server processing are therefore part of this
+v3 contract: distinct rapid saves are not coalesced and their
+`PROFILE_UPDATED` results must be applied in request order. If the socket is
+disconnected, saving changes only the latest handshake auth and sends no stale
+control; reconnect authenticates with that latest value. A non-terminal
+validation or profile-rate rejection leaves the device-local saved profile in
+place, exposes the provider error, and does not synthesize an accepted
+`PROFILE_UPDATED`; the current client does not automatically retry that rejected
+control until another different save or reconnect supplies a profile again.
+
+The socket, terminal host lease, and active run remain intact; no disconnect,
+process stop, or execution-epoch change occurs. The same workspace Y.Doc,
+Monaco models/tokenization, local IndexedDB log, pending durable outbox,
+Explorer/test state, and shared-terminal client surface remain mounted. Board
+uses negotiated, correlated `PROFILE_UPDATE` / `PROFILE_UPDATED` controls on its
+existing WebSocket without refreshing a ticket, issuing another `AUTH` or
+`READY`, or recreating its document or camera. Guest/lesson Call uses the current
+profile when requesting a new LiveKit token and, while already connected,
+serializes server-authorized participant updates in place. The Call adapter keeps
+only the latest desired value while one PATCH is in flight, retries the latest
+value after a real room reconnect, and never replaces its token, room, component,
+or media tracks merely to change the profile.
 
 Monaco is not a controlled React text input. An exact `Y.Text` is bound directly
 to its model: local Monaco changes become granular Yjs operations and remote
@@ -92,19 +153,57 @@ collaborative inputs use absolute overlay carets and selections over their
 bounded remote drafts. In both Monaco and native inputs, caret lines and
 selections remain visible while participant name labels are hidden by default.
 Each caret has its own absolutely positioned label, revealed only while a
-hover-capable pointer is over that caret's transparent hit area; pointer exit
-hides it, and touch or other no-hover input does not reveal it. Labels never
-change document/input values, text layout, scroll, or selection. Pure nested
+hover-capable pointer is inside that caret's 18-pixel geometric area; pointer
+exit hides it, and touch or other no-hover input does not reveal it. Monaco and
+native inputs calculate this hover from pointer coordinates delivered to the
+underlying editing surface. The complete remote overlay remains
+`pointer-events: none`, so pointer down, click, selection, context-menu, and
+focus pass through even directly over a remote caret. Labels never change
+document/input values, text layout, scroll, or selection. Pure nested
 `Y.Text` events bypass React entry/test snapshots entirely. Structural and
 metadata changes still refresh those snapshots, while Run/Test captures read
 authoritative data from the Y.Doc.
 
-The current Explorer renders the effective parent forest directly. Folders
-expand/collapse by pointer or arrow key. Create, upload, rename, and delete are
-owned by its pointer/keyboard context menu. Move uses native drag-and-drop onto
-a folder or the Explorer root; there is no destination selector in the editor
-toolbar. The tests editor is unmounted and consumes no layout space until its
-toolbar toggle is opened.
+The current Explorer renders the effective parent forest directly and keeps
+four device-local concepts separate: the file opened in the editor, the local
+multi-selection, the roving keyboard-focus row, and the fixed Shift-range
+anchor. Explorer selection, focus, anchor, expansion, and collapse are
+presentation state, not CRDT content, awareness, or undo history. Modifier or
+keyboard multi-selection therefore does not implicitly replace the opened
+entry; plain activation can still open a file or the existing folder-action
+surface.
+
+The flattened visible depth-first order is authoritative for pointer and
+keyboard ranges. Plain selection replaces the set, `Shift` selects the visible
+range from the anchor, `Ctrl`/`Cmd` toggles one row, and
+`Ctrl`/`Cmd+Shift` adds a visible range. Collapsing a folder immediately prunes
+its hidden descendants from selection and resolves focus/anchor to a visible
+row, so a later destructive command cannot silently affect a hidden selection.
+The multiselect tree uses one roving `tabIndex=0` row and exposes selection
+independently from the active/opened-file styling.
+
+Arrow keys and `Home`/`End` navigate the visible order; Shift extends a range
+and `Ctrl`/`Cmd` navigation moves focus without replacing selection.
+`ArrowLeft`/`ArrowRight` implement parent/child collapse and expansion,
+`Enter` activates the focused entry, Space toggles it, `F2` renames only an
+exactly one-item selection, `Ctrl`/`Cmd+A` selects all visible rows, `Escape`
+clears selection, and Delete/Backspace removes the deletable selection. A
+right-click on a selected row preserves the group while focusing that row; a
+right-click on an unselected row replaces the selection. Multi-selection menus
+omit singular rename and duplicate actions.
+
+Dragging a selected row moves the selected roots together; dragging an
+unselected row first makes it the sole selection. Drops target a folder or the
+Explorer root and cannot target any selected subtree. Group move and delete
+normalize redundant ancestor/descendant inputs, validate the complete command,
+and commit in one local-origin Yjs transaction, producing one local Undo item
+with no partial mutation on failure. The required `main.py` entry and every
+ancestor folder containing it make the complete delete selection protected.
+Create, upload, rename, duplicate, and delete remain available from the
+pointer/keyboard context menu, and the Explorer header also exposes delete for
+the current deletable selection. There is no destination selector in the
+editor toolbar. The tests editor is unmounted and consumes no layout space
+until its toolbar toggle is opened.
 
 ### Server durability and bounded compaction
 
@@ -404,10 +503,14 @@ endings and a genuinely empty stdout. The terminal may style an empty
 successful run in the UI, but the execution result and test-case comparison
 never substitute explanatory text for program output.
 
-The initiating client takes a local Run/Test request lock before awaiting its
+The initiating client takes a local F9/Test request lock before awaiting its
 durable document outbox. It releases that lock only on rejection, a connection
-or permission transition, or authoritative terminal progress. Repeated Run and
-Test clicks during synchronization therefore cannot enqueue competing starts.
+or permission transition, or authoritative terminal progress. The idle run
+control and a plain workspace-scoped F9 both request an ordinary run. Once a
+request is pending or execution is active, further F9 presses are consumed as
+no-ops and never stop or restart it; only clicking the active `Stop` control
+interrupts execution. Repeated F9/Test actions during synchronization therefore
+cannot enqueue competing starts.
 
 After an ordinary successful execution or Python runtime error, the Worker
 recursively snapshots `/workspace` and returns version-1 file changes inside
@@ -460,12 +563,31 @@ an operational penetration test and abuse controls are complete.
 
 ## Test cases and terminal
 
-A test case stores a name, stdin, expected stdout, bounded timeout in
-milliseconds, and rank. Timeout accepts `250..45000`, defaults to 5,000, and
-legacy Yjs records without the field read as that default. Output comparison is
-always normalized by lines: line-ending style and one final newline difference
-do not affect the result. Running tests never applies a returned workspace
-delta and never mutates source or expected output.
+A test case stores a stable target `entryId`, name, stdin, expected stdout,
+bounded timeout in milliseconds, and rank. The target is the Python file's
+stable entry identity rather than its display name or derived path, so rename
+and move preserve the complete test set. Switching the active Python file
+selects and renders only tests whose `entryId` matches that file. Duplicating a
+file duplicates its contents but not its tests. A normal local file or subtree
+delete removes tests for all deleted files in the same local-origin Yjs
+transaction and Undo item. A valid test concurrently merged after its target
+was deleted is retained as an orphan, but is hidden and cannot execute; this
+avoids making a convergent document structurally invalid. Records created
+before per-file binding and therefore missing `entryId` are interpreted as
+belonging to stable `main-py` without an eager migration transaction.
+
+New tests can be created only for an existing collaborative text file and the
+web UI exposes test controls only while the active file has a case-insensitive
+`.py` suffix. A test-run action carries both target entry ID and test ID. The
+execution host re-reads the synchronized document and rejects the action if the
+test's stored target differs from the requested entry, so a stale or forged
+pair cannot run one file with another file's stdin and expected output.
+
+Timeout accepts `250..45000`, defaults to 5,000, and legacy Yjs records without
+the field read as that default. Output comparison is always normalized by
+lines: line-ending style and one final newline difference do not affect the
+result. Running tests never applies a returned workspace delta and never
+mutates source or expected output.
 Results are ephemeral unless the user explicitly saves a bounded run summary.
 
 The test panel is closed by default and mounted only when explicitly expanded.
@@ -525,6 +647,12 @@ and sandbox immediately.
   survive remote edits within the documented 32-selection awareness bound;
   malformed or oversized presence is rejected while terminal input/output/run
   lifecycle remains bounded, server-ordered, and ephemeral;
+- strict profile storage/auth validation, mandatory first-online gating,
+  server-authoritative editor/terminal identity, and live profile refresh
+  without a socket reconnect, terminal-host interruption, Monaco remount, or
+  replacement of the Y.Doc, IndexedDB log, or outbox, including ordered rapid
+  Code updates, offline-save authentication on reconnect, recoverable rejection,
+  and Call update coalescing, failure, and reconnect retry;
 - uploaded trees cannot escape the workspace through names, archives, links,
   Unicode ambiguity, or case collisions;
 - arbitrary binary blobs cannot become ready, deduplicated, or downloadable

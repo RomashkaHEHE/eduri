@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   get: vi.fn(),
   ensureResource: vi.fn(),
   callToken: vi.fn(),
+  updateCallProfile: vi.fn(),
   callMounts: 0,
   callUnmounts: 0,
   callProps: undefined as Record<string, unknown> | undefined,
@@ -41,6 +42,7 @@ vi.mock("../api", async (importOriginal) => {
         get: (...args: unknown[]) => mocks.get(...args),
         ensureResource: (...args: unknown[]) => mocks.ensureResource(...args),
         callToken: (...args: unknown[]) => mocks.callToken(...args),
+        updateCallProfile: (...args: unknown[]) => mocks.updateCallProfile(...args),
       },
     },
   };
@@ -81,6 +83,10 @@ vi.mock("../guestIdentity", () => ({
 }));
 
 import { ApiError } from "../api";
+import {
+  ONLINE_PROFILE_STORAGE_KEY,
+  resetOnlineProfileMemoryForTests,
+} from "../onlineProfile";
 import { ThemeProvider } from "../theme";
 import { GuestRoomPage } from "./GuestRoomPage";
 
@@ -122,12 +128,20 @@ async function renderPage(): Promise<void> {
 }
 
 beforeEach(() => {
+  resetOnlineProfileMemoryForTests();
+  window.localStorage.clear();
+  window.localStorage.setItem(ONLINE_PROFILE_STORAGE_KEY, JSON.stringify({
+    version: 1,
+    displayName: "Guest user",
+    color: "#2563eb",
+  }));
   mocks.params = { shareId: "share-id", resourceKind: "board" };
   mocks.locationState = null;
   mocks.navigate.mockReset();
   mocks.get.mockReset();
   mocks.ensureResource.mockReset();
   mocks.callToken.mockReset();
+  mocks.updateCallProfile.mockReset().mockResolvedValue(undefined);
   mocks.callMounts = 0;
   mocks.callUnmounts = 0;
   mocks.callProps = undefined;
@@ -140,9 +154,85 @@ afterEach(async () => {
   container?.remove();
   root = undefined;
   container = undefined;
+  vi.useRealTimers();
+  window.localStorage.clear();
+  resetOnlineProfileMemoryForTests();
 });
 
 describe("GuestRoomPage", () => {
+  it("requires a profile before mounting room collaboration", async () => {
+    window.localStorage.clear();
+    resetOnlineProfileMemoryForTests();
+    mocks.get.mockResolvedValue(room(["board", "call"]));
+
+    await renderPage();
+    await act(async () => Promise.resolve());
+
+    expect(document.body.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(document.body.textContent).toContain("Display Name");
+    expect(mocks.boardProps).toBeUndefined();
+    expect(mocks.callMounts).toBe(0);
+    expect(document.body.querySelector(".modal__header .icon-button")).toBeNull();
+
+    await act(async () => {
+      document.body.querySelector<HTMLButtonElement>(
+        '[role="dialog"] button[type="submit"]',
+      )?.click();
+      await Promise.resolve();
+    });
+
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    expect(mocks.boardProps).toMatchObject({
+      profile: { displayName: "Гость", color: "#2563eb" },
+    });
+    expect(mocks.callMounts).toBe(1);
+  });
+
+  it("does not request a profile for an expired room link", async () => {
+    window.localStorage.clear();
+    resetOnlineProfileMemoryForTests();
+    mocks.get.mockRejectedValue(new ApiError("Сеанс завершён", 410));
+
+    await renderPage();
+    await act(async () => Promise.resolve());
+
+    expect(container?.textContent).toContain("Сеанс завершён");
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it("places Profile immediately before the theme control", async () => {
+    mocks.get.mockResolvedValue(room(["board"]));
+    await renderPage();
+    const actions = container?.querySelector(".guest-room__header-actions");
+    expect(actions?.children[0]?.classList.contains("online-profile-button")).toBe(true);
+    expect(actions?.children[1]?.classList.contains("theme-toggle")).toBe(true);
+  });
+
+  it("labels the room-link action and confirms a successful copy", async () => {
+    vi.useFakeTimers();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    mocks.get.mockResolvedValue(room(["board"]));
+    await renderPage();
+    const button = container?.querySelector<HTMLButtonElement>(
+      ".guest-room__copy",
+    );
+
+    expect(button?.textContent).toBe("Ссылка");
+    await act(async () => {
+      button?.click();
+      await Promise.resolve();
+    });
+    expect(writeText).toHaveBeenCalledWith(window.location.href);
+    expect(button?.textContent).toBe("Скопирована");
+
+    await act(async () => vi.advanceTimersByTime(1_500));
+    expect(button?.textContent).toBe("Ссылка");
+  });
+
   it("keeps the same call mounted while Board and Code switch", async () => {
     mocks.get.mockResolvedValue(room(["board", "code", "call"]));
     await renderPage();
@@ -164,6 +254,44 @@ describe("GuestRoomPage", () => {
     await renderPage();
     expect(mocks.callMounts).toBe(1);
     expect(mocks.callUnmounts).toBe(0);
+  });
+
+  it("requests guest call credentials with the selected profile", async () => {
+    mocks.get.mockResolvedValue(room(["board", "call"]));
+    mocks.callToken.mockResolvedValue({
+      url: "wss://livekit.eduri.test",
+      token: "token",
+      roomName: "guest-room",
+    });
+    await renderPage();
+
+    const requestCredentials = mocks.callProps?.requestCredentials as
+      | (() => Promise<unknown>)
+      | undefined;
+    expect(requestCredentials).toBeTypeOf("function");
+    await requestCredentials?.();
+
+    expect(mocks.callToken).toHaveBeenCalledWith("share-id", {
+      deviceId: "device-id-000000000000000000000000",
+      profile: { displayName: "Guest user", color: "#2563eb" },
+    });
+
+    const updateParticipantProfile = mocks.callProps?.updateParticipantProfile as
+      | ((profile: { displayName: string; color: `#${string}` }) => Promise<void>)
+      | undefined;
+    expect(mocks.callProps?.profile).toEqual({
+      displayName: "Guest user",
+      color: "#2563eb",
+    });
+    await updateParticipantProfile?.({
+      displayName: "Updated guest",
+      color: "#d33f49",
+    });
+    expect(mocks.updateCallProfile).toHaveBeenCalledWith(
+      "share-id",
+      "device-id-000000000000000000000000",
+      { displayName: "Updated guest", color: "#d33f49" },
+    );
   });
 
   it("adds a linked call without leaving the active Board and auto-joins", async () => {

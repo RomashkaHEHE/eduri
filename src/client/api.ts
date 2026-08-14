@@ -6,6 +6,7 @@ import type {
   StudentSummary,
   TutorSummary,
 } from "../shared/types";
+import type { CollaborationProfile } from "../shared/collaborationProfile";
 
 export class ApiError extends Error {
   status: number;
@@ -284,12 +285,32 @@ export const api = {
         { method: "PUT", skipCsrf: true },
       );
     },
-    callToken(shareId: string, displayName?: string) {
+    callToken(
+      shareId: string,
+      options: {
+        readonly deviceId?: string;
+        readonly profile?: CollaborationProfile;
+      } = {},
+    ) {
       return request<CallCredentials>(
         `/api/guest/rooms/${encodeURIComponent(shareId)}/call-token`,
         {
           method: "POST",
-          body: jsonBody({ ...(displayName ? { displayName } : {}) }),
+          body: jsonBody(options),
+          skipCsrf: true,
+        },
+      );
+    },
+    updateCallProfile(
+      shareId: string,
+      deviceId: string,
+      profile: CollaborationProfile,
+    ) {
+      return request<void>(
+        `/api/guest/rooms/${encodeURIComponent(shareId)}/call-profile`,
+        {
+          method: "PATCH",
+          body: jsonBody({ deviceId, profile }),
           skipCsrf: true,
         },
       );
@@ -417,9 +438,16 @@ export const api = {
       return request<{ lesson: LessonSummary }>(`/api/lessons/${encodeURIComponent(id)}/finish`, { method: "POST" })
         .then((result) => result.lesson);
     },
-    callToken(id: string) {
+    callToken(id: string, profile?: CollaborationProfile) {
       return request<CallCredentials>(`/api/lessons/${encodeURIComponent(id)}/call-token`, {
         method: "POST",
+        body: jsonBody(profile ? { profile } : {}),
+      });
+    },
+    updateCallProfile(id: string, profile: CollaborationProfile) {
+      return request<void>(`/api/lessons/${encodeURIComponent(id)}/call-profile`, {
+        method: "PATCH",
+        body: jsonBody({ profile }),
       });
     },
     attachMaterial(id: string, materialId: string, position: number) {

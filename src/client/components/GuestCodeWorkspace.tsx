@@ -1,5 +1,5 @@
-import { Cloud, CloudOff, LoaderCircle } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import type { CollaborationProfile } from "../../shared/collaborationProfile";
 import {
   CodeBlobStore,
   codeBlobStoreName,
@@ -20,6 +20,7 @@ export interface GuestCodeWorkspaceProps {
   readonly shareId: string;
   readonly resourceId: string;
   readonly deviceId: string;
+  readonly profile: CollaborationProfile;
   readonly onTerminal?: (kind: "expired" | "not-found") => void;
 }
 
@@ -37,12 +38,16 @@ export function GuestCodeWorkspace({
   shareId,
   resourceId,
   deviceId,
+  profile,
   onTerminal,
 }: GuestCodeWorkspaceProps) {
   const [status, setStatus] = useState<GuestCodeStatus>(INITIAL_STATUS);
   const [session, setSession] = useState<CodeWorkspaceSessionHandle | null>(null);
   const onTerminalRef = useRef(onTerminal);
+  const profileRef = useRef(profile);
+  const providerRef = useRef<GuestCodeProvider | null>(null);
   onTerminalRef.current = onTerminal;
+  profileRef.current = profile;
 
   useEffect(() => {
     let cancelled = false;
@@ -51,9 +56,11 @@ export function GuestCodeWorkspace({
       shareId,
       resourceId,
       deviceId,
+      profile: profileRef.current,
       databaseName,
       onTerminal: (kind) => onTerminalRef.current?.(kind),
     });
+    providerRef.current = provider;
     const blobStore = new GuestCodeBlobStore(
       new CodeBlobStore(codeBlobStoreName(databaseName)),
       new GuestCodeBlobHttpClient({ shareId }),
@@ -84,6 +91,7 @@ export function GuestCodeWorkspace({
     void provider.start().catch(() => undefined);
     return () => {
       cancelled = true;
+      if (providerRef.current === provider) providerRef.current = null;
       unsubscribe();
       setSession(null);
       void Promise.allSettled([
@@ -92,6 +100,10 @@ export function GuestCodeWorkspace({
       ]);
     };
   }, [deviceId, resourceId, shareId]);
+
+  useEffect(() => {
+    providerRef.current?.updateProfile(profile);
+  }, [profile]);
 
   if (!session) {
     return (
@@ -106,37 +118,8 @@ export function GuestCodeWorkspace({
   const collaborationReadOnly = status.durability === "at-risk"
     || status.connection === "expired"
     || status.connection === "error";
-  const statusTitle = status.durability === "at-risk"
-    ? "Локальное сохранение недоступно"
-    : status.connection === "online"
-    ? status.pendingUpdates > 0 || status.durability === "writing"
-      ? "Сохраняем изменения"
-      : "Изменения синхронизированы"
-    : status.connection === "syncing" || status.connection === "connecting"
-      ? "Подключаемся"
-      : "Офлайн: изменения сохраняются на этом устройстве";
-
   return (
     <div className="guest-code-workspace">
-      <div
-        className={`guest-code-workspace__status is-${status.connection}${
-          status.durability === "at-risk" ? " is-at-risk" : ""
-        }`}
-        title={statusTitle}
-        aria-label={statusTitle}
-      >
-        {status.connection === "online"
-          ? <Cloud size={15} />
-          : status.connection === "syncing" || status.connection === "connecting"
-            ? <LoaderCircle className="spin" size={15} />
-            : <CloudOff size={15} />}
-        {status.pendingUpdates > 0 && <span>{status.pendingUpdates}</span>}
-      </div>
-      {status.error && (
-        <div className="guest-code-workspace__error" role="alert">
-          {status.error}
-        </div>
-      )}
       <CodeWorkspace
         session={session}
         participantId={status.participant?.participantId ?? null}
@@ -145,6 +128,13 @@ export function GuestCodeWorkspace({
           collaborationReadOnly || status.connection !== "online"
         }
         terminalConnectionEpoch={status.terminalConnectionEpoch}
+        syncStatus={{
+          connection: status.connection,
+          durability: status.durability,
+          pendingUpdates: status.pendingUpdates,
+          error: status.error,
+          readOnly: collaborationReadOnly,
+        }}
       />
     </div>
   );

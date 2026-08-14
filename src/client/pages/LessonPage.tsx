@@ -38,6 +38,11 @@ import { LessonBoard } from "../board/LessonBoard";
 import { useCriticalDataGuard } from "../board/criticalDataGuard";
 import { LessonCall } from "../components/LessonCall";
 import { Button, EmptyState, ErrorState, IconButton, LoadingBlock, Modal, Notice, formatDateTime, useAsyncData } from "../components/UI";
+import {
+  OnlineProfileButton,
+  OnlineProfileProvider,
+  useOnlineProfile,
+} from "../onlineProfile";
 import { ThemeToggle } from "../theme";
 
 type WorkspaceMode = "board" | "code" | "materials";
@@ -86,6 +91,14 @@ function progressLabel(status?: MaterialDetail["progressStatus"]) {
 }
 
 export function LessonPage() {
+  return (
+    <OnlineProfileProvider>
+      <LessonPageContent />
+    </OnlineProfileProvider>
+  );
+}
+
+function LessonPageContent() {
   const { lessonId = "" } = useParams();
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -103,6 +116,10 @@ export function LessonPage() {
       };
     }
   }, [lessonId, user?.id, user?.role]);
+  const { profile, configured } = useOnlineProfile({
+    defaultDisplayName: user?.displayName ?? "",
+    required: Boolean(resource.data && user),
+  });
   useEffect(() => {
     let cancelled = false;
     resource.setData((current) =>
@@ -272,6 +289,7 @@ export function LessonPage() {
         <div className="lesson-header__title"><strong>{lesson.title}</strong><span>{lesson.studentName} · {formatDateTime(lesson.scheduledAt, { hour: "2-digit", minute: "2-digit" })}</span></div>
         <div className={`connection-pill connection-pill--${connection}`}>{connection === "connected" ? <Signal size={15} /> : <SignalLow size={15} />}<span>{connection === "connected" ? "На связи" : connection === "connecting" ? "Подключение" : "Нет связи"}</span></div>
         <time className="lesson-timer">{elapsed}</time>
+        <OnlineProfileButton className="lesson-header__profile" />
         <ThemeToggle className="lesson-header__theme" />
         <IconButton label={dockOpen ? "Скрыть звонок" : "Показать звонок"} onClick={() => setDockOpen((value) => !value)}>{dockOpen ? <ChevronRight size={19} /> : <Video size={19} />}</IconButton>
         {user.role === "tutor" ? <Button variant="danger" size="small" icon={<CircleStop size={17} />} onClick={() => setEndOpen(true)}>Завершить</Button> : <Button variant="secondary" size="small" icon={<X size={17} />} onClick={leaveLesson}>Выйти</Button>}
@@ -286,19 +304,21 @@ export function LessonPage() {
       <section className="lesson-workspace">
         {actionError && <div className="lesson-toast"><Notice type="error">{actionError}</Notice><IconButton label="Закрыть" onClick={() => setActionError(null)}><X size={16} /></IconButton></div>}
         <div className={`workspace-pane ${mode === "board" ? "is-visible" : ""}`} aria-hidden={mode !== "board"}>
-          <LessonBoard
+          {configured && profile && <LessonBoard
             lessonId={lesson.id}
             userId={user.id}
             lesson={lesson}
+            profile={profile}
             onCriticalDataRiskChange={setBoardDataAtRisk}
-          />
+          />}
         </div>
         <div className={`workspace-pane code-workspace ${mode === "code" ? "is-visible" : ""}`} aria-hidden={mode !== "code"}>
-          {codeActivated && (
+          {configured && profile && codeActivated && (
             <Suspense fallback={<div className="lesson-runtime-loading"><LoadingBlock label="Загружаем редактор кода" /></div>}>
               <LessonCodeWorkspace
                 lessonId={lesson.id}
                 userId={user.id}
+                profile={profile}
                 readOnly={lesson.status === "completed" || lesson.status === "cancelled"}
               />
             </Suspense>
@@ -311,7 +331,13 @@ export function LessonPage() {
       </section>
 
       <aside className={`lesson-dock ${dockOpen ? "lesson-dock--open" : ""}`}>
-        <LessonCall lessonId={lesson.id} status={lesson.status} />
+        {configured && profile && (
+          <LessonCall
+            lessonId={lesson.id}
+            status={lesson.status}
+            profile={profile}
+          />
+        )}
         <div className="dock-tabs" role="tablist"><button role="tab" aria-selected={rightTab === "plan"} className={rightTab === "plan" ? "is-active" : ""} onClick={() => setRightTab("plan")}><BookOpen size={17} /> План <span>{planMaterials.length}</span></button><button role="tab" aria-selected={rightTab === "notes"} className={rightTab === "notes" ? "is-active" : ""} onClick={() => setRightTab("notes")}><NotebookPen size={17} /> Заметки</button></div>
         {rightTab === "plan" ? <div className="lesson-plan"><div className="lesson-plan__head"><strong>На занятии</strong><button onClick={() => setMode("materials")}>Добавить</button></div>{planMaterials.length ? <div className="lesson-plan__list">{planMaterials.map((material, index) => <article key={material.id}><span className="plan-index">{index + 1}</span><div><strong>{material.title}</strong><span className={`progress-tag progress-tag--${material.progressStatus ?? "assigned"}`}>{progressLabel(material.progressStatus)}</span></div>{user.role === "tutor" && material.progressStatus !== "covered" && material.progressStatus !== "completed" && <IconButton label="Отметить разобранным" onClick={() => void setCovered(material)}><Check size={17} /></IconButton>}</article>)}</div> : <EmptyState title="План пока пуст" description="Добавьте материалы из библиотеки." action={<Button variant="secondary" size="small" onClick={() => setMode("materials")}>Открыть материалы</Button>} />}</div> : <div className="lesson-notes"><div className="lesson-notes__head"><strong>{user.role === "tutor" ? "Заметки репетитора" : "Конспект урока"}</strong>{user.role === "tutor" && <span className={`save-state save-state--${notesState}`}>{notesState === "saving" ? "Сохраняем" : notesState === "saved" ? "Сохранено" : notesState === "error" ? "Ошибка" : ""}</span>}</div><textarea value={notes} onChange={(event) => { setNotes(event.target.value); setNotesState("idle"); }} readOnly={user.role !== "tutor"} placeholder="Краткие итоги, ошибки и план следующего занятия" />{user.role === "tutor" && <Button variant="secondary" size="small" icon={<Save size={16} />} disabled={notesState === "saving"} onClick={() => void saveNotes()}>Сохранить</Button>}</div>}
       </aside>

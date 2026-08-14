@@ -4,7 +4,8 @@ export const BOARD_BROWSER_CAPABILITIES =
   BoardCapability.CHUNKING
   | BoardCapability.AWARENESS
   | BoardCapability.RECOVERY_FORK
-  | BoardCapability.PAGE_SHARDING;
+  | BoardCapability.PAGE_SHARDING
+  | BoardCapability.PROFILE_UPDATE;
 
 export interface BoardSyncScope {
   readonly boardId: string;
@@ -36,6 +37,8 @@ export type FetchLike = (
   },
 ) => Promise<FetchResponseLike>;
 
+export type BoardTicketRequestBody = Readonly<Record<string, unknown>>;
+
 export interface HttpBoardTicketSourceOptions {
   readonly endpoint: string;
   readonly scope: BoardSyncScope;
@@ -45,7 +48,9 @@ export interface HttpBoardTicketSourceOptions {
   readonly capabilities?: number;
   readonly csrfToken?: () => string;
   readonly requireCsrf?: boolean;
-  readonly requestBody?: Readonly<Record<string, unknown>>;
+  readonly requestBody?:
+    | BoardTicketRequestBody
+    | (() => BoardTicketRequestBody);
   readonly fetch: FetchLike;
   readonly baseUrl?: string;
   readonly fallbackSocketUrl?: string;
@@ -71,7 +76,9 @@ export interface HttpBoardBootstrapOptions {
   readonly capabilities?: number;
   readonly csrfToken?: () => string;
   readonly requireCsrf?: boolean;
-  readonly requestBody?: Readonly<Record<string, unknown>>;
+  readonly requestBody?:
+    | BoardTicketRequestBody
+    | (() => BoardTicketRequestBody);
   readonly fetch: FetchLike;
   readonly baseUrl?: string;
   readonly fallbackSocketUrl?: string;
@@ -221,9 +228,11 @@ function ticketRequestBody(options: {
   readonly minSchemaVersion?: number;
   readonly maxSchemaVersion?: number;
   readonly capabilities?: number;
-  readonly requestBody?: Readonly<Record<string, unknown>>;
+  readonly requestBody?:
+    | BoardTicketRequestBody
+    | (() => BoardTicketRequestBody);
 }): object {
-  if (options.requestBody) return options.requestBody;
+  if (options.requestBody) return resolveRequestBody(options.requestBody);
   if (!options.lessonId) return options.scope;
   return {
     lessonId: options.lessonId,
@@ -231,6 +240,20 @@ function ticketRequestBody(options: {
     maxSchemaVersion: options.maxSchemaVersion ?? 1,
     capabilities: options.capabilities ?? BOARD_BROWSER_CAPABILITIES,
   };
+}
+
+function resolveRequestBody(
+  source: BoardTicketRequestBody | (() => BoardTicketRequestBody),
+): BoardTicketRequestBody {
+  const body = typeof source === "function" ? source() : source;
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    throw new BoardTicketRequestError(
+      "Board ticket request body is not an object",
+      null,
+      false,
+    );
+  }
+  return body;
 }
 
 async function postTicket(
@@ -373,7 +396,9 @@ function requiredInteger(
 export async function requestHttpBoardBootstrap(
   options: HttpBoardBootstrapOptions,
 ): Promise<BoardBootstrapTicket> {
-  const negotiation = options.requestBody ?? {
+  const negotiation = options.requestBody
+    ? resolveRequestBody(options.requestBody)
+    : {
       lessonId: options.lessonId,
       minSchemaVersion: options.minSchemaVersion ?? 1,
       maxSchemaVersion: options.maxSchemaVersion ?? 1,
@@ -406,13 +431,14 @@ export function createBootstrappedBoardTicketSource(
   options: HttpBoardBootstrapOptions,
   scope: BoardSyncScope,
   initial: BoardBootstrapTicket,
+  isInitialTicketValid: () => boolean = () => true,
 ): BoardTicketSource {
   let first: BoardSyncTicket | null = initial;
   return async () => {
     if (first) {
       const ticket = first;
       first = null;
-      return ticket;
+      if (isInitialTicketValid()) return ticket;
     }
     const refreshed = await requestHttpBoardBootstrap(options);
     validateScope({

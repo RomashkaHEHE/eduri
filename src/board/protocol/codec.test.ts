@@ -10,8 +10,12 @@ import {
   BoardPermission,
   BoardProtocolError,
   BoardProtocolErrorCode,
+  decodeBoardProfileUpdatePayload,
+  decodeBoardProfileUpdatedPayload,
   decodeBoardFrame,
   encodeBoardFrame,
+  encodeBoardProfileUpdatePayload,
+  encodeBoardProfileUpdatedPayload,
   messageIdFromHex,
   messageIdToHex,
   type BoardFrame,
@@ -47,6 +51,45 @@ function expectProtocolError(
 }
 
 describe("Board v2 protocol validation", () => {
+  it("round-trips bounded profile update control payloads", () => {
+    const profile = {
+      displayName: "Tutor Profile",
+      color: "#a1b2c3" as const,
+    };
+    expect(
+      decodeBoardProfileUpdatePayload(
+        encodeBoardProfileUpdatePayload(profile),
+      ),
+    ).toEqual(profile);
+    expect(
+      decodeBoardProfileUpdatedPayload(
+        encodeBoardProfileUpdatedPayload({ accepted: true, profile }),
+      ),
+    ).toEqual({ accepted: true, profile });
+    expect(
+      decodeBoardProfileUpdatedPayload(
+        encodeBoardProfileUpdatedPayload({
+          accepted: false,
+          error: "Profile is invalid",
+        }),
+      ),
+    ).toEqual({ accepted: false, error: "Profile is invalid" });
+  });
+
+  it("rejects malformed and oversized profile control payloads", () => {
+    expect(() => decodeBoardProfileUpdatePayload(new Uint8Array())).toThrow();
+    expect(() => decodeBoardProfileUpdatePayload(
+      new Uint8Array([1, 0, 1, 0xff, 0x23, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36]),
+    )).toThrow();
+    expect(() => encodeBoardProfileUpdatePayload({
+      displayName: "x".repeat(241),
+      color: "#123456",
+    })).toThrow();
+    expect(() => decodeBoardProfileUpdatedPayload(
+      new Uint8Array([1, 2]),
+    )).toThrow();
+  });
+
   it("preserves unknown capability bits during negotiation", () => {
     const frame: BoardFrame = {
       type: BoardMessageType.AUTH,

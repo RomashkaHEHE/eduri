@@ -28,7 +28,9 @@ import {
   BoardMessageType,
   BoardPermission,
   BoardProtocolError,
+  decodeBoardProfileUpdatedPayload,
   decodeBoardFrame,
+  encodeBoardProfileUpdatePayload,
   encodeBoardFrame,
   messageIdToHex,
   type AckFrame,
@@ -39,6 +41,10 @@ import {
   type ReadyFrame,
   type SyncStep1Frame,
 } from "../../board/protocol/index.js";
+import {
+  normalizeCollaborationProfile,
+  type CollaborationProfile,
+} from "../../shared/collaborationProfile.js";
 import {
   createBoardDocumentReplayOrigin,
   isBoardDocumentReplayOrigin,
@@ -207,6 +213,11 @@ interface InFlightBoardUpdate {
   readonly sentAt: number;
 }
 
+interface InFlightProfileUpdate {
+  readonly messageId: Uint8Array;
+  readonly profile: CollaborationProfile;
+}
+
 const NETWORK_UPDATE_ORIGIN = Object.freeze({ type: "eduri.board.network" });
 const NETWORK_AWARENESS_ORIGIN = Object.freeze({
   type: "eduri.board.network-awareness",
@@ -218,7 +229,8 @@ const DEFAULT_CAPABILITIES =
   BoardCapability.CHUNKING |
   BoardCapability.AWARENESS |
   BoardCapability.RECOVERY_FORK |
-  BoardCapability.PAGE_SHARDING;
+  BoardCapability.PAGE_SHARDING |
+  BoardCapability.PROFILE_UPDATE;
 const MAX_CHUNK_ASSEMBLIES = 8;
 export const MAX_BOARD_AWARENESS_SELECTION_IDS = 256;
 const MAX_SERVER_RETRY_AFTER_MS = 24 * 60 * 60 * 1_000;
@@ -290,6 +302,13 @@ function comparePendingUpdates(
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
   return left.byteLength === right.byteLength &&
     left.every((byte, index) => byte === right[index]);
+}
+
+function profilesEqual(
+  left: CollaborationProfile,
+  right: CollaborationProfile,
+): boolean {
+  return left.displayName === right.displayName && left.color === right.color;
 }
 
 function hasBoardUpdateContent(update: Uint8Array): boolean {
@@ -412,6 +431,8 @@ export class BoardNetworkProvider {
   private lastDurableSequence: number | null = null;
   private recovery: BoardRecoverySignal | null = null;
   private lastError: string | null = null;
+  private pendingProfile: CollaborationProfile | null = null;
+  private profileUpdateInFlight: InFlightProfileUpdate | null = null;
   private negotiatedCapabilities = 0;
   private awarenessClientId: number | null = null;
   private awarenessDirty = false;
@@ -529,6 +550,26 @@ export class BoardNetworkProvider {
     if (this.stopped) throw new Error("A stopped Board provider cannot be restarted");
     this.startPromise = this.initialize();
     return this.startPromise;
+  }
+
+  /** Update presentation identity on the current socket without remounting state. */
+  updateProfile(profile: CollaborationProfile): void {
+    const normalized = normalizeCollaborationProfile(profile);
+    if (
+      this.pendingProfile
+      && profilesEqual(this.pendingProfile, normalized)
+    ) {
+      return;
+    }
+    if (
+      this.profileUpdateInFlight
+      && profilesEqual(this.profileUpdateInFlight.profile, normalized)
+    ) {
+      this.pendingProfile = null;
+      return;
+    }
+    this.pendingProfile = normalized;
+    this.sendPendingProfileUpdate();
   }
 
   async stop(): Promise<void> {
@@ -1020,22 +1061,7 @@ export class BoardNetworkProvider {
     };
     socket.onclose = (event) => {
       if (this.socket !== socket) return;
-      this.connectionEpoch += 1;
-      this.socket = null;
-      this.ready = false;
-      this.documentSyncStarted = false;
-      this.initialSync = null;
-      this.deferredServerSync = null;
-      this.causalGapRetries.clear();
-      this.abandonCausalGapRebase();
-      this.resetOutboxFlight();
-      this.permissions = 0;
-      this.negotiatedCapabilities = 0;
-      this.chunkAssemblies.clear();
-      this.cancelTimer("ack");
-      this.cancelTimer("awareness");
-      this.cancelTimer("outbox-pump");
-      this.removeRemoteAwareness();
+      this.resetConnectionState();
       if (this.stopped || this.recovery) return;
       this.lastError = event.reason || this.lastError;
       this.connection = "offline";
@@ -1105,7 +1131,11 @@ export class BoardNetworkProvider {
         applyAwarenessUpdate(this.awareness, frame.update, NETWORK_AWARENESS_ORIGIN);
         break;
       case BoardMessageType.CONTROL:
-        this.handleControl(frame, connection);
+        if (frame.code === BoardControlCode.PROFILE_UPDATED) {
+          this.handleProfileUpdated(frame);
+        } else {
+          this.handleControl(frame, connection);
+        }
         break;
       case BoardMessageType.AUTH:
         throw new Error(`Unexpected Board frame ${frame.type}`);
@@ -1148,6 +1178,7 @@ export class BoardNetworkProvider {
     };
     this.deferredServerSync = null;
     this.emitStatus();
+    this.sendPendingProfileUpdate();
     this.flushLocalUpdateBatch();
     if (
       (frame.permissions & BoardPermission.EDIT) === 0 &&
@@ -1159,6 +1190,86 @@ export class BoardNetworkProvider {
     this.requestOutboxReconciliation();
     this.pumpPendingUpdates();
     this.maybeStartInitialSync();
+  }
+
+  private sendPendingProfileUpdate(): void {
+    if (
+      !this.pendingProfile
+      || this.profileUpdateInFlight
+      || !this.ready
+      || !this.socket
+      || this.stopped
+      || this.stopping
+      || this.recovery
+    ) {
+      return;
+    }
+    if (
+      (this.negotiatedCapabilities & BoardCapability.PROFILE_UPDATE) === 0
+    ) {
+      this.pendingProfile = null;
+      this.lastError = "Board server does not support live profile updates";
+      this.emitStatus();
+      return;
+    }
+
+    const profile = this.pendingProfile;
+    const messageId = this.createUniqueMessageId();
+    this.pendingProfile = null;
+    this.profileUpdateInFlight = { messageId, profile };
+    try {
+      this.sendFrame({
+        type: BoardMessageType.CONTROL,
+        generation: this.scope.generation,
+        code: BoardControlCode.PROFILE_UPDATE,
+        messageId,
+        payload: encodeBoardProfileUpdatePayload(profile),
+      });
+    } catch (error) {
+      this.pendingProfile = profile;
+      this.profileUpdateInFlight = null;
+      this.failSocket(error);
+    }
+  }
+
+  private handleProfileUpdated(frame: ControlFrame): void {
+    const inFlight = this.profileUpdateInFlight;
+    if (
+      !inFlight
+      || !frame.messageId
+      || frame.docKey !== undefined
+      || !bytesEqual(frame.messageId, inFlight.messageId)
+    ) {
+      throw new Error("Board server sent an uncorrelated profile result");
+    }
+
+    const result = decodeBoardProfileUpdatedPayload(frame.payload);
+    this.profileUpdateInFlight = null;
+    if (result.accepted) {
+      if (!profilesEqual(result.profile, inFlight.profile)) {
+        throw new Error("Board server acknowledged a different profile");
+      }
+      this.republishLocalAwarenessAfterProfileUpdate();
+      if (this.lastError?.startsWith("Profile update")) {
+        this.lastError = null;
+        this.emitStatus();
+      }
+    } else {
+      this.lastError = `Profile update rejected: ${result.error}`;
+      this.emitStatus();
+    }
+    this.sendPendingProfileUpdate();
+  }
+
+  private republishLocalAwarenessAfterProfileUpdate(): void {
+    const current = sanitizeLocalPresence(this.awareness.getLocalState());
+    this.awareness.setLocalState(current);
+    if (this.awarenessTimer !== null) {
+      this.timers.clearTimeout(this.awarenessTimer);
+      this.awarenessTimer = null;
+    }
+    this.awarenessDirty = true;
+    this.flushAwareness();
   }
 
   private maybeStartInitialSync(): void {
@@ -1408,6 +1519,9 @@ export class BoardNetworkProvider {
         break;
       case BoardControlCode.ASSET_READY:
         break;
+      case BoardControlCode.PROFILE_UPDATE:
+      case BoardControlCode.PROFILE_UPDATED:
+        throw new Error(`Unexpected Board profile control ${frame.code}`);
       default: {
         const neverCode: never = frame.code;
         throw new Error(`Unsupported Board control ${String(neverCode)}`);
@@ -2371,7 +2485,7 @@ export class BoardNetworkProvider {
   }
 
   private removeRemoteAwareness(): void {
-    const ownId = this.awarenessClientId;
+    const ownId = this.awarenessClientId ?? this.awareness.clientID;
     const remoteIds = [...this.awareness.getStates().keys()]
       .filter((clientId) => clientId !== ownId);
     if (remoteIds.length) {
@@ -2429,6 +2543,29 @@ export class BoardNetworkProvider {
       connection.epoch === this.connectionEpoch &&
       connection.socket === this.socket
     );
+  }
+
+  private resetConnectionState(): void {
+    if (this.profileUpdateInFlight && !this.pendingProfile) {
+      this.pendingProfile = this.profileUpdateInFlight.profile;
+    }
+    this.profileUpdateInFlight = null;
+    this.connectionEpoch += 1;
+    this.socket = null;
+    this.ready = false;
+    this.documentSyncStarted = false;
+    this.initialSync = null;
+    this.deferredServerSync = null;
+    this.causalGapRetries.clear();
+    this.abandonCausalGapRebase();
+    this.resetOutboxFlight();
+    this.permissions = 0;
+    this.negotiatedCapabilities = 0;
+    this.chunkAssemblies.clear();
+    this.cancelTimer("ack");
+    this.cancelTimer("awareness");
+    this.cancelTimer("outbox-pump");
+    this.removeRemoteAwareness();
   }
 
   private emitStatus(): void {

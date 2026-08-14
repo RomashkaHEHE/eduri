@@ -78,6 +78,7 @@ interface FakeProvider {
   readonly presenceCalls: BoardLocalPresence[];
   readonly selectionCalls: readonly string[][];
   readonly subscribers: Set<(status: BoardProviderStatus) => void>;
+  readonly updateProfile: ReturnType<typeof vi.fn>;
   start(): Promise<void>;
   stop(): Promise<void>;
   subscribe(listener: (status: BoardProviderStatus) => void): () => void;
@@ -160,6 +161,7 @@ vi.mock("./networkProvider", () => ({
     readonly presenceCalls: BoardLocalPresence[] = [];
     readonly selectionCalls: string[][] = [];
     readonly subscribers = new Set<(status: BoardProviderStatus) => void>();
+    readonly updateProfile = vi.fn();
 
     constructor() {
       mocks.providers.push(this);
@@ -213,6 +215,11 @@ const LESSON: LessonSummary = {
   scheduledAt: "2026-07-28T12:00:00.000Z",
   durationMinutes: 60,
   status: "active",
+};
+
+const PROFILE = {
+  displayName: "Board user",
+  color: "#2563eb" as const,
 };
 
 const CATALOG = {
@@ -316,6 +323,7 @@ async function renderLessonBoard(): Promise<void> {
       lessonId: LESSON.id,
       userId: CATALOG.userId,
       lesson: LESSON,
+      profile: PROFILE,
     }));
   });
   await settle();
@@ -329,6 +337,7 @@ async function renderUncachedLessonBoard(): Promise<void> {
       lessonId: LESSON.id,
       userId: CATALOG.userId,
       lesson: LESSON,
+      profile: PROFILE,
     }));
   });
   await settle();
@@ -566,6 +575,37 @@ describe("LessonBoard Board v2-only gate", () => {
 });
 
 describe("LessonBoard background metrics", () => {
+  it("updates the profile without replacing the board session", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockResolvedValue(
+        metricsResponse("2026-07-28T12:00:00.000Z"),
+      ),
+    );
+    await renderLessonBoard();
+    const provider = mocks.providers[0];
+    const surfaceDocument = mocks.surfaceProps?.document;
+
+    await act(async () => {
+      root?.render(createElement(LessonBoard, {
+        lessonId: LESSON.id,
+        userId: CATALOG.userId,
+        lesson: LESSON,
+        profile: { displayName: "Updated user", color: "#d33f49" },
+      }));
+    });
+    await settle();
+
+    expect(mocks.providers).toHaveLength(1);
+    expect(mocks.providers[0]).toBe(provider);
+    expect(mocks.surfaceProps?.document).toBe(surfaceDocument);
+    expect(provider?.updateProfile).toHaveBeenCalledOnce();
+    expect(provider?.updateProfile).toHaveBeenCalledWith({
+      displayName: "Updated user",
+      color: "#d33f49",
+    });
+  });
+
   it("polls every 30 seconds only while online and cleans up on unmount", async () => {
     const fetchMock = vi.fn<typeof fetch>()
       .mockImplementation(async () => metricsResponse(
@@ -962,6 +1002,7 @@ describe("LessonBoard recovery guard", () => {
         lessonId: LESSON.id,
         userId: CATALOG.userId,
         lesson: LESSON,
+        profile: PROFILE,
         onCriticalDataRiskChange: onRisk,
       }));
     });
@@ -997,6 +1038,7 @@ describe("GuestBoard terminal state", () => {
       root?.render(createElement(GuestBoard, {
         shareId: "guest-share",
         deviceId: "device-id-000000000000000000000000",
+        profile: PROFILE,
         onTerminal,
       }));
     });

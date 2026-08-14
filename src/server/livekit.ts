@@ -21,6 +21,14 @@ export interface LiveKitRoomService {
     identity: string,
     options?: { revokeTokenTs?: bigint },
   ): Promise<void>;
+  updateParticipant?(
+    room: string,
+    identity: string,
+    options: {
+      name?: string;
+      attributes?: Record<string, string>;
+    },
+  ): Promise<unknown>;
 }
 
 export class LiveKitRevocationError extends Error {
@@ -84,7 +92,7 @@ export async function ensureLiveKitCallRoom(
   });
 }
 
-function isNotFound(error: unknown): boolean {
+export function isLiveKitNotFoundError(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   const candidate = error as { status?: unknown; code?: unknown };
   return candidate.status === 404 || candidate.code === "not_found";
@@ -95,7 +103,7 @@ function logLiveKitFailure(
   error: unknown,
   details: { roomName?: string; identity?: string } = {},
 ): void {
-  if (isNotFound(error)) return;
+  if (isLiveKitNotFoundError(error)) return;
   console.error(`[livekit] ${action} failed`, {
     ...details,
     error: error instanceof Error ? error.message : String(error),
@@ -208,12 +216,12 @@ export async function revokeUserLiveKitAccessBeforeDeletion(
         revokeTokenTs: BigInt(Math.floor(Date.now() / 1_000) + 1),
       });
     } catch (error) {
-      if (!isNotFound(error)) failures.push(error);
+      if (!isLiveKitNotFoundError(error)) failures.push(error);
     }
     try {
       await service.deleteRoom(roomName);
     } catch (error) {
-      if (!isNotFound(error)) failures.push(error);
+      if (!isLiveKitNotFoundError(error)) failures.push(error);
     }
   }
   if (failures.length > 0) {
@@ -265,7 +273,7 @@ export async function revokeUserLiveKitAccessBeforeDeletion(
     try {
       await service.deleteRoom(lessonCallRoomName(target.meeting_key));
     } catch (error) {
-      if (!isNotFound(error)) postRotationFailures.push(error);
+      if (!isLiveKitNotFoundError(error)) postRotationFailures.push(error);
     }
   }
   if (postRotationFailures.length > 0) {

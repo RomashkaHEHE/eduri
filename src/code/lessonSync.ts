@@ -1,10 +1,16 @@
 import { CodeProtocolError } from "./protocol/index.js";
+import type { CollaborationProfile } from "../shared/collaborationProfile.js";
+import {
+  CollaborationProfileValidationError,
+  normalizeCollaborationProfile,
+} from "../shared/collaborationProfile.js";
 
 export const LESSON_CODE_SYNC_NAMESPACE = "/lesson-code-sync";
 
 export interface LessonCodeSyncHandshakeAuth {
   readonly lessonId: string;
   readonly deviceId: string;
+  readonly profile?: CollaborationProfile;
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -25,9 +31,9 @@ export function parseLessonCodeSyncHandshakeAuth(
   const input = value as Record<string, unknown>;
   const keys = Object.keys(input);
   if (
-    keys.length !== 2
-    || !Object.prototype.hasOwnProperty.call(input, "lessonId")
+    !Object.prototype.hasOwnProperty.call(input, "lessonId")
     || !Object.prototype.hasOwnProperty.call(input, "deviceId")
+    || keys.some((key) => key !== "lessonId" && key !== "deviceId" && key !== "profile")
   ) {
     throw new CodeProtocolError("Lesson Code sync auth fields are invalid");
   }
@@ -37,5 +43,20 @@ export function parseLessonCodeSyncHandshakeAuth(
   if (typeof input.deviceId !== "string" || !DEVICE_PATTERN.test(input.deviceId)) {
     throw new CodeProtocolError("Lesson Code sync deviceId is invalid");
   }
-  return { lessonId: input.lessonId, deviceId: input.deviceId };
+  let profile;
+  if (Object.prototype.hasOwnProperty.call(input, "profile")) {
+    try {
+      profile = normalizeCollaborationProfile(input.profile);
+    } catch (error) {
+      if (error instanceof CollaborationProfileValidationError) {
+        throw new CodeProtocolError(error.message);
+      }
+      throw error;
+    }
+  }
+  return {
+    lessonId: input.lessonId,
+    deviceId: input.deviceId,
+    ...(profile ? { profile } : {}),
+  };
 }

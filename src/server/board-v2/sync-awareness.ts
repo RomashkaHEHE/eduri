@@ -36,6 +36,11 @@ interface StoredAwarenessUpdate {
   update: Uint8Array;
 }
 
+interface PreparedIdentityUpdate {
+  states: Map<number, StoredAwarenessUpdate>;
+  stored: StoredAwarenessUpdate;
+}
+
 interface JsonBudget {
   entries: number;
 }
@@ -247,6 +252,47 @@ export class BoardAwarenessRegistry {
   current(documentIdentity: string): Uint8Array[] {
     return [...(this.documents.get(documentIdentity)?.values() ?? [])]
       .map((state) => state.update.slice());
+  }
+
+  updateIdentitiesAtomically(
+    documentIdentities: readonly string[],
+    clientId: number,
+    identity: BoardAwarenessIdentity,
+  ): ReadonlyMap<string, Uint8Array> {
+    const prepared = new Map<string, PreparedIdentityUpdate>();
+    const result = new Map<string, Uint8Array>();
+
+    // Complete every fallible operation before mutating any document.
+    for (const documentIdentity of new Set(documentIdentities)) {
+      const states = this.documents.get(documentIdentity);
+      const previous = states?.get(clientId);
+      if (!states || !previous) continue;
+      if (previous.clock >= MAX_AWARENESS_CLOCK - 1) {
+        throw new BoardAwarenessError(
+          "Awareness clock cannot advance for a profile update",
+        );
+      }
+      const parsed = parseAwarenessUpdate(previous.update);
+      if (parsed.state === null) continue;
+      const update = authorizeAwarenessUpdate(
+        encodeAwarenessState(clientId, previous.clock + 1, parsed.state),
+        clientId,
+        identity,
+      );
+      prepared.set(documentIdentity, {
+        states,
+        stored: {
+          clock: update.clock,
+          update: update.update.slice(),
+        },
+      });
+      result.set(documentIdentity, update.update.slice());
+    }
+
+    for (const { states, stored } of prepared.values()) {
+      states.set(clientId, stored);
+    }
+    return result;
   }
 
   remove(documentIdentity: string, clientId: number): Uint8Array | null {

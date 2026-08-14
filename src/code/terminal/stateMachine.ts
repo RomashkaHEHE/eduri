@@ -534,6 +534,40 @@ export class SharedTerminalStateMachine {
     );
   }
 
+  updateActor(actor: SharedTerminalActor): SharedTerminalDispatchResult {
+    const before = this.snapshot();
+    this.transcriptOperations = [];
+    if (!safeActor(actor)) {
+      return this.packageResult(
+        "profile-update",
+        before,
+        unchanged("invalid-action"),
+        false,
+      );
+    }
+    let didChange = false;
+    if (
+      this.state.inputOwner?.socketId === actor.socketId
+      && !sameParticipant(participant(this.state.inputOwner), participant(actor))
+    ) {
+      this.state.inputOwner = { ...actor };
+      didChange = true;
+    }
+    if (
+      this.state.host?.socketId === actor.socketId
+      && !sameParticipant(participant(this.state.host), participant(actor))
+    ) {
+      this.state.host = { ...actor };
+      didChange = true;
+    }
+    return this.packageResult(
+      "profile-update",
+      before,
+      didChange ? changed() : unchanged(),
+      false,
+    );
+  }
+
   private apply(
     actor: SharedTerminalActor,
     action: Exclude<SharedTerminalAction, { readonly type: "sync" }>,

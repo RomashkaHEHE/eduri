@@ -813,6 +813,38 @@ export function BoardColorPicker({
     if (!owned) finishGesture(true);
   }, [alphaBounds, beginGesture, finishGesture, queuePreview]);
 
+  const changeRailByKeyboard = useCallback((
+    axis: "hue" | "alpha",
+    event: ReactKeyboardEvent<HTMLInputElement>,
+  ) => {
+    if (!beginKeyboardGesture(axis, event)) return;
+    event.preventDefault();
+
+    const current = axis === "hue"
+      ? hsvaRef.current.hue
+      : hsvaRef.current.alpha;
+    const minimum = axis === "hue" ? 0 : alphaBounds.minimum;
+    const maximum = axis === "hue" ? 359 : alphaBounds.maximum;
+    const step = axis === "hue" ? 1 : alphaBounds.step;
+    const pageStep = step * 10;
+    const next = event.key === "Home"
+      ? minimum
+      : event.key === "End"
+        ? maximum
+        : event.key === "PageUp"
+          ? current + pageStep
+          : event.key === "PageDown"
+            ? current - pageStep
+            : event.key === "ArrowUp"
+              ? current + step
+              : event.key === "ArrowDown"
+                ? current - step
+                : event.key === "ArrowLeft"
+                  ? current + (axis === "alpha" ? step : -step)
+                  : current + (axis === "alpha" ? -step : step);
+    changeRail(axis, clamp(next, minimum, maximum));
+  }, [alphaBounds, beginKeyboardGesture, changeRail]);
+
   const clearRailWindowFallback = useCallback(() => {
     const cleanup = railWindowFallbackCleanupRef.current;
     railWindowFallbackCleanupRef.current = null;
@@ -1171,7 +1203,7 @@ export function BoardColorPicker({
                 installRailWindowFallback(event.currentTarget, "hue", event.pointerId);
               }
             }}
-            onKeyDown={(event) => beginKeyboardGesture("hue", event)}
+            onKeyDown={(event) => changeRailByKeyboard("hue", event)}
             onKeyUp={(event) => finishKeyboardGesture("hue", true, event)}
             onBlur={() => cancelAxisGesture("hue")}
             onChange={(event) => changeRail("hue", Number(event.currentTarget.value))}
@@ -1196,7 +1228,7 @@ export function BoardColorPicker({
                   installRailWindowFallback(event.currentTarget, "alpha", event.pointerId);
                 }
               }}
-              onKeyDown={(event) => beginKeyboardGesture("alpha", event)}
+              onKeyDown={(event) => changeRailByKeyboard("alpha", event)}
               onKeyUp={(event) => finishKeyboardGesture("alpha", true, event)}
               onBlur={() => cancelAxisGesture("alpha")}
               onChange={(event) => changeRail("alpha", Number(event.currentTarget.value))}

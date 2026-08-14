@@ -4,6 +4,7 @@ import {
   randomBytes,
   timingSafeEqual,
 } from "node:crypto";
+import type { CollaborationProfile } from "../../shared/collaborationProfile.js";
 
 export const BOARD_SYNC_TICKET_TTL_MS = 60_000;
 const MAX_ACTIVE_TICKETS = 10_000;
@@ -21,6 +22,7 @@ export interface BoardSyncTicketScope {
   minSchemaVersion: number;
   maxSchemaVersion: number;
   capabilities: number;
+  profile?: CollaborationProfile;
 }
 
 export interface IssuedBoardSyncTicket {

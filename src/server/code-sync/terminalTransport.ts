@@ -44,6 +44,10 @@ export interface AttachCodeTerminalOptions {
   readonly now?: () => number;
 }
 
+export interface CodeTerminalTransportController {
+  readonly updateParticipant: (socket: Socket) => void;
+}
+
 function roomName(workspaceId: string): string {
   return `code-sync:${workspaceId}`;
 }
@@ -66,7 +70,7 @@ function actor(socket: Socket): SharedTerminalActor {
 export function attachCodeTerminalTransport(
   namespace: Namespace,
   options: AttachCodeTerminalOptions,
-): void {
+): CodeTerminalTransportController {
   const machines = new Map<string, SharedTerminalStateMachine>();
   const connections = new Map<string, number>();
   const rates = new Map<string, TerminalActionRateScope>();
@@ -181,4 +185,21 @@ export function attachCodeTerminalTransport(
       }
     });
   });
+
+  return {
+    updateParticipant(socket): void {
+      const data = socket.data.codeSync as CodeTerminalConnectionData | undefined;
+      if (!data) return;
+      const machine = machines.get(data.session.workspaceId);
+      if (!machine) return;
+      const result = machine.updateActor(actor(socket));
+      if (result.delta) {
+        options.broadcastAuthorized(
+          data.session.workspaceId,
+          SHARED_TERMINAL_DELTA_EVENT,
+          result.delta,
+        );
+      }
+    },
+  };
 }

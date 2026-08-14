@@ -538,6 +538,20 @@ image до smoke tests. Никогда не используйте `docker compo
 - создание и отзыв invite;
 - доступ tutor только к собственному student;
 - Socket.IO-доску из двух браузеров;
+- с чистым `eduri-online-profile-v1` открыть из двух браузеров guest room и
+  authenticated lesson: обязательный Profile появляется только после успешного
+  разрешения комнаты/ресурса, находится перед Theme, блокирует монтаж
+  Board/Code/Call до сохранения и не появляется на solo, loading, missing,
+  expired, error, empty-room или unknown-resource экранах;
+- изменить Display Name и color во время активных Board, Code, terminal и Call:
+  второй браузер получает ту же server-authoritative identity без нового Board
+  ticket/AUTH/READY, Code reconnect/Monaco remount, остановки run/terminal host,
+  замены LiveKit JWT/room/media tracks или визуального моргания; быстрые изменения
+  сходятся к последнему значению, а явный отказ отображается без ложного remote
+  success;
+- изменить и удалить `eduri-online-profile-v1` из второй вкладки: валидная
+  внешняя запись закрывает устаревший editor, удаление снова открывает
+  обязательный gate, а сохранение восстанавливает один согласованный профиль;
 - на staging или с временно уменьшенными лимитами: app-wide Socket.IO admission
   отклоняет следующее соединение после total/per-IP cap, а disconnect немедленно
   освобождает место для нового соединения;

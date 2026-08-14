@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   BoardTicketRequestError,
   BOARD_BROWSER_CAPABILITIES,
+  createBootstrappedBoardTicketSource,
   createHttpBoardTicketSource,
   requestHttpBoardBootstrap,
   type FetchLike,
@@ -92,6 +93,91 @@ describe("Board HTTP ticket source", () => {
         capabilities: BOARD_BROWSER_CAPABILITIES,
       }),
     }));
+  });
+
+  it("resolves a dynamic request body for every fresh ticket", async () => {
+    let profile = { displayName: "Alice", color: "#2563eb" };
+    const fetch = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        boardId: scope.boardId,
+        generation: scope.generation,
+        documentKey: scope.documentKey,
+        ticket: "ticket",
+        wsPath: "/api/board-v2/socket",
+      }),
+    });
+    const source = createHttpBoardTicketSource({
+      endpoint: "/api/board-v2/ticket",
+      scope,
+      requestBody: () => ({ ...scope, profile }),
+      csrfToken: () => "csrf",
+      fetch,
+      baseUrl: "https://eduri.test/lesson/1",
+    });
+
+    await source();
+    profile = { displayName: "Bob", color: "#dc2626" };
+    await source();
+
+    expect(fetch.mock.calls.map(([, init]) => JSON.parse(init.body))).toEqual([
+      { ...scope, profile: { displayName: "Alice", color: "#2563eb" } },
+      { ...scope, profile: { displayName: "Bob", color: "#dc2626" } },
+    ]);
+  });
+
+  it("skips a bootstrap ticket invalidated before local hydration completes", async () => {
+    let profile = { displayName: "Alice", color: "#2563eb" };
+    let profileKey = "Alice\u0000#2563eb";
+    const bootstrapProfileKey = profileKey;
+    const isInitialTicketValid = vi.fn(() => profileKey === bootstrapProfileKey);
+    const fetch = vi.fn<FetchLike>().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ticket: "fresh-ticket",
+        boardId: scope.boardId,
+        generation: scope.generation,
+        protocolVersion: 1,
+        schemaVersion: 1,
+        capabilities: BOARD_BROWSER_CAPABILITIES,
+        permissions: 3,
+        manifestDocKey: "manifest",
+        defaultPageId: "10000000-0000-4000-8000-000000000001",
+        defaultPageDocKey: scope.documentKey,
+        websocketPath: "/api/board-v2/sync",
+      }),
+    });
+    const source = createBootstrappedBoardTicketSource({
+      endpoint: "/api/board-v2/sync-ticket",
+      requestBody: () => ({ profile }),
+      csrfToken: () => "csrf",
+      fetch,
+      baseUrl: "https://eduri.test/lesson/1",
+    }, scope, {
+      ticket: "stale-bootstrap-ticket",
+      socketUrl: "wss://eduri.test/api/board-v2/sync",
+      boardId: scope.boardId,
+      generation: scope.generation,
+      protocolVersion: 1,
+      schemaVersion: 1,
+      capabilities: BOARD_BROWSER_CAPABILITIES,
+      permissions: 3,
+      manifestDocumentKey: "manifest",
+      defaultPageId: "10000000-0000-4000-8000-000000000001",
+      defaultPageDocumentKey: scope.documentKey,
+    }, isInitialTicketValid);
+
+    profile = { displayName: "Bob", color: "#dc2626" };
+    profileKey = "Bob\u0000#dc2626";
+
+    await expect(source()).resolves.toMatchObject({ ticket: "fresh-ticket" });
+    expect(isInitialTicketValid).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(fetch.mock.calls[0]![1].body)).toEqual({
+      profile: { displayName: "Bob", color: "#dc2626" },
+    });
   });
 
   it("classifies access denial as terminal and rejects ticket query parameters", async () => {

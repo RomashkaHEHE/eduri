@@ -21,6 +21,10 @@ import type {
   CodeSyncClientMessage,
   CodeSyncHandshakeAuth,
 } from "./types.js";
+import {
+  CollaborationProfileValidationError,
+  normalizeCollaborationProfile,
+} from "../../shared/collaborationProfile.js";
 
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9_-]+$/u;
 const SHARE_ID_PATTERN = /^[A-Za-z0-9_-]{43}$/u;
@@ -352,13 +356,32 @@ export function parseCodeSyncHandshakeAuth(
   value: unknown,
 ): CodeSyncHandshakeAuth {
   const input = record(value, "Code sync auth");
-  exactKeys(input, ["shareId", "deviceId"], "Code sync auth");
+  const keys = Object.keys(input);
+  if (
+    !Object.prototype.hasOwnProperty.call(input, "shareId")
+    || !Object.prototype.hasOwnProperty.call(input, "deviceId")
+    || keys.some((key) => key !== "shareId" && key !== "deviceId" && key !== "profile")
+  ) {
+    throw new CodeProtocolError("Code sync auth fields are invalid");
+  }
   if (typeof input.shareId !== "string" || !SHARE_ID_PATTERN.test(input.shareId)) {
     throw new CodeProtocolError("shareId is invalid");
+  }
+  let profile;
+  if (Object.prototype.hasOwnProperty.call(input, "profile")) {
+    try {
+      profile = normalizeCollaborationProfile(input.profile);
+    } catch (error) {
+      if (error instanceof CollaborationProfileValidationError) {
+        throw new CodeProtocolError(error.message);
+      }
+      throw error;
+    }
   }
   return {
     shareId: input.shareId,
     deviceId: identifier(input.deviceId, "deviceId"),
+    ...(profile ? { profile } : {}),
   };
 }
 
@@ -449,6 +472,25 @@ export function parseCodeSyncClientMessage(
       protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
       capabilities: [CODE_SYNC_CAPABILITIES.multiSelectionAwareness],
     };
+  }
+  if (input.type === CODE_SYNC_TAGS.profileUpdate) {
+    exactKeys(
+      input,
+      ["type", "protocolVersion", "profile"],
+      "PROFILE_UPDATE",
+    );
+    try {
+      return {
+        type: CODE_SYNC_TAGS.profileUpdate,
+        protocolVersion: CODE_SYNC_PROTOCOL_VERSION,
+        profile: normalizeCollaborationProfile(input.profile),
+      };
+    } catch (error) {
+      if (error instanceof CollaborationProfileValidationError) {
+        throw new CodeProtocolError(error.message);
+      }
+      throw error;
+    }
   }
   throw new CodeProtocolError("Code sync message type is unsupported");
 }

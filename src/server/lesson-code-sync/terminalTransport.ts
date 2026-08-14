@@ -28,6 +28,10 @@ interface LessonCodeConnectionData {
   readonly session: AuthenticatedLessonCodeSync;
 }
 
+export interface LessonCodeTerminalTransportController {
+  readonly updateParticipant: (socket: Socket) => void;
+}
+
 function roomName(workspaceId: string): string {
   return `lesson-code-sync:${workspaceId}`;
 }
@@ -63,7 +67,7 @@ export function attachLessonCodeTerminalTransport(
     readonly maxActionsPerMinute?: number;
     readonly now?: () => number;
   } = {},
-): void {
+): LessonCodeTerminalTransportController {
   const machines = new Map<string, SharedTerminalStateMachine>();
   const connections = new Map<string, number>();
   const rates = new Map<string, TerminalActionRateScope>();
@@ -228,4 +232,15 @@ export function attachLessonCodeTerminalTransport(
       }
     });
   });
+
+  return {
+    updateParticipant(socket): void {
+      const data = socket.data.lessonCodeSync as LessonCodeConnectionData | undefined;
+      if (!data) return;
+      const machine = machines.get(data.session.workspaceId);
+      if (!machine) return;
+      const result = machine.updateActor(actor(socket));
+      if (result.delta) broadcastDelta(data.session.workspaceId, result.delta);
+    },
+  };
 }

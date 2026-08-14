@@ -15,6 +15,7 @@ import {
   useNavigate,
   useParams,
 } from "react-router-dom";
+import type { CollaborationProfile } from "../../shared/collaborationProfile";
 import {
   ApiError,
   api,
@@ -25,6 +26,11 @@ import { CallWorkspace } from "../components/LessonCall";
 import { GuestCodeWorkspace } from "../components/GuestCodeWorkspace";
 import { GuestBoard } from "../board/LessonBoard";
 import { guestDeviceId } from "../guestIdentity";
+import {
+  OnlineProfileButton,
+  OnlineProfileProvider,
+  useOnlineProfile,
+} from "../onlineProfile";
 import { ThemeToggle } from "../theme";
 
 type RoomState =
@@ -48,6 +54,14 @@ function RoomEnded({ missing = false }: { missing?: boolean }) {
 }
 
 export function GuestRoomPage() {
+  return (
+    <OnlineProfileProvider>
+      <GuestRoomPageContent />
+    </OnlineProfileProvider>
+  );
+}
+
+function GuestRoomPageContent() {
   const { shareId = "", resourceKind } = useParams();
   const location = useLocation();
   const navigate = useNavigate();
@@ -59,6 +73,10 @@ export function GuestRoomPage() {
     (location.state as { autoJoinCall?: unknown } | null)?.autoJoinCall === true
   ));
   const deviceId = useMemo(guestDeviceId, []);
+  const { profile, configured } = useOnlineProfile({
+    defaultDisplayName: "Гость",
+    required: state.kind === "active",
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -91,8 +109,17 @@ export function GuestRoomPage() {
   }, [shareId]);
 
   const requestCredentials = useCallback(
-    () => api.guestRooms.callToken(shareId),
-    [shareId],
+    () => api.guestRooms.callToken(shareId, {
+      deviceId,
+      ...(profile ? { profile } : {}),
+    }),
+    [deviceId, profile, shareId],
+  );
+  const updateParticipantProfile = useCallback(
+    (nextProfile: CollaborationProfile) => (
+      api.guestRooms.updateCallProfile(shareId, deviceId, nextProfile)
+    ),
+    [deviceId, shareId],
   );
   const activeResource = useMemo(() => {
     if (state.kind !== "active") return null;
@@ -222,6 +249,7 @@ export function GuestRoomPage() {
           )}
         </nav>
         <div className="guest-room__header-actions">
+          <OnlineProfileButton />
           <ThemeToggle />
           <button
             type="button"
@@ -229,7 +257,7 @@ export function GuestRoomPage() {
             onClick={() => void copyLink()}
           >
             {copied ? <Check size={16} /> : <Copy size={16} />}
-            {copied ? "Ссылка скопирована" : "Поделиться"}
+            {copied ? "Скопирована" : "Ссылка"}
           </button>
         </div>
       </header>
@@ -242,29 +270,33 @@ export function GuestRoomPage() {
         className={`guest-room__content ${callResource ? "has-call" : ""} ${resourceKind === "call" ? "is-call-focused" : ""}`}
       >
         <div className="guest-room__stage">
-          {resourceKind === "board" ? (
+          {configured && profile && resourceKind === "board" ? (
             <GuestBoard
               shareId={shareId}
               deviceId={deviceId}
+              profile={profile}
               onTerminal={(kind) => setState({
                 kind: kind === "expired" ? "expired" : "missing",
               })}
             />
-          ) : resourceKind === "code" ? (
+          ) : configured && profile && resourceKind === "code" ? (
             <GuestCodeWorkspace
               shareId={shareId}
               resourceId={activeResource.id}
               deviceId={deviceId}
+              profile={profile}
               onTerminal={(kind) => setState({
                 kind: kind === "expired" ? "expired" : "missing",
               })}
             />
           ) : null}
         </div>
-        {callResource && (
+        {configured && profile && callResource && (
           <aside className="guest-room__call" aria-label="Звонок">
             <CallWorkspace
               requestCredentials={requestCredentials}
+              profile={profile}
+              updateParticipantProfile={updateParticipantProfile}
               autoJoin={autoJoinCall}
             />
           </aside>

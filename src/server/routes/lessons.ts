@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { createHash } from "node:crypto";
 import { AccessToken, TrackSource } from "livekit-server-sdk";
 import { z } from "zod";
 import type { AppContext, LessonStatus } from "../types.js";
@@ -9,9 +10,17 @@ import { writeAudit } from "../audit.js";
 import {
   deleteLessonCallRoom,
   ensureLiveKitCallRoom,
+  isLiveKitNotFoundError,
   lessonCallRoomName,
+  liveKitParticipantIdentity,
 } from "../livekit.js";
 import { enqueueLessonRoomRevocation } from "../livekit-revocation.js";
+import { collaborationProfileSchema } from "../collaborationProfile.js";
+import {
+  COLLABORATION_PROFILE_COLORS,
+  normalizeCollaborationProfile,
+  type CollaborationProfile,
+} from "../../shared/collaborationProfile.js";
 
 const isoDate = z.string().refine((value) => Number.isFinite(new Date(value).valueOf()), "Некорректная дата");
 const createLessonSchema = z.object({
@@ -30,6 +39,27 @@ const updateLessonSchema = z.object({
 }).refine((value) => Object.keys(value).length > 0, { message: "Нет изменений" });
 
 const CALL_TOKEN_TTL_SECONDS = 15 * 60;
+const callTokenSchema = z.object({
+  profile: collaborationProfileSchema.optional(),
+}).strict();
+const callProfileSchema = z.object({
+  profile: collaborationProfileSchema,
+}).strict();
+
+function lessonCallProfile(
+  userId: string,
+  displayName: string,
+  requested?: CollaborationProfile,
+): CollaborationProfile {
+  if (requested) return requested;
+  const digest = createHash("sha256").update(userId).digest();
+  return {
+    displayName,
+    color: COLLABORATION_PROFILE_COLORS[
+      digest[0] % COLLABORATION_PROFILE_COLORS.length
+    ],
+  };
+}
 
 function lessonRow(context: AppContext, lessonId: string): Record<string, unknown> | undefined {
   return context.db.prepare(`
@@ -214,6 +244,7 @@ export function createLessonsRouter(context: AppContext): Router {
 
   router.post("/:id/call-token", async (req, res, next) => {
     try {
+      const parsed = parseBody(callTokenSchema, req.body ?? {});
       const authContext = currentAuth(res);
       const auth = authContext.user;
       const lesson = lessonRow(context, req.params.id);
@@ -277,13 +308,19 @@ export function createLessonsRouter(context: AppContext): Router {
         }
         throw new HttpError(403, "Доступ к звонку был отозван");
       }
+      const profile = lessonCallProfile(
+        auth.id,
+        auth.displayName,
+        parsed.profile ? normalizeCollaborationProfile(parsed.profile) : undefined,
+      );
       const token = new AccessToken(livekitApiKey, livekitApiSecret, {
         identity: `${auth.role}:${auth.id}`,
-        name: auth.displayName,
+        name: profile.displayName,
         ttl: CALL_TOKEN_TTL_SECONDS,
         attributes: {
           "eduri.role": auth.role,
           "eduri.lessonId": String(lesson.id),
+          "eduri.color": profile.color,
         },
       });
       token.addGrant({
@@ -308,6 +345,65 @@ export function createLessonsRouter(context: AppContext): Router {
         roomName,
         expiresAt: new Date(Date.now() + CALL_TOKEN_TTL_SECONDS * 1_000).toISOString(),
       });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.patch("/:id/call-profile", async (req, res, next) => {
+    try {
+      const parsed = parseBody(callProfileSchema, req.body ?? {});
+      const authContext = currentAuth(res);
+      const auth = authContext.user;
+      const lesson = lessonRow(context, req.params.id);
+      if (!lesson || !canReadLesson(lesson, auth.role, auth.id)) {
+        throw new HttpError(404, "Урок не найден");
+      }
+      if (lesson.status === "completed" || lesson.status === "cancelled") {
+        throw new HttpError(409, "Звонок для этого урока недоступен");
+      }
+      const updateParticipant = context.livekitRoomService?.updateParticipant;
+      if (!updateParticipant) {
+        throw new HttpError(503, "Сервис звонков временно недоступен");
+      }
+      const roomName = lessonCallRoomName(String(lesson.meeting_key));
+      const authorization = callAuthorizationState(context, {
+        userId: auth.id,
+        role: auth.role,
+        sessionHash: authContext.sessionHash,
+        lessonId: String(lesson.id),
+        meetingKey: String(lesson.meeting_key),
+      });
+      if (
+        authorization.account_active !== 1
+        || authorization.session_active !== 1
+        || authorization.lesson_active !== 1
+      ) {
+        throw new HttpError(403, "Доступ к звонку был отозван");
+      }
+      const profile = normalizeCollaborationProfile(parsed.profile);
+      try {
+        await updateParticipant.call(
+          context.livekitRoomService,
+          roomName,
+          liveKitParticipantIdentity(auth.role, auth.id),
+          {
+            name: profile.displayName,
+            attributes: { "eduri.color": profile.color },
+          },
+        );
+      } catch (error) {
+        if (isLiveKitNotFoundError(error)) {
+          throw new HttpError(409, "Участник ещё не подключён к звонку");
+        }
+        console.error("[livekit] lesson participant profile update failed", {
+          roomName,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        throw new HttpError(503, "Сервис звонков временно недоступен");
+      }
+      res.setHeader("Cache-Control", "no-store");
+      res.status(204).end();
     } catch (error) {
       next(error);
     }

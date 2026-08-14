@@ -377,6 +377,9 @@ describe("SharedTerminal", () => {
     );
 
     expect(hitbox?.style.height).toBe("18px");
+    expect(caret?.style.pointerEvents).toBe("none");
+    expect(hitbox?.style.pointerEvents).toBe("none");
+    expect(label?.style.pointerEvents).toBe("none");
     terminalHost?.dispatchEvent(pointerEvent("pointermove", 140, 95));
     expect(caret?.dataset.hovered).toBe("true");
     expect(label?.style.opacity).toBe("1");

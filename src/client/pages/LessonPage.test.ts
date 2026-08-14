@@ -4,6 +4,10 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LessonSummary } from "../../shared/types";
+import {
+  ONLINE_PROFILE_STORAGE_KEY,
+  resetOnlineProfileMemoryForTests,
+} from "../onlineProfile";
 import { ThemeProvider } from "../theme";
 
 const LESSON_ID = "00000000-0000-4000-8000-000000000501";
@@ -31,6 +35,7 @@ const socket = {
 interface CodeWorkspaceProps {
   lessonId: string;
   userId: string;
+  profile: { displayName: string; color: string };
   readOnly: boolean;
 }
 let codeWorkspaceProps: CodeWorkspaceProps | undefined;
@@ -112,6 +117,13 @@ beforeEach(() => {
   socket.emit.mockReset();
   socket.disconnect.mockReset();
   codeWorkspaceProps = undefined;
+  resetOnlineProfileMemoryForTests();
+  window.localStorage.clear();
+  window.localStorage.setItem(ONLINE_PROFILE_STORAGE_KEY, JSON.stringify({
+    version: 1,
+    displayName: "Offline tutor",
+    color: "#2563eb",
+  }));
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -122,10 +134,94 @@ afterEach(async () => {
   root = undefined;
   container?.remove();
   container = undefined;
+  window.localStorage.clear();
+  resetOnlineProfileMemoryForTests();
   vi.restoreAllMocks();
 });
 
 describe("LessonPage local-first bootstrap", () => {
+  it("requires the first online profile before mounting collaboration", async () => {
+    window.localStorage.clear();
+    resetOnlineProfileMemoryForTests();
+    networkLesson.mockResolvedValue({
+      ...cachedLesson,
+      materials: [],
+      notes: "",
+    });
+    networkMaterials.mockResolvedValue([]);
+    readCatalog.mockResolvedValue(null);
+
+    await act(async () => {
+      root?.render(createElement(
+        ThemeProvider,
+        null,
+        createElement(LessonPage),
+      ));
+    });
+    await act(async () => vi.waitFor(() => {
+      expect(document.body.querySelector('[role="dialog"]')).not.toBeNull();
+    }));
+
+    expect(document.body.textContent).toContain("Display Name");
+    expect(container?.querySelector('[data-testid="board-v2-probe"]')).toBeNull();
+    expect(container?.textContent).not.toContain("call");
+
+    await act(async () => {
+      document.body.querySelector<HTMLButtonElement>(
+        '[role="dialog"] button[type="submit"]',
+      )?.click();
+    });
+    await act(async () => vi.waitFor(() => {
+      expect(container?.querySelector('[data-testid="board-v2-probe"]')).not.toBeNull();
+    }));
+
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    expect(container?.textContent).toContain("call");
+  });
+
+  it("does not request a profile when the lesson cannot be opened", async () => {
+    window.localStorage.clear();
+    resetOnlineProfileMemoryForTests();
+    networkLesson.mockRejectedValue(new Error("Lesson missing"));
+    readCatalog.mockResolvedValue(null);
+
+    await act(async () => {
+      root?.render(createElement(
+        ThemeProvider,
+        null,
+        createElement(LessonPage),
+      ));
+    });
+    await act(async () => vi.waitFor(() => {
+      expect(container?.textContent).toContain("Lesson missing");
+    }));
+
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it("places Profile immediately before the theme control", async () => {
+    networkLesson.mockResolvedValue({
+      ...cachedLesson,
+      materials: [],
+      notes: "",
+    });
+    networkMaterials.mockResolvedValue([]);
+    readCatalog.mockResolvedValue(null);
+
+    await act(async () => {
+      root?.render(createElement(
+        ThemeProvider,
+        null,
+        createElement(LessonPage),
+      ));
+    });
+    await act(async () => vi.waitFor(() => {
+      expect(container?.querySelector(".lesson-header__profile")).not.toBeNull();
+    }));
+    const profileButton = container?.querySelector(".lesson-header__profile");
+    expect(profileButton?.nextElementSibling?.classList.contains("lesson-header__theme")).toBe(true);
+  });
+
   it("mounts a cached Board v2 lesson while the network request is still pending", async () => {
     networkLesson.mockReturnValue(new Promise(() => undefined));
     readCatalog.mockResolvedValue({
@@ -199,6 +295,7 @@ describe("LessonPage local-first bootstrap", () => {
         expect(codeWorkspaceProps).toEqual({
           lessonId: LESSON_ID,
           userId: USER_ID,
+          profile: { displayName: "Offline tutor", color: "#2563eb" },
           readOnly: false,
         });
       });

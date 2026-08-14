@@ -60,6 +60,40 @@ Board/Code sync tickets must contain a server-authenticated ephemeral guest
 principal derived from the room capability; awareness may not trust a client
 supplied identity or display role.
 
+The current web adapter requires one valid origin/device-local collaboration
+profile before mounting any guest Board, Code, or Call provider. The strict
+`eduri-online-profile-v1` record contains only normalized `displayName` and
+canonical `#rrggbb` color presentation preferences; the initial guest proposal
+is `Гость` with `#2563eb`. The gate starts only after the room is active and the
+requested resource has resolved. Loading, missing, expired, error, empty-room,
+and unknown-resource screens neither expose the Profile action nor open its
+mandatory modal. The full storage, picker, validation, cross-tab, and modal
+interaction contract is normative in `BOARD_ARCHITECTURE.md` and
+`BOARD_CONTROLS.md`.
+
+Profile fields are untrusted presentation input and never become a share
+capability, resource identifier, actor identifier, role, permission, lifecycle
+lease, or activity mutation. Guest Board and Code retain the stable principals
+derived by their own authenticated capability-and-device domains. Current guest
+Call uses the stable LiveKit identity
+`guest:<base64url(HMAC-SHA-256(AUTH_LOOKUP_KEY,
+"eduri-guest-call-actor\0" || shareId || "\0" || deviceId))>`; the older-client
+fallback without a device ID is connection-random and is not used by the
+profile-gated web adapter. Display name or color changes must not change either
+identity form.
+
+Board and Code validate the profile again at admission and update it on their
+existing authenticated connections. Call-token issuance reauthorizes the live
+share capability, resolves the active Call generation, and places only the
+normalized name/color on the token for that server-derived participant identity.
+When that participant is already connected, `PATCH .../call-profile`
+reauthorizes the same capability and device identity and invokes LiveKit's
+private management `updateParticipant`; it does not issue a replacement JWT,
+recreate the room/component, interrupt media tracks, or extend room activity.
+Missing Call resources/participants and unavailable management RPC return
+explicit bounded errors rather than silently accepting the local presentation
+change as a remote success.
+
 All public mutations are same-origin-only, bounded, and rate-limited. A generic
 "activity" endpoint is forbidden: only a successfully committed Board update,
 Code update/file operation/test-case mutation, newly created room resource, or
@@ -166,6 +200,9 @@ Implemented:
 - stable, explicitly provisioned guest LiveKit room/token issuance with
   source-scoped camera, microphone, and screen-share publishing;
 - public Home, solo Board, solo Python, and guest Call entry points;
+- mandatory first-online collaboration profile gating after valid resource
+  resolution, server-authoritative guest presentation identity, and in-place
+  Board, Code, terminal, and connected LiveKit participant updates;
 - guest Code state-vector sync with a durable local update log/outbox,
   idempotent ACK replay, multipart cold sync, and authenticated awareness;
 - capability-scoped immutable Code blob upload/download with local verified

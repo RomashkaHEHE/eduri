@@ -6,6 +6,7 @@ import * as Y from "yjs";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   addCodeWorkspaceEntry,
+  codeWorkspaceEntries,
   codeWorkspaceText,
   listCodeWorkspaceEntries,
   moveCodeWorkspaceEntry,
@@ -316,6 +317,62 @@ describe("CodeSyncRepository lesson ownership", () => {
 });
 
 describe("CodeSyncRepository bounded compaction", () => {
+  it("rejects a raw main.py deletion without changing durable state or counters", () => {
+    const harness = createHarness();
+    try {
+      const documentBefore = harness.db.prepare(`
+        SELECT * FROM code_documents WHERE workspace_id = ?
+      `).get(harness.workspaceId);
+      const workspaceUsageBefore = harness.db.prepare(`
+        SELECT * FROM code_storage_usage WHERE workspace_id = ?
+      `).get(harness.workspaceId);
+      const guestUsageBefore = guestStorageUsage(harness.db);
+      const persistedBefore = harness.repository.readDocumentState(harness.workspaceId);
+      const stateVectorBeforeDelete = Y.encodeStateVector(harness.document);
+      codeWorkspaceEntries(harness.document).delete("main-py");
+      const update = Y.encodeStateAsUpdate(
+        harness.document,
+        stateVectorBeforeDelete,
+      );
+
+      expect(() => append(harness, "delete-required-main", update))
+        .toThrowError(expect.objectContaining({
+          code: "INVALID_UPDATE",
+          message: expect.stringContaining("invalid workspace document"),
+        }));
+      expect(harness.db.prepare(`
+        SELECT * FROM code_documents WHERE workspace_id = ?
+      `).get(harness.workspaceId)).toEqual(documentBefore);
+      expect(harness.db.prepare(`
+        SELECT * FROM code_storage_usage WHERE workspace_id = ?
+      `).get(harness.workspaceId)).toEqual(workspaceUsageBefore);
+      expect(guestStorageUsage(harness.db)).toEqual(guestUsageBefore);
+      expect(harness.db.prepare(`
+        SELECT COUNT(*) AS count FROM code_updates
+      `).get()).toEqual({ count: 0 });
+      expect(harness.db.prepare(`
+        SELECT COUNT(*) AS count FROM code_update_receipts
+      `).get()).toEqual({ count: 0 });
+
+      const persistedAfter = harness.repository.readDocumentState(harness.workspaceId);
+      expect(persistedAfter.sequence).toBe(persistedBefore.sequence);
+      expect(persistedAfter.stateVector).toEqual(persistedBefore.stateVector);
+      expect(persistedAfter.update).toEqual(persistedBefore.update);
+      const restored = new Y.Doc();
+      try {
+        Y.applyUpdate(restored, persistedAfter.update);
+        expect(codeWorkspaceText(restored, "main-py")).toBeInstanceOf(Y.Text);
+        expect(() => validateCodeWorkspaceDocument(restored)).not.toThrow();
+      } finally {
+        restored.destroy();
+      }
+      expectGuestStorageUsageConsistent(harness.db);
+    } finally {
+      harness.document.destroy();
+      closeDatabase(harness.db);
+    }
+  });
+
   it("compacts a full update-v1 snapshot and deduplicates through retained receipts", () => {
     const harness = createHarness({
       compactAfterUpdateCount: 2,

@@ -9,13 +9,16 @@ import WebSocket, {
 } from "ws";
 
 import {
+  BOARD_PROFILE_UPDATE_PAYLOAD_MAX_BYTES,
   BOARD_PROTOCOL_LIMITS,
   BOARD_SUBPROTOCOL,
   BoardCapability,
   BoardControlCode,
   BoardMessageType,
   BoardProtocolError,
+  decodeBoardProfileUpdatePayload,
   decodeBoardFrame,
+  encodeBoardProfileUpdatedPayload,
   encodeBoardFrame,
   messageIdToHex,
   type AwarenessFrame,
@@ -25,6 +28,10 @@ import {
   type ControlFrame,
   type UpdateFrame,
 } from "../../board/protocol/index.js";
+import {
+  normalizeCollaborationProfile,
+  type CollaborationProfile,
+} from "../../shared/collaborationProfile.js";
 import type { LessonStatus } from "../types.js";
 import type { AppContext } from "../types.js";
 import type { AssetReadyEvent } from "./assets.js";
@@ -71,6 +78,7 @@ export const BOARD_SYNC_AGGREGATE_RATE_LIMITS = Object.freeze({
   updateBytesPerPrincipal: 128 * 1024 * 1024,
   awarenessPerPrincipal: 1_200,
   awarenessBytesPerPrincipal: 4 * 1024 * 1024,
+  profileUpdatesPerPrincipal: 120,
 });
 
 const CLOSE_PROTOCOL = 4400;
@@ -78,15 +86,6 @@ const CLOSE_UNAUTHORIZED = 4401;
 const CLOSE_FORBIDDEN = 4403;
 const CLOSE_GONE = 4410;
 const CLOSE_RATE_LIMITED = 4429;
-
-const IDENTITY_COLORS = [
-  "#2563eb",
-  "#dc2626",
-  "#059669",
-  "#7c3aed",
-  "#c2410c",
-  "#0e7490",
-] as const;
 
 interface ChunkAssembly {
   innerType: BoardMessageType.SYNC_STEP2 | BoardMessageType.UPDATE;
@@ -112,6 +111,7 @@ interface BoardSocketConnection {
   frameRate: FixedWindowRate;
   updateRate: FixedWindowRate;
   awarenessRate: FixedWindowRate;
+  profileRate: FixedWindowRate;
 }
 
 class FixedWindowRate {
@@ -315,12 +315,6 @@ function controlPayload(value: Record<string, unknown>): Uint8Array {
   return new TextEncoder().encode(JSON.stringify(value));
 }
 
-function identityColor(userId: string): string {
-  const index = createHash("sha256").update(userId).digest()[0]
-    % IDENTITY_COLORS.length;
-  return IDENTITY_COLORS[index];
-}
-
 function syncUpdateMessageId(
   access: BoardSyncAccess,
   documentKey: string,
@@ -406,6 +400,7 @@ export class BoardSyncTransport {
   private readonly updateByteRatesByPrincipal = new Map<string, FixedWindowRate>();
   private readonly awarenessRatesByPrincipal = new Map<string, FixedWindowRate>();
   private readonly awarenessByteRatesByPrincipal = new Map<string, FixedWindowRate>();
+  private readonly profileRatesByPrincipal = new Map<string, FixedWindowRate>();
   private readonly issuedAwarenessIds = new Set<number>();
   private readonly awareness = new BoardAwarenessRegistry();
   private readonly previousDisconnectUserSockets: AppContext["disconnectUserSockets"];
@@ -537,6 +532,7 @@ export class BoardSyncTransport {
       connection.frameRate.retryAfterMs(),
       connection.updateRate.retryAfterMs(),
       connection.awarenessRate.retryAfterMs(),
+      connection.profileRate.retryAfterMs(),
     );
   }
 
@@ -601,6 +597,14 @@ export class BoardSyncTransport {
     );
   }
 
+  private consumeProfileBudget(connection: BoardSocketConnection): boolean {
+    return this.consumeKeyedRate(
+      this.profileRatesByPrincipal,
+      this.principalRateKey(connection),
+      BOARD_SYNC_AGGREGATE_RATE_LIMITS.profileUpdatesPerPrincipal,
+    );
+  }
+
   close(): void {
     if (this.closed) return;
     this.closed = true;
@@ -622,6 +626,7 @@ export class BoardSyncTransport {
     this.updateByteRatesByPrincipal.clear();
     this.awarenessRatesByPrincipal.clear();
     this.awarenessByteRatesByPrincipal.clear();
+    this.profileRatesByPrincipal.clear();
     this.awareness.clear();
     this.wss.close();
     this.restoreRevocationHooks();
@@ -647,6 +652,7 @@ export class BoardSyncTransport {
       frameRate: new FixedWindowRate(2_000),
       updateRate: new FixedWindowRate(1_200),
       awarenessRate: new FixedWindowRate(600),
+      profileRate: new FixedWindowRate(30),
     };
     connection.authTimer.unref();
     this.connections.add(connection);
@@ -813,6 +819,16 @@ export class BoardSyncTransport {
         return;
       case BoardMessageType.AWARENESS:
         this.handleAwareness(connection, frame);
+        return;
+      case BoardMessageType.CONTROL:
+        if (frame.code === BoardControlCode.PROFILE_UPDATE) {
+          this.handleProfileUpdate(connection, frame);
+          return;
+        }
+        this.protocolFailure(
+          connection,
+          `${BoardControlCode[frame.code]} is not accepted from a client`,
+        );
         return;
       case BoardMessageType.CHUNK:
         this.protocolFailure(connection, "Nested CHUNK is not allowed");
@@ -1035,7 +1051,7 @@ export class BoardSyncTransport {
         userId: access.userId,
         displayName: access.displayName,
         role: access.role,
-        color: identityColor(access.userId),
+        color: access.color,
       };
       const authorized = authorizeAwarenessUpdate(
         frame.update,
@@ -1067,6 +1083,161 @@ export class BoardSyncTransport {
     }
   }
 
+  private handleProfileUpdate(
+    connection: BoardSocketConnection,
+    frame: ControlFrame,
+  ): void {
+    if (
+      (connection.authenticated!.capabilities & BoardCapability.PROFILE_UPDATE) === 0
+    ) {
+      this.protocolFailure(connection, "Profile updates were not negotiated");
+      return;
+    }
+    if (frame.docKey !== undefined || frame.messageId === undefined) {
+      this.protocolFailure(
+        connection,
+        "PROFILE_UPDATE requires only a correlation message ID",
+      );
+      return;
+    }
+    const authenticated = connection.authenticated!;
+    let currentAccess: BoardSyncAccess;
+    try {
+      if (frame.generation !== authenticated.access.generation) {
+        throw new BoardSyncServiceError(
+          "ACCESS_REVOKED",
+          "Profile generation does not match authenticated Board generation",
+        );
+      }
+      currentAccess = this.reauthorizeAccess(connection);
+    } catch (error) {
+      this.serviceFailure(connection, error, frame.messageId);
+      return;
+    }
+    if (
+      !connection.profileRate.consume()
+      || !this.consumeProfileBudget(connection)
+    ) {
+      this.closeForRateLimit(
+        connection,
+        "Profile update rate exceeded",
+        frame.messageId,
+      );
+      return;
+    }
+
+    let profile: CollaborationProfile;
+    try {
+      if (frame.payload.byteLength > BOARD_PROFILE_UPDATE_PAYLOAD_MAX_BYTES) {
+        throw new Error("Profile update payload is oversized");
+      }
+      profile = normalizeCollaborationProfile(
+        decodeBoardProfileUpdatePayload(frame.payload),
+      );
+    } catch {
+      this.sendProfileUpdated(connection, frame.messageId, {
+        accepted: false,
+        error: "Profile is invalid",
+      });
+      return;
+    }
+
+    try {
+      const access = this.service!.reauthorize({
+        boardId: currentAccess.boardId,
+        generation: currentAccess.generation,
+        userId: currentAccess.userId,
+        sessionHash: currentAccess.sessionHash,
+        profile,
+      });
+      const identity: BoardAwarenessIdentity = {
+        userId: access.userId,
+        displayName: access.displayName,
+        role: access.role,
+        color: access.color,
+      };
+      const documentIdentities = new Map(
+        [...connection.awarenessDocs].map((docKey) => [
+          docKey,
+          this.service!.documentIdentity(
+            access.boardId,
+            access.generation,
+            docKey,
+          ),
+        ]),
+      );
+      const awarenessUpdates = this.awareness.updateIdentitiesAtomically(
+        [...documentIdentities.values()],
+        connection.awarenessClientId!,
+        identity,
+      );
+
+      connection.authenticated = { ...authenticated, access };
+      for (const docKey of connection.awarenessDocs) {
+        const documentIdentity = documentIdentities.get(docKey);
+        const update = documentIdentity === undefined
+          ? undefined
+          : awarenessUpdates.get(documentIdentity);
+        if (!update) continue;
+        this.broadcastAwarenessIncludingSender(connection, docKey, update);
+      }
+      this.sendProfileUpdated(connection, frame.messageId, {
+        accepted: true,
+        profile,
+      });
+    } catch (error) {
+      if (error instanceof BoardAwarenessError) {
+        this.sendProfileUpdated(connection, frame.messageId, {
+          accepted: false,
+          error: "Profile awareness could not be updated",
+        });
+        return;
+      }
+      this.serviceFailure(connection, error, frame.messageId);
+    }
+  }
+
+  private sendProfileUpdated(
+    connection: BoardSocketConnection,
+    messageId: BoardMessageId,
+    result:
+      | { readonly accepted: true; readonly profile: CollaborationProfile }
+      | { readonly accepted: false; readonly error: string },
+  ): void {
+    this.sendFrame(connection, {
+      type: BoardMessageType.CONTROL,
+      generation: connection.authenticated!.access.generation,
+      code: BoardControlCode.PROFILE_UPDATED,
+      messageId,
+      payload: encodeBoardProfileUpdatedPayload(result),
+    });
+  }
+
+  private broadcastAwarenessIncludingSender(
+    sender: BoardSocketConnection,
+    docKey: string,
+    update: Uint8Array,
+  ): void {
+    const access = sender.authenticated!.access;
+    const frame: AwarenessFrame = {
+      type: BoardMessageType.AWARENESS,
+      generation: access.generation,
+      docKey,
+      awarenessClientId: sender.awarenessClientId!,
+      update,
+    };
+    for (const peer of this.boardConnections.get(access.boardId) ?? []) {
+      if (
+        !peer.subscribedDocs.has(docKey)
+        || peer.ws.readyState !== WebSocket.OPEN
+        || !this.authorizeOutbound(peer)
+      ) {
+        continue;
+      }
+      this.sendFrame(peer, frame);
+    }
+  }
+
   private reauthorizeFrame(
     connection: BoardSocketConnection,
     generation: number,
@@ -1088,17 +1259,29 @@ export class BoardSyncTransport {
     requireEdit = false,
   ): BoardSyncAccess {
     const authenticated = connection.authenticated!;
-    const access = this.service!.reauthorize({
-      boardId: authenticated.access.boardId,
-      generation: authenticated.access.generation,
-      userId: authenticated.access.userId,
-      sessionHash: authenticated.access.sessionHash,
-    }, requireEdit);
+    const access = this.reauthorizeAccess(connection, requireEdit);
     connection.authenticated = {
       ...authenticated,
       access,
     };
     return access;
+  }
+
+  private reauthorizeAccess(
+    connection: BoardSocketConnection,
+    requireEdit = false,
+  ): BoardSyncAccess {
+    const authenticated = connection.authenticated!;
+    return this.service!.reauthorize({
+      boardId: authenticated.access.boardId,
+      generation: authenticated.access.generation,
+      userId: authenticated.access.userId,
+      sessionHash: authenticated.access.sessionHash,
+      profile: {
+        displayName: authenticated.access.displayName,
+        color: authenticated.access.color,
+      },
+    }, requireEdit);
   }
 
   private sendFrame(connection: BoardSocketConnection, frame: BoardFrame): void {

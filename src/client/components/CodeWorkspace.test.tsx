@@ -8,10 +8,12 @@ import * as Y from "yjs";
 import {
   addCodeTestCase,
   addCodeWorkspaceEntry,
+  codeWorkspaceEntries,
   codeWorkspaceText,
   codeWorkspaceTestCases,
   initializeCodeWorkspace,
   listCodeWorkspaceEntries,
+  listCodeTestCases,
   removeCodeWorkspaceEntry,
   replaceCodeWorkspaceText,
 } from "../../code/core/index.js";
@@ -26,6 +28,10 @@ import {
   type SharedTerminalState,
 } from "../../code/terminal/index.js";
 import { CODE_SYNC_LIMITS } from "../../code/protocol/constants.js";
+import {
+  CODE_WORKSPACE_LAYOUT_STORAGE_KEY,
+  DEFAULT_CODE_WORKSPACE_LAYOUT,
+} from "../code/codeWorkspaceLayout.js";
 import { decodeExactYTextSelection } from "../code/monacoRemotePresence.js";
 
 if (!globalThis.crypto.subtle) {
@@ -249,7 +255,10 @@ vi.mock("../pythonTerminal", async (importOriginal) => ({
 }));
 
 import { CodeWorkspace } from "./CodeWorkspace.js";
-import { PYTHON_TERMINAL_OUTPUT_TRUNCATION_MARKER } from "../pythonTerminal.js";
+import {
+  PYTHON_TERMINAL_OUTPUT_TRUNCATION_MARKER,
+  type PythonTerminalCommandResult,
+} from "../pythonTerminal.js";
 import { THEME_STORAGE_KEY, ThemeProvider } from "../theme.js";
 
 let root: Root | null = null;
@@ -273,7 +282,155 @@ afterEach(async () => {
   xtermMocks.instances.length = 0;
   window.localStorage.clear();
   vi.useRealTimers();
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
+
+interface WorkspaceGeometry {
+  height: number;
+  width: number;
+}
+
+function workspaceRect(
+  width: number,
+  height: number,
+  left = 0,
+  top = 0,
+): DOMRect {
+  return {
+    x: left,
+    y: top,
+    top,
+    right: left + width,
+    bottom: top + height,
+    left,
+    width,
+    height,
+    toJSON: () => ({}),
+  };
+}
+
+function mockWorkspaceGeometry(geometry: WorkspaceGeometry): void {
+  const original = HTMLElement.prototype.getBoundingClientRect;
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect")
+    .mockImplementation(function mockRect(this: HTMLElement): DOMRect {
+      if (this.classList.contains("full-code-workspace")) {
+        return workspaceRect(geometry.width, geometry.height);
+      }
+      if (this.classList.contains("code-console")) {
+        const compact = geometry.width <= 620;
+        const workspace = this.closest<HTMLElement>(".full-code-workspace");
+        const explorerWidth = Number.parseFloat(
+          workspace?.style.getPropertyValue("--code-explorer-width") ?? "",
+        ) || DEFAULT_CODE_WORKSPACE_LAYOUT.explorerWidth;
+        const consoleHeight = Number.parseFloat(
+          workspace?.style.getPropertyValue("--code-console-height") ?? "",
+        ) || DEFAULT_CODE_WORKSPACE_LAYOUT.consoleHeight;
+        const left = compact ? 0 : explorerWidth + 8;
+        return workspaceRect(
+          compact ? geometry.width : Math.max(0, geometry.width - left),
+          consoleHeight,
+          left,
+          geometry.height - consoleHeight,
+        );
+      }
+      return original.call(this);
+    });
+}
+
+function workspacePointerEvent(
+  type: string,
+  options: {
+    readonly pointerId?: number;
+    readonly x: number;
+    readonly y?: number;
+  },
+): PointerEvent {
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    button: 0,
+    clientX: options.x,
+    clientY: options.y ?? 0,
+  });
+  Object.defineProperties(event, {
+    pointerId: { configurable: true, value: options.pointerId ?? 1 },
+    pointerType: { configurable: true, value: "mouse" },
+    isPrimary: { configurable: true, value: true },
+  });
+  return event as PointerEvent;
+}
+
+function mockPointerCapture(element: HTMLElement) {
+  let capturedPointerId: number | null = null;
+  const setPointerCapture = vi.fn((pointerId: number) => {
+    capturedPointerId = pointerId;
+  });
+  const releasePointerCapture = vi.fn((pointerId: number) => {
+    if (capturedPointerId === pointerId) capturedPointerId = null;
+  });
+  Object.defineProperties(element, {
+    setPointerCapture: { configurable: true, value: setPointerCapture },
+    releasePointerCapture: { configurable: true, value: releasePointerCapture },
+    hasPointerCapture: {
+      configurable: true,
+      value: (pointerId: number) => capturedPointerId === pointerId,
+    },
+  });
+  return { releasePointerCapture, setPointerCapture };
+}
+
+function createWorkspaceLayoutSession(withTerminal = false) {
+  const document = new Y.Doc();
+  initializeCodeWorkspace(document, "layout-test");
+  const terminal = withTerminal ? createTestTerminalBridge() : null;
+  const session: CodeWorkspaceSessionHandle = {
+    document,
+    origin: Object.freeze({ type: "local" }),
+    blobStore: {
+      put: vi.fn(async () => {
+        throw new Error("not used");
+      }),
+      get: vi.fn(async () => null),
+    },
+    flush: vi.fn(async () => undefined),
+    ...(terminal ? { terminal: terminal.bridge } : {}),
+  };
+  return { document, session };
+}
+
+async function renderWorkspaceLayout(session: CodeWorkspaceSessionHandle) {
+  container = documentOwner().createElement("div");
+  documentOwner().body.append(container);
+  root = createRoot(container);
+  await act(async () => {
+    root?.render(createElement(CodeWorkspace, { session }));
+    await Promise.resolve();
+  });
+  const workspace = container.querySelector<HTMLElement>(
+    ".full-code-workspace",
+  );
+  if (!workspace) throw new Error("Code workspace not rendered");
+  return workspace;
+}
+
+async function renderWorkspaceWithProps(
+  session: CodeWorkspaceSessionHandle,
+  props: Record<string, unknown>,
+) {
+  container = documentOwner().createElement("div");
+  documentOwner().body.append(container);
+  root = createRoot(container);
+  await act(async () => {
+    root?.render(createElement(CodeWorkspace, { session, ...props }));
+    await Promise.resolve();
+  });
+  const workspace = container.querySelector<HTMLElement>(
+    ".full-code-workspace",
+  );
+  if (!workspace) throw new Error("Code workspace not rendered");
+  return workspace;
+}
 
 function createTestTerminalBridge() {
   const machine = new SharedTerminalStateMachine();
@@ -353,6 +510,471 @@ function commandResult() {
 }
 
 describe("CodeWorkspace collaborative session", () => {
+  it("keeps synchronization status in the editor toolbar instead of an overlay", async () => {
+    mockWorkspaceGeometry({ width: 1_200, height: 720 });
+    const { document, session } = createWorkspaceLayoutSession();
+    const workspace = await renderWorkspaceWithProps(session, {
+      syncStatus: {
+        connection: "online",
+        durability: "ready",
+        pendingUpdates: 0,
+        error: null,
+        readOnly: false,
+      },
+    });
+    const indicator = workspace.querySelector(".code-sync-indicator");
+
+    expect(indicator).not.toBeNull();
+    expect(indicator?.closest(".code-main__toolbar")).not.toBeNull();
+    expect(indicator?.parentElement?.parentElement?.classList
+      .contains("code-main__toolbar")).toBe(true);
+    expect(workspace.querySelector(".guest-code-workspace__status")).toBeNull();
+    expect(workspace.querySelector(".code-sync-status")).toBeNull();
+    expect(workspace.querySelector(".code-tests-toggle")).not.toBeNull();
+    expect(workspace.querySelector(".code-run-command")).not.toBeNull();
+    document.destroy();
+  });
+
+  describe("resizable layout", () => {
+    it("drags and clamps the desktop explorer, persists commits, and restores cancelled drags", async () => {
+      const geometry = { width: 1_200, height: 720 };
+      mockWorkspaceGeometry(geometry);
+      window.localStorage.setItem(CODE_WORKSPACE_LAYOUT_STORAGE_KEY, JSON.stringify({
+        ...DEFAULT_CODE_WORKSPACE_LAYOUT,
+        explorerWidth: 260,
+      }));
+      const { document, session } = createWorkspaceLayoutSession();
+      const workspace = await renderWorkspaceLayout(session);
+      const separator = container?.querySelector<HTMLElement>(
+        '[data-code-split="explorer"]',
+      );
+      if (!separator) throw new Error("Explorer separator not rendered");
+      const capture = mockPointerCapture(separator);
+
+      expect(workspace.dataset.codeLayout).toBe("wide");
+      expect(workspace.style.getPropertyValue("--code-explorer-width"))
+        .toBe("260px");
+      expect(separator.getAttribute("aria-valuenow")).toBe("260");
+
+      await act(async () => {
+        separator.dispatchEvent(workspacePointerEvent("pointerdown", {
+          pointerId: 16,
+          x: 264,
+        }));
+        window.dispatchEvent(workspacePointerEvent("pointerup", {
+          pointerId: 16,
+          x: 264,
+        }));
+      });
+      expect(workspace.style.getPropertyValue("--code-explorer-width"))
+        .toBe("260px");
+
+      await act(async () => {
+        separator.dispatchEvent(workspacePointerEvent("pointerdown", {
+          pointerId: 17,
+          x: 260,
+        }));
+        window.dispatchEvent(workspacePointerEvent("pointermove", {
+          pointerId: 99,
+          x: 390,
+        }));
+        window.dispatchEvent(workspacePointerEvent("pointermove", {
+          pointerId: 17,
+          x: 900,
+        }));
+      });
+
+      expect(capture.setPointerCapture).toHaveBeenCalledWith(17);
+      expect(workspace.dataset.codeResizing).toBe("explorer");
+      expect(documentOwner().documentElement.style.userSelect).toBe("none");
+      expect(workspace.style.getPropertyValue("--code-explorer-width"))
+        .toBe("420px");
+
+      await act(async () => {
+        window.dispatchEvent(workspacePointerEvent("pointerup", {
+          pointerId: 17,
+          x: 900,
+        }));
+      });
+      expect(workspace.dataset.codeResizing).toBeUndefined();
+      expect(documentOwner().documentElement.style.userSelect).toBe("");
+      expect(capture.releasePointerCapture).toHaveBeenCalledWith(17);
+      expect(JSON.parse(
+        window.localStorage.getItem(CODE_WORKSPACE_LAYOUT_STORAGE_KEY) ?? "{}",
+      )).toMatchObject({ explorerWidth: 420 });
+
+      await act(async () => {
+        separator.dispatchEvent(workspacePointerEvent("pointerdown", {
+          pointerId: 18,
+          x: 420,
+        }));
+        window.dispatchEvent(workspacePointerEvent("pointermove", {
+          pointerId: 18,
+          x: 20,
+        }));
+      });
+      expect(workspace.style.getPropertyValue("--code-explorer-width"))
+        .toBe("150px");
+
+      await act(async () => {
+        window.dispatchEvent(workspacePointerEvent("pointercancel", {
+          pointerId: 18,
+          x: 20,
+        }));
+      });
+      expect(workspace.style.getPropertyValue("--code-explorer-width"))
+        .toBe("420px");
+      expect(JSON.parse(
+        window.localStorage.getItem(CODE_WORKSPACE_LAYOUT_STORAGE_KEY) ?? "{}",
+      )).toMatchObject({ explorerWidth: 420 });
+      document.destroy();
+    });
+
+    it("rolls back explorer drags on capture loss and window blur without persisting", async () => {
+      mockWorkspaceGeometry({ width: 1_200, height: 720 });
+      const storedLayout = {
+        ...DEFAULT_CODE_WORKSPACE_LAYOUT,
+        explorerWidth: 260,
+      };
+      const serializedLayout = JSON.stringify(storedLayout);
+      window.localStorage.setItem(
+        CODE_WORKSPACE_LAYOUT_STORAGE_KEY,
+        serializedLayout,
+      );
+      const { document, session } = createWorkspaceLayoutSession();
+      const workspace = await renderWorkspaceLayout(session);
+      const separator = container?.querySelector<HTMLElement>(
+        '[data-code-split="explorer"]',
+      );
+      if (!separator) throw new Error("Explorer separator not rendered");
+      mockPointerCapture(separator);
+
+      await act(async () => {
+        separator.dispatchEvent(workspacePointerEvent("pointerdown", {
+          pointerId: 21,
+          x: 260,
+        }));
+        window.dispatchEvent(workspacePointerEvent("pointermove", {
+          pointerId: 21,
+          x: 380,
+        }));
+      });
+      expect(workspace.style.getPropertyValue("--code-explorer-width"))
+        .toBe("380px");
+
+      await act(async () => {
+        separator.dispatchEvent(workspacePointerEvent("lostpointercapture", {
+          pointerId: 21,
+          x: 380,
+        }));
+      });
+      expect(workspace.style.getPropertyValue("--code-explorer-width"))
+        .toBe("260px");
+      expect(workspace.dataset.codeResizing).toBeUndefined();
+      expect(window.localStorage.getItem(CODE_WORKSPACE_LAYOUT_STORAGE_KEY))
+        .toBe(serializedLayout);
+
+      await act(async () => {
+        separator.dispatchEvent(workspacePointerEvent("pointerdown", {
+          pointerId: 22,
+          x: 260,
+        }));
+        window.dispatchEvent(workspacePointerEvent("pointermove", {
+          pointerId: 22,
+          x: 340,
+        }));
+      });
+      expect(workspace.style.getPropertyValue("--code-explorer-width"))
+        .toBe("340px");
+
+      await act(async () => {
+        window.dispatchEvent(new Event("blur"));
+      });
+      expect(workspace.style.getPropertyValue("--code-explorer-width"))
+        .toBe("260px");
+      expect(workspace.dataset.codeResizing).toBeUndefined();
+      expect(documentOwner().documentElement.style.userSelect).toBe("");
+      expect(window.localStorage.getItem(CODE_WORKSPACE_LAYOUT_STORAGE_KEY))
+        .toBe(serializedLayout);
+      document.destroy();
+    });
+
+    it("supports separator ARIA, keyboard resizing, and double-click reset without remounts", async () => {
+      mockWorkspaceGeometry({ width: 1_200, height: 720 });
+      window.localStorage.setItem(CODE_WORKSPACE_LAYOUT_STORAGE_KEY, JSON.stringify({
+        ...DEFAULT_CODE_WORKSPACE_LAYOUT,
+        explorerWidth: 260,
+      }));
+      const { document, session } = createWorkspaceLayoutSession(true);
+      const workspace = await renderWorkspaceLayout(session);
+      const separator = container?.querySelector<HTMLElement>(
+        '[data-code-split="explorer"]',
+      );
+      if (!separator) throw new Error("Explorer separator not rendered");
+      const editorInstance = editorMocks.instances[0]?.editor;
+      const terminalInstance = xtermMocks.instances[0];
+
+      expect(separator.getAttribute("role")).toBe("separator");
+      expect(separator.tabIndex).toBe(0);
+      expect(separator.getAttribute("aria-orientation")).toBe("vertical");
+      expect(separator.getAttribute("aria-valuemin")).toBe("150");
+      expect(separator.getAttribute("aria-valuemax")).toBe("420");
+      expect(separator.getAttribute("aria-controls")?.split(" ")).toHaveLength(2);
+
+      await act(async () => {
+        separator.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "ArrowRight",
+          bubbles: true,
+          cancelable: true,
+        }));
+      });
+      expect(workspace.style.getPropertyValue("--code-explorer-width"))
+        .toBe("270px");
+      expect(separator.getAttribute("aria-valuenow")).toBe("270");
+
+      await act(async () => {
+        separator.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "ArrowLeft",
+          shiftKey: true,
+          bubbles: true,
+          cancelable: true,
+        }));
+      });
+      expect(workspace.style.getPropertyValue("--code-explorer-width"))
+        .toBe("230px");
+
+      await act(async () => {
+        separator.dispatchEvent(new MouseEvent("dblclick", {
+          bubbles: true,
+          cancelable: true,
+        }));
+      });
+      expect(workspace.style.getPropertyValue("--code-explorer-width"))
+        .toBe(`${DEFAULT_CODE_WORKSPACE_LAYOUT.explorerWidth}px`);
+      expect(editorMocks.instances).toHaveLength(1);
+      expect(editorMocks.instances[0]?.editor).toBe(editorInstance);
+      expect(xtermMocks.instances).toHaveLength(1);
+      expect(xtermMocks.instances[0]).toBe(terminalInstance);
+      expect(JSON.parse(
+        window.localStorage.getItem(CODE_WORKSPACE_LAYOUT_STORAGE_KEY) ?? "{}",
+      )).toMatchObject({
+        explorerWidth: DEFAULT_CODE_WORKSPACE_LAYOUT.explorerWidth,
+      });
+      document.destroy();
+    });
+
+    it("switches separator orientations from container geometry without remounting Monaco", async () => {
+      const geometry = { width: 1_200, height: 720 };
+      mockWorkspaceGeometry(geometry);
+      let resizeCallback: ResizeObserverCallback | null = null;
+      const disconnect = vi.fn();
+      vi.stubGlobal("ResizeObserver", class MockResizeObserver {
+        constructor(callback: ResizeObserverCallback) {
+          resizeCallback = callback;
+        }
+        observe() {}
+        unobserve() {}
+        disconnect() { disconnect(); }
+      });
+      const { document, session } = createWorkspaceLayoutSession();
+      const workspace = await renderWorkspaceLayout(session);
+      const explorerSeparator = container?.querySelector<HTMLElement>(
+        '[data-code-split="explorer"]',
+      );
+      const editorInstance = editorMocks.instances[0]?.editor;
+      if (!explorerSeparator) throw new Error("Explorer separator not rendered");
+
+      expect(workspace.dataset.codeLayout).toBe("wide");
+      expect(workspace.dataset.codeTestsLayout).toBe("side");
+      expect(explorerSeparator.getAttribute("aria-orientation")).toBe("vertical");
+
+      geometry.width = 560;
+      await act(async () => {
+        resizeCallback?.([], {} as ResizeObserver);
+      });
+      expect(workspace.dataset.codeLayout).toBe("compact");
+      expect(workspace.dataset.codeTestsLayout).toBe("stacked");
+      expect(explorerSeparator.getAttribute("aria-orientation"))
+        .toBe("horizontal");
+      expect(editorMocks.instances).toHaveLength(1);
+      expect(editorMocks.instances[0]?.editor).toBe(editorInstance);
+      document.destroy();
+    });
+
+    it("reserves the editor and stacked console when maximizing compact Explorer", async () => {
+      mockWorkspaceGeometry({ width: 560, height: 720 });
+      const { document, session } = createWorkspaceLayoutSession();
+      const workspace = await renderWorkspaceLayout(session);
+      const testsToggle = container?.querySelector<HTMLButtonElement>(
+        '.code-tests-toggle[aria-expanded="false"]',
+      );
+
+      await act(async () => {
+        testsToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await Promise.resolve();
+      });
+      const explorerSeparator = container?.querySelector<HTMLElement>(
+        '[data-code-split="explorer"]',
+      );
+      if (!explorerSeparator) throw new Error("Explorer separator not rendered");
+
+      expect(workspace.dataset.codeLayout).toBe("compact");
+      expect(workspace.dataset.codeTestsLayout).toBe("stacked");
+      expect(explorerSeparator.getAttribute("aria-orientation"))
+        .toBe("horizontal");
+      expect(explorerSeparator.getAttribute("aria-valuemax")).toBe("136");
+      expect(workspace.style.getPropertyValue("--code-console-height"))
+        .toBe("348px");
+      expect(workspace.style.getPropertyValue("--code-tests-height"))
+        .toBe("190px");
+
+      await act(async () => {
+        explorerSeparator.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "End",
+          bubbles: true,
+          cancelable: true,
+        }));
+      });
+      expect(explorerSeparator.getAttribute("aria-valuenow")).toBe("136");
+      expect(workspace.style.getPropertyValue("--code-explorer-height"))
+        .toBe("136px");
+      expect(workspace.style.getPropertyValue("--code-console-height"))
+        .toBe("348px");
+      expect(workspace.style.getPropertyValue("--code-tests-height"))
+        .toBe("190px");
+      document.destroy();
+    });
+
+    it("resizes the console and tests panel in side and stacked layouts without remounts", async () => {
+      const geometry = { width: 1_200, height: 720 };
+      mockWorkspaceGeometry(geometry);
+      const resizeObservers: Array<{
+        callback: ResizeObserverCallback;
+        observed: Set<Element>;
+      }> = [];
+      vi.stubGlobal("ResizeObserver", class MockResizeObserver {
+        private readonly record: {
+          callback: ResizeObserverCallback;
+          observed: Set<Element>;
+        };
+        constructor(callback: ResizeObserverCallback) {
+          this.record = { callback, observed: new Set() };
+          resizeObservers.push(this.record);
+        }
+        observe(target: Element) { this.record.observed.add(target); }
+        unobserve(target: Element) { this.record.observed.delete(target); }
+        disconnect() { this.record.observed.clear(); }
+      });
+      const { document, session } = createWorkspaceLayoutSession(true);
+      const workspace = await renderWorkspaceLayout(session);
+      const consoleSeparator = container?.querySelector<HTMLElement>(
+        '[data-code-split="console"]',
+      );
+      if (!consoleSeparator) throw new Error("Console separator not rendered");
+      mockPointerCapture(consoleSeparator);
+      const mainEditor = editorMocks.instances[0]?.editor;
+      const terminal = xtermMocks.instances[0];
+
+      await act(async () => {
+        consoleSeparator.dispatchEvent(workspacePointerEvent("pointerdown", {
+          pointerId: 31,
+          x: 600,
+          y: 500,
+        }));
+        window.dispatchEvent(workspacePointerEvent("pointermove", {
+          pointerId: 31,
+          x: 600,
+          y: 410,
+        }));
+      });
+      expect(workspace.style.getPropertyValue("--code-console-height"))
+        .toBe("310px");
+
+      await act(async () => {
+        window.dispatchEvent(workspacePointerEvent("pointerup", {
+          pointerId: 31,
+          x: 600,
+          y: 0,
+        }));
+      });
+      expect(workspace.style.getPropertyValue("--code-console-height"))
+        .toBe("452px");
+      expect(JSON.parse(
+        window.localStorage.getItem(CODE_WORKSPACE_LAYOUT_STORAGE_KEY) ?? "{}",
+      )).toMatchObject({ consoleHeight: 452 });
+
+      const testsToggle = container?.querySelector<HTMLButtonElement>(
+        '.code-tests-toggle[aria-expanded="false"]',
+      );
+      await act(async () => {
+        testsToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        await Promise.resolve();
+      });
+      const testsSeparator = container?.querySelector<HTMLElement>(
+        '[data-code-split="tests"]',
+      );
+      if (!testsSeparator) throw new Error("Tests separator not rendered");
+      mockPointerCapture(testsSeparator);
+      expect(workspace.dataset.codeTestsLayout).toBe("side");
+      expect(testsSeparator.getAttribute("aria-orientation")).toBe("vertical");
+
+      await act(async () => {
+        testsSeparator.dispatchEvent(workspacePointerEvent("pointerdown", {
+          pointerId: 32,
+          x: 588,
+          y: 400,
+        }));
+        window.dispatchEvent(workspacePointerEvent("pointerup", {
+          pointerId: 32,
+          x: 648,
+          y: 400,
+        }));
+      });
+      expect(workspace.style.getPropertyValue("--code-tests-width"))
+        .toBe("420px");
+
+      geometry.width = 800;
+      const workspaceObserver = resizeObservers.find((record) => (
+        record.observed.has(workspace)
+      ));
+      if (!workspaceObserver) throw new Error("Workspace ResizeObserver missing");
+      await act(async () => {
+        workspaceObserver.callback([], {} as ResizeObserver);
+      });
+      expect(workspace.dataset.codeLayout).toBe("wide");
+      expect(workspace.dataset.codeTestsLayout).toBe("stacked");
+      expect(testsSeparator.getAttribute("aria-orientation"))
+        .toBe("horizontal");
+
+      await act(async () => {
+        testsSeparator.dispatchEvent(workspacePointerEvent("pointerdown", {
+          pointerId: 33,
+          x: 400,
+          y: 508,
+        }));
+        window.dispatchEvent(workspacePointerEvent("pointerup", {
+          pointerId: 33,
+          x: 400,
+          y: 478,
+        }));
+      });
+      expect(workspace.style.getPropertyValue("--code-tests-height"))
+        .toBe("210px");
+      expect(JSON.parse(
+        window.localStorage.getItem(CODE_WORKSPACE_LAYOUT_STORAGE_KEY) ?? "{}",
+      )).toMatchObject({
+        consoleHeight: 452,
+        testsWidth: 420,
+        testsHeight: 210,
+      });
+      expect(editorMocks.instances).toHaveLength(1);
+      expect(editorMocks.instances[0]?.editor).toBe(mainEditor);
+      expect(xtermMocks.instances).toHaveLength(1);
+      expect(xtermMocks.instances[0]).toBe(terminal);
+      document.destroy();
+    });
+  });
+
   it("uses the global dark theme for Monaco without changing the workspace", async () => {
     const document = new Y.Doc();
     initializeCodeWorkspace(document, "theme-test");
@@ -585,7 +1207,7 @@ describe("CodeWorkspace collaborative session", () => {
     document.destroy();
   });
 
-  it("shows folder actions in the editor area and targets the selected folder", async () => {
+  it("keeps folder actions while modifier selection leaves the opened file alone", async () => {
     const document = new Y.Doc();
     initializeCodeWorkspace(document, "server-bootstrap");
     addCodeWorkspaceEntry(document, {
@@ -616,11 +1238,31 @@ describe("CodeWorkspace collaborative session", () => {
       ...container!.querySelectorAll<HTMLButtonElement>("button"),
     ].find((button) => button.textContent?.trim() === name);
     await act(async () => {
+      buttonNamed("empty")?.dispatchEvent(new MouseEvent("click", {
+        bubbles: true,
+        ctrlKey: true,
+      }));
+      await Promise.resolve();
+    });
+
+    expect(buttonNamed("empty")?.closest('[role="treeitem"]')
+      ?.getAttribute("aria-selected")).toBe("true");
+    expect(buttonNamed("main.py")?.closest('[role="treeitem"]')
+      ?.getAttribute("aria-selected")).toBe("true");
+    expect(container.querySelector(".code-main__toolbar strong")?.textContent)
+      .toBe("main.py");
+    expect(container.querySelector('[role="group"][aria-label="Действия папки empty"]'))
+      .toBeNull();
+    expect(container.querySelector('[data-testid="monaco"]')).not.toBeNull();
+
+    await act(async () => {
       buttonNamed("empty")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       await Promise.resolve();
     });
 
-    const folderActions = container.querySelector('[role="group"][aria-label="Действия папки empty"]');
+    const folderActions = container.querySelector(
+      '[role="group"][aria-label="Действия папки empty"]',
+    );
     expect(folderActions).not.toBeNull();
     expect([
       ...folderActions!.querySelectorAll<HTMLButtonElement>("button"),
@@ -629,64 +1271,6 @@ describe("CodeWorkspace collaborative session", () => {
       "Создать файл",
       "Создать папку",
     ]);
-
-    await act(async () => {
-      buttonNamed("Создать папку")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      await Promise.resolve();
-    });
-    expect(listCodeWorkspaceEntries(document)).toContainEqual(
-      expect.objectContaining({
-        kind: "folder",
-        parentId: "empty-folder",
-        name: "folder",
-      }),
-    );
-
-    const uploadInput = container.querySelector<HTMLInputElement>(
-      'input[aria-label="Файлы для папки empty"]',
-    )!;
-    const inputClick = vi.spyOn(uploadInput, "click");
-    await act(async () => {
-      buttonNamed("Прикрепить файл")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-    expect(inputClick).toHaveBeenCalledTimes(1);
-    const attached = new File(["print(1)\n"], "attached.py", {
-      type: "text/x-python",
-    });
-    Object.defineProperty(attached, "arrayBuffer", {
-      configurable: true,
-      value: async () => new TextEncoder().encode("print(1)\n").buffer,
-    });
-    Object.defineProperty(uploadInput, "files", {
-      configurable: true,
-      value: [attached],
-    });
-    await act(async () => {
-      uploadInput.dispatchEvent(new Event("change", { bubbles: true }));
-      await vi.waitFor(() => expect(listCodeWorkspaceEntries(document))
-        .toContainEqual(expect.objectContaining({
-          kind: "file",
-          parentId: "empty-folder",
-          name: "attached.py",
-          text: "print(1)\n",
-        })));
-    });
-
-    await act(async () => {
-      buttonNamed("empty")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      await Promise.resolve();
-    });
-    await act(async () => {
-      buttonNamed("Создать файл")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      await Promise.resolve();
-    });
-    expect(listCodeWorkspaceEntries(document)).toContainEqual(
-      expect.objectContaining({
-        kind: "file",
-        parentId: "empty-folder",
-        name: "untitled.py",
-      }),
-    );
 
     document.destroy();
   });
@@ -1783,6 +2367,223 @@ describe("CodeWorkspace collaborative session", () => {
     document.destroy();
   });
 
+  it("toggles the run button between F9 and Stop while starting and stopping code", async () => {
+    const document = new Y.Doc();
+    initializeCodeWorkspace(document, "run-button-state");
+    const terminal = createTestTerminalBridge();
+    const session: CodeWorkspaceSessionHandle = {
+      document,
+      origin: Object.freeze({ type: "local" }),
+      blobStore: {
+        put: vi.fn(async () => {
+          throw new Error("not used");
+        }),
+        get: vi.fn(async () => null),
+      },
+      flush: vi.fn(async () => undefined),
+      terminal: terminal.bridge,
+    };
+    let resolveRun!: (value: PythonTerminalCommandResult) => void;
+    const run = new Promise<PythonTerminalCommandResult>((resolve) => {
+      resolveRun = resolve;
+    });
+    const interrupt = vi.fn(() => {
+      resolveRun({
+        ...commandResult(),
+        status: "interrupted",
+      });
+      return true;
+    });
+    const runtime = createPythonTerminalMock({
+      executeEntrypoint: vi.fn(() => run),
+      interrupt,
+    });
+    terminalRunnerMocks.startPythonTerminal.mockReturnValue(runtime);
+    container = documentOwner().createElement("div");
+    documentOwner().body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(createElement(CodeWorkspace, { session }));
+      await Promise.resolve();
+    });
+
+    const runButton = container.querySelector<HTMLButtonElement>(
+      ".code-run-command",
+    );
+    expect(runButton?.textContent?.trim()).toBe("F9");
+    expect(runButton?.getAttribute("aria-label")).toBe("Запустить код");
+    expect(runButton?.getAttribute("aria-keyshortcuts")).toBe("F9");
+
+    await act(async () => {
+      runButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await vi.waitFor(() => expect(runtime.executeEntrypoint)
+        .toHaveBeenCalledWith("main.py"));
+    });
+    expect(runButton?.textContent?.trim()).toBe("Stop");
+    expect(runButton?.getAttribute("aria-label")).toBe("Остановить выполнение");
+    expect(runButton?.hasAttribute("aria-keyshortcuts")).toBe(false);
+
+    await act(async () => {
+      runButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await vi.waitFor(() => expect(interrupt).toHaveBeenCalledOnce());
+    });
+    await vi.waitFor(() => expect(terminal.snapshot().mode).toBe("shell"));
+    expect(runButton?.textContent?.trim()).toBe("F9");
+    expect(runButton?.getAttribute("aria-label")).toBe("Запустить код");
+    expect(runButton?.getAttribute("aria-keyshortcuts")).toBe("F9");
+    document.destroy();
+  });
+
+  it("starts with F9 and ignores repeated F9 presses while code is running", async () => {
+    const document = new Y.Doc();
+    initializeCodeWorkspace(document, "f9-run-shortcut");
+    const terminal = createTestTerminalBridge();
+    const session: CodeWorkspaceSessionHandle = {
+      document,
+      origin: Object.freeze({ type: "local" }),
+      blobStore: {
+        put: vi.fn(async () => {
+          throw new Error("not used");
+        }),
+        get: vi.fn(async () => null),
+      },
+      flush: vi.fn(async () => undefined),
+      terminal: terminal.bridge,
+    };
+    let resolveRun!: (value: PythonTerminalCommandResult) => void;
+    const run = new Promise<PythonTerminalCommandResult>((resolve) => {
+      resolveRun = resolve;
+    });
+    const interrupt = vi.fn(() => {
+      resolveRun({
+        ...commandResult(),
+        status: "interrupted",
+      });
+      return true;
+    });
+    const runtime = createPythonTerminalMock({
+      executeEntrypoint: vi.fn(() => run),
+      interrupt,
+    });
+    terminalRunnerMocks.startPythonTerminal.mockReturnValue(runtime);
+    container = documentOwner().createElement("div");
+    documentOwner().body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(createElement(CodeWorkspace, { session }));
+      await Promise.resolve();
+    });
+
+    const monacoHost = container.querySelector<HTMLElement>('[data-testid="monaco"]');
+    const terminalHost = container.querySelector<HTMLElement>('[role="textbox"]');
+    if (!monacoHost || !terminalHost) {
+      throw new Error("Code workspace input surfaces were not rendered");
+    }
+    const monacoKeyDown = vi.fn();
+    const terminalKeyDown = vi.fn();
+    monacoHost.addEventListener("keydown", monacoKeyDown);
+    terminalHost.addEventListener("keydown", terminalKeyDown);
+
+    const outsideF9 = new KeyboardEvent("keydown", {
+      key: "F9",
+      code: "F9",
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => {
+      documentOwner().body.dispatchEvent(outsideF9);
+      await Promise.resolve();
+    });
+    expect(outsideF9.defaultPrevented).toBe(false);
+    expect(terminal.dispatch.mock.calls
+      .filter(([action]) => action.type === "start-run")).toHaveLength(0);
+
+    const modifiedF9Events = [
+      { altKey: true },
+      { ctrlKey: true },
+      { metaKey: true },
+      { shiftKey: true },
+    ].map((modifier) => new KeyboardEvent("keydown", {
+      key: "F9",
+      code: "F9",
+      ...modifier,
+      bubbles: true,
+      cancelable: true,
+    }));
+    const repeatedF9 = new KeyboardEvent("keydown", {
+      key: "F9",
+      code: "F9",
+      repeat: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => {
+      for (const modifiedF9 of modifiedF9Events) {
+        monacoHost.dispatchEvent(modifiedF9);
+      }
+      monacoHost.dispatchEvent(repeatedF9);
+      await Promise.resolve();
+    });
+    expect(modifiedF9Events.every((event) => !event.defaultPrevented)).toBe(true);
+    expect(repeatedF9.defaultPrevented).toBe(true);
+    expect(monacoKeyDown).toHaveBeenCalledTimes(modifiedF9Events.length);
+    expect(terminal.dispatch.mock.calls
+      .filter(([action]) => action.type === "start-run")).toHaveLength(0);
+
+    const startF9 = new KeyboardEvent("keydown", {
+      key: "F9",
+      code: "F9",
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => {
+      monacoHost.dispatchEvent(startF9);
+      await vi.waitFor(() => expect(runtime.executeEntrypoint)
+        .toHaveBeenCalledWith("main.py"));
+    });
+    expect(startF9.defaultPrevented).toBe(true);
+    expect(monacoKeyDown).toHaveBeenCalledTimes(modifiedF9Events.length);
+    const startActions = () => terminal.dispatch.mock.calls
+      .filter(([action]) => action.type === "start-run");
+    expect(startActions()).toHaveLength(1);
+
+    const repeatedPress = new KeyboardEvent("keydown", {
+      key: "F9",
+      code: "F9",
+      bubbles: true,
+      cancelable: true,
+    });
+    const heldKeyRepeat = new KeyboardEvent("keydown", {
+      key: "F9",
+      code: "F9",
+      repeat: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => {
+      terminalHost.dispatchEvent(repeatedPress);
+      terminalHost.dispatchEvent(heldKeyRepeat);
+      await Promise.resolve();
+    });
+    expect(repeatedPress.defaultPrevented).toBe(true);
+    expect(heldKeyRepeat.defaultPrevented).toBe(true);
+    expect(terminalKeyDown).not.toHaveBeenCalled();
+    expect(startActions()).toHaveLength(1);
+    expect(runtime.executeEntrypoint).toHaveBeenCalledOnce();
+    expect(interrupt).not.toHaveBeenCalled();
+    expect(terminal.snapshot().mode).toBe("busy");
+
+    const runButton = container.querySelector<HTMLButtonElement>(
+      ".code-run-command",
+    );
+    await act(async () => {
+      runButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await vi.waitFor(() => expect(interrupt).toHaveBeenCalledOnce());
+    });
+    await vi.waitFor(() => expect(terminal.snapshot().mode).toBe("shell"));
+    document.destroy();
+  });
+
   it("coalesces Run and Test clicks while document synchronization is pending", async () => {
     const document = new Y.Doc();
     initializeCodeWorkspace(document, "run-request-lock");
@@ -1835,6 +2636,12 @@ describe("CodeWorkspace collaborative session", () => {
       runButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       runButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
       testButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      runButton?.dispatchEvent(new KeyboardEvent("keydown", {
+        key: "F9",
+        code: "F9",
+        bubbles: true,
+        cancelable: true,
+      }));
       await Promise.resolve();
     });
     expect(waitUntilSynchronized).toHaveBeenCalledOnce();
@@ -1899,7 +2706,7 @@ describe("CodeWorkspace collaborative session", () => {
     });
     expect(container.querySelector('[aria-label="Лимит теста, мс"]')).toBeNull();
     const testsToggle = container.querySelector<HTMLButtonElement>(
-      'button[aria-controls="code-tests-panel"]',
+      '.code-tests-toggle[aria-expanded="false"]',
     );
     await act(async () => {
       testsToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -1943,6 +2750,83 @@ describe("CodeWorkspace collaborative session", () => {
     document.destroy();
   });
 
+  it("shows and creates independent test sets for each Python file", async () => {
+    const document = new Y.Doc();
+    initializeCodeWorkspace(document, "server-bootstrap");
+    const solutionId = addCodeWorkspaceEntry(document, {
+      id: "solution-py",
+      kind: "file",
+      name: "solution.py",
+      text: "print(2)\n",
+    }, "server-bootstrap");
+    addCodeTestCase(document, {
+      id: "main-only-test",
+      entryId: "main-py",
+      name: "Main only",
+    }, "server-bootstrap");
+    addCodeTestCase(document, {
+      id: "solution-only-test",
+      entryId: solutionId,
+      name: "Solution only",
+    }, "server-bootstrap");
+    const session: CodeWorkspaceSessionHandle = {
+      document,
+      origin: Object.freeze({ type: "local" }),
+      blobStore: {
+        put: vi.fn(async () => {
+          throw new Error("not used");
+        }),
+        get: vi.fn(async () => null),
+      },
+      flush: vi.fn(async () => undefined),
+    };
+    container = documentOwner().createElement("div");
+    documentOwner().body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(createElement(CodeWorkspace, { session }));
+      await Promise.resolve();
+    });
+
+    const testsToggle = container.querySelector<HTMLButtonElement>(
+      '.code-tests-toggle[aria-expanded="false"]',
+    );
+    expect(testsToggle?.textContent).toContain("1");
+    await act(async () => {
+      testsToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[role="tab"]')?.textContent)
+      .toContain("Main only");
+    expect(container.textContent).not.toContain("Solution only");
+
+    const solutionButton = [...container!.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "solution.py");
+    await act(async () => {
+      solutionButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(container!.querySelector('[role="tab"]')?.textContent)
+      .toContain("Solution only"));
+    expect(container.textContent).not.toContain("Main only");
+    expect(container.querySelector(".code-tests-toggle")?.textContent).toContain("1");
+
+    const addTest = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Добавить тест"]',
+    );
+    await act(async () => {
+      addTest?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await Promise.resolve();
+    });
+    await vi.waitFor(() => expect(listCodeTestCases(document, solutionId))
+      .toHaveLength(2));
+    expect(listCodeTestCases(document, "main-py")).toHaveLength(1);
+    expect(listCodeTestCases(document, solutionId)).toContainEqual(
+      expect.objectContaining({ entryId: solutionId, name: "Тест 2" }),
+    );
+    document.destroy();
+  });
+
   it("shows only a create action before the first test exists", async () => {
     const document = new Y.Doc();
     initializeCodeWorkspace(document, "solo-bootstrap");
@@ -1965,7 +2849,7 @@ describe("CodeWorkspace collaborative session", () => {
       await Promise.resolve();
     });
     const testsToggle = container.querySelector<HTMLButtonElement>(
-      'button[aria-controls="code-tests-panel"]',
+      '.code-tests-toggle[aria-expanded="false"]',
     );
     await act(async () => {
       testsToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -2105,7 +2989,9 @@ describe("CodeWorkspace collaborative session", () => {
     }));
 
     await act(async () => {
-      removeCodeWorkspaceEntry(document, "main-py", "remote-delete");
+      document.transact(() => {
+        codeWorkspaceEntries(document).delete("main-py");
+      }, "remote-delete");
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
     });
 

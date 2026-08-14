@@ -26,8 +26,15 @@ const target = {
 
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
+let hoverCapable = true;
 
 beforeEach(() => {
+  hoverCapable = true;
+  vi.stubGlobal("matchMedia", vi.fn(() => ({
+    get matches() { return hoverCapable; },
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  })));
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -38,6 +45,7 @@ afterEach(async () => {
   root = null;
   container?.remove();
   container = null;
+  vi.unstubAllGlobals();
 });
 
 function Harness({
@@ -75,6 +83,22 @@ function input(): HTMLInputElement {
   const result = container?.querySelector<HTMLInputElement>("input");
   if (!result) throw new Error("expected input");
   return result;
+}
+
+function pointerEvent(
+  type: string,
+  clientX: number,
+  clientY: number,
+  pointerType = "mouse",
+): PointerEvent {
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    clientX,
+    clientY,
+  });
+  Object.defineProperty(event, "pointerType", { value: pointerType });
+  return event as PointerEvent;
 }
 
 function peer(
@@ -230,19 +254,15 @@ describe("native input presence", () => {
       '[data-eduri-native-remote-label="true"]',
     )).toHaveLength(1);
 
-    // jsdom does not resolve :hover, so verify that the CSS rule can reveal
-    // only the label adjacent to the hovered hitbox. Leaving restores the
-    // inline hidden state asserted above.
-    const hoverStyles = container?.querySelector<HTMLStyleElement>(
+    const overlayStyles = container?.querySelector<HTMLStyleElement>(
       'style[data-eduri-native-remote-presence-styles="true"]',
     )?.textContent ?? "";
-    const normalizedHoverStyles = hoverStyles.replace(/\s+/gu, " ");
-    expect(normalizedHoverStyles).toMatch(/@media\s*\(hover:\s*hover\)/u);
-    expect(normalizedHoverStyles).toMatch(
-      /\[data-eduri-native-remote-hitbox="true"\]:hover\s*\+\s*\[data-eduri-native-remote-label="true"\]/u,
+    const normalizedOverlayStyles = overlayStyles.replace(/\s+/gu, " ");
+    expect(normalizedOverlayStyles).toMatch(
+      /pointer-events:\s*none\s*!important/u,
     );
-    expect(normalizedHoverStyles).toMatch(/opacity:\s*1/u);
-    expect(normalizedHoverStyles).toMatch(/visibility:\s*visible/u);
+    expect(normalizedOverlayStyles).not.toMatch(/pointer-events:\s*auto/u);
+    expect(normalizedOverlayStyles).not.toMatch(/:hover/u);
     expect(overlay?.querySelector(
       '[data-eduri-native-remote-peer="participant-a"] '
       + '[data-eduri-native-remote-selection="true"]',
@@ -284,6 +304,83 @@ describe("native input presence", () => {
     )?.style.visibility).toBe("hidden");
     expect(input().value).toBe("local value");
     expect(input().getAttribute("style")).toBeNull();
+  });
+
+  it("reveals labels by pointer coordinates without intercepting the input", async () => {
+    const publish = vi.fn<NativeInputPresencePublisher>();
+    await act(async () => {
+      root?.render(
+        <Harness
+          initialValue="local"
+          peers={[peer("participant-a", "Alice", "remote", 2, 2)]}
+          publish={publish}
+        />,
+      );
+    });
+    const element = input();
+    const overlay = container?.querySelector<HTMLElement>(
+      '[data-eduri-native-remote-overlay="true"]',
+    );
+    const hitbox = overlay?.querySelector<HTMLElement>(
+      '[data-eduri-native-remote-hitbox="true"]',
+    );
+    const caret = overlay?.querySelector<HTMLElement>(
+      '[data-eduri-native-remote-caret="true"]',
+    );
+    const label = overlay?.querySelector<HTMLElement>(
+      '[data-eduri-native-remote-label="true"]',
+    );
+    if (!overlay || !hitbox || !caret || !label) {
+      throw new Error("Remote native-input caret was not rendered");
+    }
+    hitbox.getBoundingClientRect = () => ({
+      x: 100,
+      y: 50,
+      left: 100,
+      top: 50,
+      right: 118,
+      bottom: 80,
+      width: 18,
+      height: 30,
+      toJSON: () => ({}),
+    } as DOMRect);
+
+    expect(overlay.style.pointerEvents).toBe("none");
+    expect(caret.style.pointerEvents).toBe("none");
+    expect(hitbox.style.pointerEvents).toBe("none");
+    expect(label.style.pointerEvents).toBe("none");
+    expect(label.style.visibility).toBe("hidden");
+
+    await act(async () => {
+      element.dispatchEvent(pointerEvent("pointermove", 105, 60));
+    });
+    expect(caret.dataset.hovered).toBe("true");
+    expect(label.style.opacity).toBe("1");
+    expect(label.style.visibility).toBe("visible");
+
+    const inputPointerDown = vi.fn();
+    const overlayPointerDown = vi.fn();
+    element.addEventListener("pointerdown", inputPointerDown);
+    overlay.addEventListener("pointerdown", overlayPointerDown);
+    element.dispatchEvent(pointerEvent("pointerdown", 105, 60));
+    expect(inputPointerDown).toHaveBeenCalledOnce();
+    expect(overlayPointerDown).not.toHaveBeenCalled();
+
+    await act(async () => {
+      element.dispatchEvent(pointerEvent("pointermove", 10, 10));
+    });
+    expect(label.style.visibility).toBe("hidden");
+
+    await act(async () => {
+      element.dispatchEvent(pointerEvent("pointermove", 105, 60, "touch"));
+    });
+    expect(label.style.visibility).toBe("hidden");
+
+    hoverCapable = false;
+    await act(async () => {
+      element.dispatchEvent(pointerEvent("pointermove", 105, 60));
+    });
+    expect(label.style.visibility).toBe("hidden");
   });
 
   it("clears owned presence on unmount but never publishes before focus", async () => {

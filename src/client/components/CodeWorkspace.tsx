@@ -18,6 +18,8 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type PointerEvent as ReactPointerEvent,
 } from "react";
 import * as Y from "yjs";
 import {
@@ -32,8 +34,8 @@ import {
   initializeCodeWorkspace,
   listCodeWorkspaceEntries,
   listCodeTestCases,
-  moveCodeWorkspaceEntry,
-  removeCodeWorkspaceEntry,
+  moveCodeWorkspaceEntries,
+  removeCodeWorkspaceEntries,
   removeCodeTestCase,
   renameCodeWorkspaceEntry,
   updateCodeTestCase,
@@ -91,8 +93,23 @@ import {
   NativeInputPresence,
   type NativeInputPresencePublisher,
 } from "../code/nativeInputPresence";
+import {
+  DEFAULT_CODE_WORKSPACE_LAYOUT,
+  clampConsoleHeight,
+  clampExplorerHeight,
+  clampExplorerWidth,
+  clampTestsHeight,
+  clampTestsWidth,
+  loadCodeWorkspaceLayout,
+  persistCodeWorkspaceLayout,
+  type CodeWorkspaceLayout,
+} from "../code/codeWorkspaceLayout";
 import { useOptionalTheme } from "../theme";
 import { CodeExplorer } from "./CodeExplorer";
+import {
+  CodeSyncIndicator,
+  type CodeSyncIndicatorProps,
+} from "./CodeSyncIndicator";
 import { CollaborativeMonacoTextField } from "./CollaborativeMonacoTextField";
 import { SharedTerminal } from "./SharedTerminal";
 import "./CodeWorkspace.css";
@@ -137,6 +154,7 @@ interface CodeWorkspaceProps {
   participantId?: string | null;
   readOnly?: boolean;
   terminalReadOnly?: boolean;
+  syncStatus?: CodeSyncIndicatorProps;
   /** Monotonic provider socket lifecycle token used to invalidate stale runs. */
   terminalConnectionEpoch?: number;
 }
@@ -148,6 +166,268 @@ const MAX_UPLOAD_BYTES = 32 * 1024 * 1024;
 // Keep sustained tiny-write traffic below the shared transport's ingress budget
 // even while two idempotent retries are awaiting delayed acknowledgements.
 const HOST_OUTPUT_FLUSH_DELAY_MS = 80;
+const CODE_LAYOUT_DIVIDER_SIZE = 8;
+const CODE_LAYOUT_COMPACT_WIDTH = 620;
+const CODE_LAYOUT_STACK_TESTS_WIDTH = 700;
+const CODE_LAYOUT_STACKED_TESTS_MIN_HEIGHT = 190;
+const CODE_LAYOUT_STACKED_TERMINAL_MIN_HEIGHT = 150;
+const CODE_LAYOUT_STACKED_CONSOLE_MIN_HEIGHT =
+  CODE_LAYOUT_STACKED_TESTS_MIN_HEIGHT
+  + CODE_LAYOUT_DIVIDER_SIZE
+  + CODE_LAYOUT_STACKED_TERMINAL_MIN_HEIGHT;
+
+type CodeWorkspaceSplit = "explorer" | "console" | "tests";
+type CodeWorkspaceSplitOrientation = "horizontal" | "vertical";
+
+interface ResolvedCodeWorkspaceLayout {
+  readonly layout: CodeWorkspaceLayout;
+  readonly compact: boolean;
+  readonly testsStacked: boolean;
+  readonly workspaceWidth: number;
+  readonly workspaceHeight: number;
+  readonly consoleWidth: number;
+  readonly consoleHeight: number;
+  readonly testsOpen: boolean;
+}
+
+interface CodeWorkspaceSplitDescriptor {
+  readonly orientation: CodeWorkspaceSplitOrientation;
+  readonly value: number;
+  readonly minimum: number;
+  readonly maximum: number;
+  readonly defaultValue: number;
+  readonly decreaseKey: "ArrowLeft" | "ArrowDown" | "ArrowUp";
+  readonly increaseKey: "ArrowDown" | "ArrowRight" | "ArrowUp";
+}
+
+interface ActiveCodeWorkspaceResize {
+  readonly pointerId: number;
+  readonly split: CodeWorkspaceSplit;
+  finish(persist: boolean, event?: PointerEvent): void;
+}
+
+function measuredSize(
+  element: HTMLElement,
+  axis: "height" | "width",
+  fallback: number,
+): number {
+  const rectValue = element.getBoundingClientRect()[axis];
+  const clientValue = axis === "width" ? element.clientWidth : element.clientHeight;
+  const value = rectValue || clientValue || fallback;
+  return Math.max(1, Math.round(value));
+}
+
+function resolveCodeWorkspaceLayout(
+  root: HTMLElement,
+  requested: CodeWorkspaceLayout,
+  testsOpen: boolean,
+): ResolvedCodeWorkspaceLayout {
+  const workspaceWidth = measuredSize(root, "width", 1_280);
+  const workspaceHeight = measuredSize(root, "height", 720);
+  const compact = workspaceWidth <= CODE_LAYOUT_COMPACT_WIDTH;
+  const compactExplorerRemainingSize = 220
+    + CODE_LAYOUT_DIVIDER_SIZE
+    + (testsOpen ? CODE_LAYOUT_STACKED_CONSOLE_MIN_HEIGHT : 180);
+  const explorerWidth = clampExplorerWidth(
+    requested.explorerWidth,
+    workspaceWidth,
+  );
+  const explorerHeight = clampExplorerHeight(
+    requested.explorerHeight,
+    workspaceHeight,
+    compact ? {
+      minimumRemainingSize: compactExplorerRemainingSize,
+      dividerSize: CODE_LAYOUT_DIVIDER_SIZE,
+    } : undefined,
+  );
+  const consoleAvailableHeight = compact
+    ? Math.max(0, workspaceHeight - explorerHeight - CODE_LAYOUT_DIVIDER_SIZE)
+    : workspaceHeight;
+  const consoleWidth = consoleWidthAtExplorerSplit(
+    workspaceWidth,
+    explorerWidth,
+    compact,
+  );
+  const testsStacked = consoleWidth < CODE_LAYOUT_STACK_TESTS_WIDTH;
+  const consoleHeight = clampConsoleHeight(
+    requested.consoleHeight,
+    consoleAvailableHeight,
+    {
+      minimumSize: testsOpen && testsStacked
+        ? CODE_LAYOUT_STACKED_CONSOLE_MIN_HEIGHT
+        : 180,
+      ...(compact ? {
+        minimumRemainingSize: 220,
+        dividerSize: CODE_LAYOUT_DIVIDER_SIZE,
+      } : {}),
+    },
+  );
+  const testsWidth = clampTestsWidth(requested.testsWidth, consoleWidth);
+  const testsHeight = clampTestsHeight(
+    requested.testsHeight,
+    consoleHeight,
+    testsStacked ? {
+      minimumSize: CODE_LAYOUT_STACKED_TESTS_MIN_HEIGHT,
+      minimumRemainingSize: CODE_LAYOUT_STACKED_TERMINAL_MIN_HEIGHT,
+      dividerSize: CODE_LAYOUT_DIVIDER_SIZE,
+    } : undefined,
+  );
+  return {
+    layout: {
+      version: 1,
+      explorerWidth,
+      explorerHeight,
+      consoleHeight,
+      testsWidth,
+      testsHeight,
+    },
+    compact,
+    testsStacked,
+    workspaceWidth,
+    workspaceHeight,
+    consoleWidth,
+    consoleHeight,
+    testsOpen,
+  };
+}
+
+function consoleWidthAtExplorerSplit(
+  workspaceWidth: number,
+  explorerWidth: number,
+  compact: boolean,
+): number {
+  return compact
+    ? workspaceWidth
+    : Math.max(
+        0,
+        workspaceWidth - explorerWidth - CODE_LAYOUT_DIVIDER_SIZE,
+      );
+}
+
+function codeWorkspaceSplitDescriptor(
+  resolved: ResolvedCodeWorkspaceLayout,
+  split: CodeWorkspaceSplit,
+): CodeWorkspaceSplitDescriptor {
+  const { layout } = resolved;
+  if (split === "explorer") {
+    if (resolved.compact) {
+      const constraints = {
+        minimumRemainingSize: 220
+          + CODE_LAYOUT_DIVIDER_SIZE
+          + (resolved.testsOpen
+            ? CODE_LAYOUT_STACKED_CONSOLE_MIN_HEIGHT
+            : 180),
+        dividerSize: CODE_LAYOUT_DIVIDER_SIZE,
+      };
+      return {
+        orientation: "horizontal",
+        value: layout.explorerHeight,
+        minimum: clampExplorerHeight(0, resolved.workspaceHeight, constraints),
+        maximum: clampExplorerHeight(
+          Number.MAX_SAFE_INTEGER,
+          resolved.workspaceHeight,
+          constraints,
+        ),
+        defaultValue: DEFAULT_CODE_WORKSPACE_LAYOUT.explorerHeight,
+        decreaseKey: "ArrowUp",
+        increaseKey: "ArrowDown",
+      };
+    }
+    return {
+      orientation: "vertical",
+      value: layout.explorerWidth,
+      minimum: clampExplorerWidth(0, resolved.workspaceWidth),
+      maximum: clampExplorerWidth(
+        Number.MAX_SAFE_INTEGER,
+        resolved.workspaceWidth,
+      ),
+      defaultValue: DEFAULT_CODE_WORKSPACE_LAYOUT.explorerWidth,
+      decreaseKey: "ArrowLeft",
+      increaseKey: "ArrowRight",
+    };
+  }
+  if (split === "console") {
+    const availableHeight = resolved.compact
+      ? Math.max(
+          0,
+          resolved.workspaceHeight
+            - layout.explorerHeight
+            - (2 * CODE_LAYOUT_DIVIDER_SIZE),
+        )
+      : resolved.workspaceHeight;
+    const constraints = {
+      minimumSize: resolved.testsOpen && resolved.testsStacked
+        ? CODE_LAYOUT_STACKED_CONSOLE_MIN_HEIGHT
+        : 180,
+      ...(resolved.compact ? {
+        minimumRemainingSize: 220,
+        dividerSize: CODE_LAYOUT_DIVIDER_SIZE,
+      } : {}),
+    };
+    return {
+      orientation: "horizontal",
+      value: layout.consoleHeight,
+      minimum: clampConsoleHeight(0, availableHeight, constraints),
+      maximum: clampConsoleHeight(
+        Number.MAX_SAFE_INTEGER,
+        availableHeight,
+        constraints,
+      ),
+      defaultValue: DEFAULT_CODE_WORKSPACE_LAYOUT.consoleHeight,
+      decreaseKey: "ArrowDown",
+      increaseKey: "ArrowUp",
+    };
+  }
+  if (resolved.testsStacked) {
+    const constraints = {
+      minimumSize: CODE_LAYOUT_STACKED_TESTS_MIN_HEIGHT,
+      minimumRemainingSize: CODE_LAYOUT_STACKED_TERMINAL_MIN_HEIGHT,
+      dividerSize: CODE_LAYOUT_DIVIDER_SIZE,
+    };
+    return {
+      orientation: "horizontal",
+      value: layout.testsHeight,
+      minimum: clampTestsHeight(0, resolved.consoleHeight, constraints),
+      maximum: clampTestsHeight(
+        Number.MAX_SAFE_INTEGER,
+        resolved.consoleHeight,
+        constraints,
+      ),
+      defaultValue: DEFAULT_CODE_WORKSPACE_LAYOUT.testsHeight,
+      decreaseKey: "ArrowUp",
+      increaseKey: "ArrowDown",
+    };
+  }
+  return {
+    orientation: "vertical",
+    value: layout.testsWidth,
+    minimum: clampTestsWidth(0, resolved.consoleWidth),
+    maximum: clampTestsWidth(
+      Number.MAX_SAFE_INTEGER,
+      resolved.consoleWidth,
+    ),
+    defaultValue: DEFAULT_CODE_WORKSPACE_LAYOUT.testsWidth,
+    decreaseKey: "ArrowLeft",
+    increaseKey: "ArrowRight",
+  };
+}
+
+function withCodeWorkspaceSplitValue(
+  layout: CodeWorkspaceLayout,
+  resolved: ResolvedCodeWorkspaceLayout,
+  split: CodeWorkspaceSplit,
+  value: number,
+): CodeWorkspaceLayout {
+  if (split === "explorer") {
+    return resolved.compact
+      ? { ...layout, explorerHeight: value }
+      : { ...layout, explorerWidth: value };
+  }
+  if (split === "console") return { ...layout, consoleHeight: value };
+  return resolved.testsStacked
+    ? { ...layout, testsHeight: value }
+    : { ...layout, testsWidth: value };
+}
 
 interface PendingHostOutput {
   runId: string;
@@ -266,8 +546,15 @@ export function CodeWorkspace({
   readOnly = false,
   terminalReadOnly: terminalReadOnlyProp,
   terminalConnectionEpoch = 0,
+  syncStatus,
 }: CodeWorkspaceProps) {
   const testFieldIdPrefix = useId();
+  const workspaceControlIdPrefix = useId();
+  const explorerPanelId = `${workspaceControlIdPrefix}-explorer`;
+  const editorPanelId = `${workspaceControlIdPrefix}-editor`;
+  const consolePanelId = `${workspaceControlIdPrefix}-console`;
+  const testsPanelId = `${workspaceControlIdPrefix}-tests`;
+  const terminalPanelId = `${workspaceControlIdPrefix}-terminal`;
   const terminalReadOnly = terminalReadOnlyProp ?? readOnly;
   const theme = useOptionalTheme()?.theme ?? "light";
   const editorTheme = theme === "dark" ? "vs-dark" : "vs";
@@ -289,6 +576,19 @@ export function CodeWorkspace({
   const [testsOpen, setTestsOpen] = useState(false);
   const [testState, setTestState] = useState<"idle" | "passed" | "failed">("idle");
   const [error, setError] = useState<string | null>(null);
+  const [initialWorkspaceLayout] = useState(loadCodeWorkspaceLayout);
+  const [resolvedWorkspaceLayout, setResolvedWorkspaceLayout] = useState<
+    ResolvedCodeWorkspaceLayout
+  >({
+    layout: initialWorkspaceLayout,
+    compact: false,
+    testsStacked: false,
+    workspaceWidth: 1_280,
+    workspaceHeight: 720,
+    consoleWidth: 1_052,
+    consoleHeight: initialWorkspaceLayout.consoleHeight,
+    testsOpen: false,
+  });
   const mainEditorOptions = useMemo(() => ({
     readOnly,
     automaticLayout: true,
@@ -322,6 +622,14 @@ export function CodeWorkspace({
     "generation" | "seq"
   > | null>(null);
   const pendingHostOutputRef = useRef<PendingHostOutput | null>(null);
+  const workspaceRootRef = useRef<HTMLDivElement | null>(null);
+  const explorerSeparatorRef = useRef<HTMLDivElement | null>(null);
+  const consoleSeparatorRef = useRef<HTMLDivElement | null>(null);
+  const testsSeparatorRef = useRef<HTMLDivElement | null>(null);
+  const storedWorkspaceLayoutRef = useRef(initialWorkspaceLayout);
+  const resolvedWorkspaceLayoutRef = useRef(resolvedWorkspaceLayout);
+  const activeWorkspaceResizeRef = useRef<ActiveCodeWorkspaceResize | null>(null);
+  const testsOpenRef = useRef(testsOpen);
   const mountedRef = useRef(false);
   const sessionRef = useRef<CodeWorkspaceSessionHandle | null>(null);
   const activeIdRef = useRef<string | null>(null);
@@ -358,6 +666,244 @@ export function CodeWorkspace({
   activeTestIdRef.current = activeTestId;
   editorThemeRef.current = editorTheme;
   remotePeersRef.current = remotePeers;
+  testsOpenRef.current = testsOpen;
+
+  const applyWorkspaceLayout = useCallback((
+    requested: CodeWorkspaceLayout,
+    render: boolean,
+  ): ResolvedCodeWorkspaceLayout | null => {
+    const root = workspaceRootRef.current;
+    if (!root) return null;
+    const resolved = resolveCodeWorkspaceLayout(
+      root,
+      requested,
+      testsOpenRef.current,
+    );
+    resolvedWorkspaceLayoutRef.current = resolved;
+    root.style.setProperty(
+      "--code-explorer-width",
+      `${resolved.layout.explorerWidth}px`,
+    );
+    root.style.setProperty(
+      "--code-explorer-height",
+      `${resolved.layout.explorerHeight}px`,
+    );
+    root.style.setProperty(
+      "--code-console-height",
+      `${resolved.layout.consoleHeight}px`,
+    );
+    root.style.setProperty(
+      "--code-tests-width",
+      `${resolved.layout.testsWidth}px`,
+    );
+    root.style.setProperty(
+      "--code-tests-height",
+      `${resolved.layout.testsHeight}px`,
+    );
+    root.dataset.codeLayout = resolved.compact ? "compact" : "wide";
+    root.dataset.codeTestsLayout = resolved.testsStacked ? "stacked" : "side";
+
+    const updateSeparator = (
+      separator: HTMLDivElement | null,
+      split: CodeWorkspaceSplit,
+    ) => {
+      if (!separator) return;
+      const descriptor = codeWorkspaceSplitDescriptor(resolved, split);
+      separator.setAttribute("aria-orientation", descriptor.orientation);
+      separator.setAttribute("aria-valuemin", String(descriptor.minimum));
+      separator.setAttribute("aria-valuemax", String(descriptor.maximum));
+      separator.setAttribute("aria-valuenow", String(descriptor.value));
+      separator.setAttribute("aria-valuetext", `${descriptor.value} пикселей`);
+    };
+    updateSeparator(explorerSeparatorRef.current, "explorer");
+    updateSeparator(consoleSeparatorRef.current, "console");
+    updateSeparator(testsSeparatorRef.current, "tests");
+    if (render) setResolvedWorkspaceLayout(resolved);
+    return resolved;
+  }, []);
+
+  const commitWorkspaceSplit = useCallback((
+    split: CodeWorkspaceSplit,
+    rawValue: number,
+    render: boolean,
+  ): ResolvedCodeWorkspaceLayout | null => {
+    const currentResolved = resolvedWorkspaceLayoutRef.current;
+    const descriptor = codeWorkspaceSplitDescriptor(currentResolved, split);
+    const value = Math.max(
+      descriptor.minimum,
+      Math.min(descriptor.maximum, Math.round(rawValue)),
+    );
+    const requested = withCodeWorkspaceSplitValue(
+      storedWorkspaceLayoutRef.current,
+      currentResolved,
+      split,
+      value,
+    );
+    const resolved = applyWorkspaceLayout(requested, render);
+    if (!resolved) return null;
+    const appliedValue = codeWorkspaceSplitDescriptor(resolved, split).value;
+    storedWorkspaceLayoutRef.current = withCodeWorkspaceSplitValue(
+      requested,
+      resolved,
+      split,
+      appliedValue,
+    );
+    return resolved;
+  }, [applyWorkspaceLayout]);
+
+  const startWorkspaceResize = useCallback((
+    split: CodeWorkspaceSplit,
+    event: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    if (!event.isPrimary || event.button !== 0) return;
+    activeWorkspaceResizeRef.current?.finish(false);
+    const root = workspaceRootRef.current;
+    if (!root) return;
+    event.preventDefault();
+    const pointerId = event.pointerId;
+    const separator = event.currentTarget;
+    const initialLayout = { ...storedWorkspaceLayoutRef.current };
+    const ownerWindow = root.ownerDocument.defaultView ?? window;
+    const documentElement = root.ownerDocument.documentElement;
+    const previousCursor = documentElement.style.cursor;
+    const previousUserSelect = documentElement.style.userSelect;
+    const descriptor = codeWorkspaceSplitDescriptor(
+      resolvedWorkspaceLayoutRef.current,
+      split,
+    );
+    const initialPointerPosition = descriptor.orientation === "vertical"
+      ? event.clientX
+      : event.clientY;
+    const pointerDirection = split === "console" ? -1 : 1;
+    const cursor = descriptor.orientation === "vertical" ? "col-resize" : "row-resize";
+    root.dataset.codeResizing = split;
+    documentElement.style.cursor = cursor;
+    documentElement.style.userSelect = "none";
+    try {
+      separator.setPointerCapture(pointerId);
+    } catch {
+      // Window listeners below retain the drag when capture is unavailable.
+    }
+
+    let finished = false;
+    const applyPointer = (pointerEvent: PointerEvent) => {
+      if (pointerEvent.pointerId !== pointerId) return;
+      const pointerPosition = descriptor.orientation === "vertical"
+        ? pointerEvent.clientX
+        : pointerEvent.clientY;
+      const value = descriptor.value
+        + (pointerDirection * (pointerPosition - initialPointerPosition));
+      pointerEvent.preventDefault();
+      commitWorkspaceSplit(split, value, true);
+    };
+    const cleanup = () => {
+      ownerWindow.removeEventListener("pointermove", onPointerMove);
+      ownerWindow.removeEventListener("pointerup", onPointerUp);
+      ownerWindow.removeEventListener("pointercancel", onPointerCancel);
+      ownerWindow.removeEventListener("blur", onWindowBlur);
+      separator.removeEventListener("lostpointercapture", onLostPointerCapture);
+      delete root.dataset.codeResizing;
+      documentElement.style.cursor = previousCursor;
+      documentElement.style.userSelect = previousUserSelect;
+      try {
+        if (separator.hasPointerCapture(pointerId)) {
+          separator.releasePointerCapture(pointerId);
+        }
+      } catch {
+        // Capture may already have been released by the browser.
+      }
+    };
+    const finish = (persist: boolean, pointerEvent?: PointerEvent) => {
+      if (finished) return;
+      finished = true;
+      if (pointerEvent) applyPointer(pointerEvent);
+      if (!persist) {
+        storedWorkspaceLayoutRef.current = initialLayout;
+        applyWorkspaceLayout(initialLayout, true);
+      } else {
+        applyWorkspaceLayout(storedWorkspaceLayoutRef.current, true);
+        persistCodeWorkspaceLayout(storedWorkspaceLayoutRef.current);
+      }
+      activeWorkspaceResizeRef.current = null;
+      cleanup();
+    };
+    const onPointerMove = (pointerEvent: PointerEvent) => applyPointer(pointerEvent);
+    const onPointerUp = (pointerEvent: PointerEvent) => {
+      if (pointerEvent.pointerId === pointerId) finish(true, pointerEvent);
+    };
+    const onPointerCancel = (pointerEvent: PointerEvent) => {
+      if (pointerEvent.pointerId === pointerId) finish(false);
+    };
+    const onLostPointerCapture = (pointerEvent: PointerEvent) => {
+      if (pointerEvent.pointerId === pointerId) finish(false);
+    };
+    const onWindowBlur = () => finish(false);
+    activeWorkspaceResizeRef.current = { pointerId, split, finish };
+    ownerWindow.addEventListener("pointermove", onPointerMove, { passive: false });
+    ownerWindow.addEventListener("pointerup", onPointerUp);
+    ownerWindow.addEventListener("pointercancel", onPointerCancel);
+    ownerWindow.addEventListener("blur", onWindowBlur);
+    separator.addEventListener("lostpointercapture", onLostPointerCapture);
+  }, [applyWorkspaceLayout, commitWorkspaceSplit]);
+
+  const handleWorkspaceSeparatorKeyDown = useCallback((
+    split: CodeWorkspaceSplit,
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => {
+    const descriptor = codeWorkspaceSplitDescriptor(
+      resolvedWorkspaceLayoutRef.current,
+      split,
+    );
+    const step = event.shiftKey ? 40 : 10;
+    let value: number | null = null;
+    if (event.key === descriptor.decreaseKey) value = descriptor.value - step;
+    else if (event.key === descriptor.increaseKey) value = descriptor.value + step;
+    else if (event.key === "Home") value = descriptor.minimum;
+    else if (event.key === "End") value = descriptor.maximum;
+    else if (event.key === "Enter" || event.key === " ") {
+      value = descriptor.defaultValue;
+    }
+    if (value === null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    commitWorkspaceSplit(split, value, true);
+    persistCodeWorkspaceLayout(storedWorkspaceLayoutRef.current);
+  }, [commitWorkspaceSplit]);
+
+  const resetWorkspaceSplit = useCallback((split: CodeWorkspaceSplit) => {
+    const descriptor = codeWorkspaceSplitDescriptor(
+      resolvedWorkspaceLayoutRef.current,
+      split,
+    );
+    commitWorkspaceSplit(split, descriptor.defaultValue, true);
+    persistCodeWorkspaceLayout(storedWorkspaceLayoutRef.current);
+  }, [commitWorkspaceSplit]);
+
+  useLayoutEffect(() => {
+    const root = workspaceRootRef.current;
+    if (!root || !session) return undefined;
+    applyWorkspaceLayout(storedWorkspaceLayoutRef.current, true);
+    const resize = () => {
+      activeWorkspaceResizeRef.current?.finish(false);
+      applyWorkspaceLayout(storedWorkspaceLayoutRef.current, true);
+    };
+    const observer = typeof ResizeObserver === "function"
+      ? new ResizeObserver(resize)
+      : null;
+    observer?.observe(root);
+    const ownerWindow = root.ownerDocument.defaultView ?? window;
+    if (!observer) ownerWindow.addEventListener("resize", resize);
+    return () => {
+      observer?.disconnect();
+      if (!observer) ownerWindow.removeEventListener("resize", resize);
+      activeWorkspaceResizeRef.current?.finish(false);
+    };
+  }, [applyWorkspaceLayout, session]);
+
+  useLayoutEffect(() => {
+    if (!session) return;
+    applyWorkspaceLayout(storedWorkspaceLayoutRef.current, true);
+  }, [applyWorkspaceLayout, session, testsOpen]);
 
   useLayoutEffect(() => {
     monacoRef.current?.editor.setTheme(editorTheme);
@@ -398,22 +944,18 @@ export function CodeWorkspace({
       if (!document) return;
       const next = listCodeWorkspaceEntries(document);
       setEntries(next);
-      setActiveId((current) => (
-        current && next.some((entry) => entry.id === current)
-          ? current
-          : next.find((entry) => entry.kind === "file")?.id ?? null
-      ));
+      setActiveId((current) => {
+        if (current && next.some((entry) => entry.id === current)) return current;
+        return next.find((entry) => entry.id === "main-py" && entry.kind === "file")?.id
+          ?? next.find((entry) => entry.kind === "file")?.id
+          ?? null;
+      });
     };
     const refreshTests = () => {
       const document = activeHandle?.document;
       if (!document) return;
       const nextTests = listCodeTestCases(document);
       setTests(nextTests);
-      setActiveTestId((current) => (
-        current && nextTests.some((test) => test.id === current)
-          ? current
-          : nextTests[0]?.id ?? null
-      ));
     };
     let activated = false;
     const activate = (
@@ -645,7 +1187,17 @@ export function CodeWorkspace({
       if (!mountedRef.current) return;
       terminalStateRef.current = state;
       setTerminalState(state);
-      setTestState(state.lastTest?.status ?? "idle");
+      const completedTest = state.lastTest
+        ? listCodeTestCases(session.document)
+          .find((test) => test.id === state.lastTest?.testId)
+        : null;
+      setTestState(
+        completedTest
+        && completedTest.entryId === activeIdRef.current
+        && completedTest.id === activeTestIdRef.current
+          ? state.lastTest!.status
+          : "idle",
+      );
       const runBase = runRequestBaseStateRef.current;
       if (
         runRequestActionIdRef.current
@@ -1062,6 +1614,9 @@ export function CodeWorkspace({
         const test = listCodeTestCases(handle.document)
           .find((candidate) => candidate.id === effect.testId);
         if (!test) throw new Error("Автотест больше не существует");
+        if (test.entryId !== effect.entryId) {
+          throw new Error("Автотест относится к другому Python-файлу");
+        }
         requireActiveRun();
         const execution = startPythonRun({
           kind: "workspace",
@@ -1402,12 +1957,45 @@ export function CodeWorkspace({
   }, [activeId, remotePeers]);
 
   const active = entries.find((entry) => entry.id === activeId) ?? null;
-  const activeTest = tests.find((test) => test.id === activeTestId) ?? null;
+  const activeSupportsTests = Boolean(
+    active?.kind === "file"
+    && active.contentKind === "text"
+    && /\.py$/iu.test(active.name),
+  );
+  const activeFileTests = useMemo(() => (
+    activeSupportsTests && active
+      ? tests.filter((test) => test.entryId === active.id)
+      : []
+  ), [active, activeSupportsTests, tests]);
+  const activeTest = activeFileTests
+    .find((test) => test.id === activeTestId) ?? null;
   const activeTestMap = activeTest && session
     ? codeWorkspaceTestCases(session.document).get(activeTest.id) ?? null
     : null;
   const activeTestStdin = activeTestMap?.get("stdin");
   const activeTestExpectedOutput = activeTestMap?.get("expectedOutput");
+
+  useEffect(() => {
+    setActiveTestId((current) => (
+      current && activeFileTests.some((test) => test.id === current)
+        ? current
+        : activeFileTests[0]?.id ?? null
+    ));
+  }, [activeFileTests]);
+
+  useEffect(() => {
+    const lastTest = terminalStateRef.current?.lastTest;
+    const completedTest = lastTest
+      ? tests.find((test) => test.id === lastTest.testId)
+      : null;
+    setTestState(
+      completedTest
+      && completedTest.entryId === activeId
+      && completedTest.id === activeTestId
+        ? lastTest!.status
+        : "idle",
+    );
+  }, [activeId, activeTestId, tests]);
 
   useLayoutEffect(() => {
     if (!activeTest) {
@@ -1504,12 +2092,24 @@ export function CodeWorkspace({
     }
   }, [readOnly, session]);
 
-  const deleteEntry = useCallback((entry: CodeWorkspaceEntrySnapshot) => {
-    if (!session || readOnly || entry.id === "main-py") return;
+  const deleteEntry = useCallback((selectedEntries: readonly CodeWorkspaceEntrySnapshot[]) => {
+    if (!session || readOnly || selectedEntries.length === 0) return;
     try {
-      runExplorerHistoryCommand(undoManagerRef.current, () => {
-        removeCodeWorkspaceEntry(session.document, entry.id, session.origin);
-      });
+      const removedIds = runExplorerHistoryCommand(undoManagerRef.current, () => (
+        removeCodeWorkspaceEntries(
+          session.document,
+          selectedEntries.map((entry) => entry.id),
+          session.origin,
+        )
+      ));
+      if (activeIdRef.current && removedIds.includes(activeIdRef.current)) {
+        const remaining = listCodeWorkspaceEntries(session.document);
+        setActiveId(
+          remaining.find((entry) => entry.id === "main-py" && entry.kind === "file")?.id
+            ?? remaining.find((entry) => entry.kind === "file")?.id
+            ?? null,
+        );
+      }
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось удалить");
@@ -1544,13 +2144,13 @@ export function CodeWorkspace({
     }
   }, [readOnly, session]);
 
-  const moveEntry = useCallback((entryId: string, parentId: string | null) => {
-    if (!session || readOnly) return;
+  const moveEntry = useCallback((entryIds: readonly string[], parentId: string | null) => {
+    if (!session || readOnly || entryIds.length === 0) return;
     try {
       runExplorerHistoryCommand(undoManagerRef.current, () => {
-        moveCodeWorkspaceEntry(
+        moveCodeWorkspaceEntries(
           session.document,
-          entryId,
+          entryIds,
           parentId,
           session.origin,
         );
@@ -1614,17 +2214,18 @@ export function CodeWorkspace({
   }, [readOnly]);
 
   const createTest = useCallback(() => {
-    if (!session || readOnly) return;
+    if (!session || readOnly || !activeSupportsTests || !active) return;
     try {
       const id = addCodeTestCase(session.document, {
-        name: `Тест ${tests.length + 1}`,
+        entryId: active.id,
+        name: `Тест ${activeFileTests.length + 1}`,
       }, session.origin);
       setActiveTestId(id);
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Не удалось создать тест");
     }
-  }, [readOnly, session, tests.length]);
+  }, [active, activeFileTests.length, activeSupportsTests, readOnly, session]);
 
   const patchTest = useCallback((
     testId: string,
@@ -1652,7 +2253,11 @@ export function CodeWorkspace({
       || readOnly
       || terminalReadOnly
       || terminalRunning
-      || (asTest && !activeTest)
+      || (asTest && (
+        !activeSupportsTests
+        || !activeTest
+        || activeTest.entryId !== active.id
+      ))
     ) return;
     const requestedEntryId = active.id;
     const requestedTestId = asTest ? activeTest?.id ?? null : null;
@@ -1705,6 +2310,7 @@ export function CodeWorkspace({
     }
   }, [
     active,
+    activeSupportsTests,
     activeTest,
     dispatchTerminal,
     readOnly,
@@ -1717,12 +2323,45 @@ export function CodeWorkspace({
     dispatchTerminal({ type: terminalState?.mode === "python" ? "eof" : "interrupt" });
   }, [dispatchTerminal, terminalState?.mode]);
 
+  const handleWorkspaceKeyDownCapture = useCallback((
+    event: ReactKeyboardEvent<HTMLDivElement>,
+  ) => {
+    if (
+      event.key !== "F9"
+      || event.ctrlKey
+      || event.metaKey
+      || event.altKey
+      || event.shiftKey
+    ) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const currentTerminal = terminalStateRef.current;
+    if (
+      event.repeat
+      || runRequestPendingRef.current
+      || (currentTerminal !== null && currentTerminal.mode !== "shell")
+    ) return;
+    void startSharedRun(false);
+  }, [startSharedRun]);
+
   const activeTestNameTarget = activeTest
     ? { kind: "test", testId: activeTest.id, field: "name" } as const
     : null;
   const activeTestTimeoutTarget = activeTest
     ? { kind: "test", testId: activeTest.id, field: "timeout" } as const
     : null;
+  const explorerSplit = codeWorkspaceSplitDescriptor(
+    resolvedWorkspaceLayout,
+    "explorer",
+  );
+  const consoleSplit = codeWorkspaceSplitDescriptor(
+    resolvedWorkspaceLayout,
+    "console",
+  );
+  const testsSplit = codeWorkspaceSplitDescriptor(
+    resolvedWorkspaceLayout,
+    "tests",
+  );
 
   if (!session) {
     return (
@@ -1733,14 +2372,24 @@ export function CodeWorkspace({
   }
 
   return (
-    <div className="full-code-workspace" data-code-theme={theme}>
+    <div
+      ref={workspaceRootRef}
+      className="full-code-workspace"
+      data-code-theme={theme}
+      data-code-layout={resolvedWorkspaceLayout.compact ? "compact" : "wide"}
+      onKeyDownCapture={handleWorkspaceKeyDownCapture}
+      data-code-tests-layout={
+        resolvedWorkspaceLayout.testsStacked ? "stacked" : "side"
+      }
+    >
       <CodeExplorer
+        id={explorerPanelId}
         entries={entries}
         activeId={activeId}
         readOnly={readOnly}
         renamingId={renamingId}
         renameValue={renameValue}
-        onSelect={setActiveId}
+        onActivate={setActiveId}
         onBeginRename={beginRename}
         onRenameValueChange={setRenameValue}
         onCommitRename={commitRename}
@@ -1759,7 +2408,28 @@ export function CodeWorkspace({
         onRedo={redoExplorer}
       />
 
-      <section className="code-main">
+      <div
+        ref={explorerSeparatorRef}
+        className="code-workspace__separator code-workspace__separator--explorer"
+        data-code-split="explorer"
+        role="separator"
+        tabIndex={0}
+        aria-label="Изменить размер проводника"
+        aria-controls={`${explorerPanelId} ${editorPanelId}`}
+        aria-orientation={explorerSplit.orientation}
+        aria-valuemin={explorerSplit.minimum}
+        aria-valuemax={explorerSplit.maximum}
+        aria-valuenow={explorerSplit.value}
+        aria-valuetext={`${explorerSplit.value} пикселей`}
+        onPointerDown={(event) => startWorkspaceResize("explorer", event)}
+        onKeyDown={(event) => handleWorkspaceSeparatorKeyDown("explorer", event)}
+        onDoubleClick={(event) => {
+          event.preventDefault();
+          resetWorkspaceSplit("explorer");
+        }}
+      />
+
+      <section id={editorPanelId} className="code-main">
         <header className="code-main__toolbar">
           <strong>{active?.name ?? "Python"}</strong>
           <div>
@@ -1767,18 +2437,23 @@ export function CodeWorkspace({
               type="button"
               className={`code-tests-toggle${testsOpen ? " is-active" : ""}`}
               aria-label={testsOpen ? "Скрыть тесты" : "Показать тесты"}
-              title={testsOpen ? "Скрыть тесты" : "Показать тесты"}
+              title={activeSupportsTests
+                ? (testsOpen ? "Скрыть тесты" : "Показать тесты")
+                : "Автотесты доступны для Python-файлов"}
               aria-expanded={testsOpen}
-              aria-controls="code-tests-panel"
+              aria-controls={testsPanelId}
+              disabled={!activeSupportsTests && !testsOpen}
               onClick={() => setTestsOpen((current) => !current)}
             >
               <TestTube2 size={15} />
               <span>Тесты</span>
-              <span className="code-tests-toggle__count">{tests.length}</span>
+              <span className="code-tests-toggle__count">{activeFileTests.length}</span>
             </button>
             <button
               type="button"
               className="code-run-command"
+              aria-label={terminalRunning ? "Остановить выполнение" : "Запустить код"}
+              aria-keyshortcuts={terminalRunning ? undefined : "F9"}
               disabled={
                 readOnly
                 || terminalReadOnly
@@ -1792,8 +2467,9 @@ export function CodeWorkspace({
               }}
             >
               {terminalRunning ? <Square size={15} /> : <Play size={16} />}
-              {terminalRunning ? "Остановить" : "Запустить"}
+              {terminalRunning ? "Stop" : "F9"}
             </button>
+            {syncStatus && <CodeSyncIndicator {...syncStatus} />}
           </div>
         </header>
         <div className="code-main__editor">
@@ -1861,10 +2537,38 @@ export function CodeWorkspace({
         {error && <div className="code-workspace-error" role="alert">{error}</div>}
       </section>
 
-      <section className={`code-console${testsOpen ? " is-tests-open" : ""}`}>
+      <div
+        ref={consoleSeparatorRef}
+        className="code-workspace__separator code-workspace__separator--console"
+        data-code-split="console"
+        role="separator"
+        tabIndex={0}
+        aria-label="Изменить высоту терминала"
+        aria-controls={`${editorPanelId} ${consolePanelId}`}
+        aria-orientation={consoleSplit.orientation}
+        aria-valuemin={consoleSplit.minimum}
+        aria-valuemax={consoleSplit.maximum}
+        aria-valuenow={consoleSplit.value}
+        aria-valuetext={`${consoleSplit.value} пикселей`}
+        onPointerDown={(event) => startWorkspaceResize("console", event)}
+        onKeyDown={(event) => handleWorkspaceSeparatorKeyDown("console", event)}
+        onDoubleClick={(event) => {
+          event.preventDefault();
+          resetWorkspaceSplit("console");
+        }}
+      />
+
+      <section
+        id={consolePanelId}
+        className={`code-console${testsOpen ? " is-tests-open" : ""}`}
+      >
         {testsOpen && (
-        <div id="code-tests-panel" className="code-console__inputs">
-          {tests.length === 0 ? (
+        <div id={testsPanelId} className="code-console__inputs">
+          {!activeSupportsTests ? (
+            <div className="code-tests-empty">
+              Выберите Python-файл, чтобы открыть его автотесты
+            </div>
+          ) : activeFileTests.length === 0 ? (
             <div className="code-tests-empty">
               <button
                 type="button"
@@ -1877,7 +2581,7 @@ export function CodeWorkspace({
           ) : (
             <>
           <div className="code-tests__tabs" role="tablist" aria-label="Тесты">
-            {tests.map((test) => (
+            {activeFileTests.map((test) => (
               <button
                 key={test.id}
                 type="button"
@@ -2049,14 +2753,36 @@ export function CodeWorkspace({
               />
             ) : <div className="code-collaborative-field" />}
           </label>
-          <button type="button" disabled={readOnly || terminalReadOnly || terminalRunning || runRequestPending || !active || !activeTest} onClick={() => void startSharedRun(true)}>
+          <button type="button" disabled={readOnly || terminalReadOnly || terminalRunning || runRequestPending || !activeSupportsTests || !activeTest} onClick={() => void startSharedRun(true)}>
             <Play size={15} /> Проверить
           </button>
             </>
           )}
         </div>
         )}
-        <div className="code-console__output">
+        {testsOpen && (
+          <div
+            ref={testsSeparatorRef}
+            className="code-workspace__separator code-workspace__separator--tests"
+            data-code-split="tests"
+            role="separator"
+            tabIndex={0}
+            aria-label="Изменить размер панели автотестов"
+            aria-controls={`${testsPanelId} ${terminalPanelId}`}
+            aria-orientation={testsSplit.orientation}
+            aria-valuemin={testsSplit.minimum}
+            aria-valuemax={testsSplit.maximum}
+            aria-valuenow={testsSplit.value}
+            aria-valuetext={`${testsSplit.value} пикселей`}
+            onPointerDown={(event) => startWorkspaceResize("tests", event)}
+            onKeyDown={(event) => handleWorkspaceSeparatorKeyDown("tests", event)}
+            onDoubleClick={(event) => {
+              event.preventDefault();
+              resetWorkspaceSplit("tests");
+            }}
+          />
+        )}
+        <div id={terminalPanelId} className="code-console__output">
           <header>
             <strong>Терминал</strong>
             <div>

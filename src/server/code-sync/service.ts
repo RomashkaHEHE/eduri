@@ -4,6 +4,10 @@ import type {
   CodeParticipantIdentity,
   CodeSyncHandshakeAuth,
 } from "../../code/protocol/index.js";
+import {
+  COLLABORATION_PROFILE_COLORS,
+  type CollaborationProfile,
+} from "../../shared/collaborationProfile.js";
 import type { GuestRoomService } from "../guestRooms.js";
 import {
   CodeSyncRepository,
@@ -19,27 +23,29 @@ export interface AuthenticatedCodeSync {
   readonly resourceId: string;
   readonly workspaceId: string;
   readonly documentId: string;
-  readonly participant: CodeParticipantIdentity;
+  participant: CodeParticipantIdentity;
 }
 
-const GUEST_COLORS = [
-  "#2563eb",
-  "#16825d",
-  "#d33f49",
-  "#d97706",
-  "#7c3aed",
-  "#0891b2",
-] as const;
-
-function createParticipantIdentity(): CodeParticipantIdentity {
+function createParticipantIdentity(
+  auth: CodeSyncHandshakeAuth,
+): CodeParticipantIdentity {
   const participantId = randomUUID();
-  const colorIndex = createHash("sha256")
-    .update(participantId)
-    .digest()[0] % GUEST_COLORS.length;
+  const guestDigest = createHash("sha256")
+    .update(auth.shareId)
+    .update("\0")
+    .update(auth.deviceId)
+    .digest();
+  const fallback: CollaborationProfile = {
+    displayName: `Гость ${guestDigest.toString("hex").slice(0, 4).toUpperCase()}`,
+    color: COLLABORATION_PROFILE_COLORS[
+      guestDigest[0] % COLLABORATION_PROFILE_COLORS.length
+    ],
+  };
+  const profile = auth.profile ?? fallback;
   return {
     participantId,
-    displayName: `Гость ${participantId.slice(0, 4).toUpperCase()}`,
-    color: GUEST_COLORS[colorIndex],
+    displayName: profile.displayName,
+    color: profile.color,
   };
 }
 
@@ -135,7 +141,7 @@ export class CodeSyncService {
       resourceId: access.resourceId,
       workspaceId: workspace.id,
       documentId: workspace.documentId,
-      participant: createParticipantIdentity(),
+      participant: createParticipantIdentity(auth),
     };
   }
 
@@ -161,6 +167,19 @@ export class CodeSyncService {
         "Guest Code workspace was not found",
       );
     }
+  }
+
+  updateProfile(
+    session: AuthenticatedCodeSync,
+    profile: CollaborationProfile,
+  ): CodeParticipantIdentity {
+    this.reauthorize(session);
+    session.participant = {
+      participantId: session.participant.participantId,
+      displayName: profile.displayName,
+      color: profile.color,
+    };
+    return session.participant;
   }
 
   syncStep1(

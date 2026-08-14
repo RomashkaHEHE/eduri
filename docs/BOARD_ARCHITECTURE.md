@@ -45,6 +45,8 @@ Implemented in the Board v2 path:
   gesture previews, hostile-style sanitization and bounded static text previews
   at the renderer boundary, a ref-aware
   decoded-image LRU, a site-wide light/dark local presentation theme,
+  a strict device-local online collaboration profile with a mandatory
+  first-session gate and server-authoritative display name/color,
   device-local grid,
   configurable toolbar, and connector-curvature preferences, an accessible
   object/canvas context menu, display-paced rendering, and standard scoped
@@ -1326,7 +1328,8 @@ Web clients first request a CSRF-protected, 60-second sync ticket scoped to:
 - board;
 - user and current session;
 - board generation;
-- protocol/schema range.
+- protocol/schema range;
+- the server-validated collaboration display name and color.
 
 The ticket is sent in the first AUTH frame, never in a URL or access log.
 Desktop clients use the same ticket endpoint with their authenticated session
@@ -1350,7 +1353,9 @@ forge forwarding headers.
 Public guest tickets derive their stable actor identity from an HMAC of the
 share capability and device ID. The repository-facing ID uses only its bounded
 opaque alphabet (`guest_` plus a base64url digest); display labels and session
-hashes remain separate and must never be substituted for that actor ID.
+hashes remain separate and must never be substituted for that actor ID. The
+chosen profile changes only the display label/color; it cannot change this
+actor ID, the authenticated account ID, role, lesson membership, or permission.
 
 Logical message types:
 
@@ -1401,6 +1406,13 @@ unsent work for a later retry. The rate-limit CONTROL carries a validated
 window elapses instead of repeatedly reconnecting against the same window.
 Server-issued awareness client IDs are released on disconnect, so lifetime
 connection churn cannot grow their reservation set without bound.
+
+Live profile controls use the same ten-second window and add a 30-attempt
+per-socket budget plus a 120-attempt stable-principal budget shared across
+sockets. Access is reauthorized before either budget can produce an accepted
+profile. Exceeding one emits correlated `RATE_LIMITED` and closes with `4429`;
+invalid bounded profile input instead receives a correlated recoverable
+`PROFILE_UPDATED` rejection and leaves the socket open.
 
 State vectors are decoded as client-to-clock mappings. Pair order is not
 canonical across Yjs and Yrs, so valid pairs are accepted in any order while
@@ -1498,6 +1510,67 @@ one logical update; it is not a total-document limit.
 
 ## Presence
 
+### Online collaboration profile
+
+The current web adapter has one origin/device-local online profile containing
+exactly a `displayName` and `color`. Active guest-room and lesson headers expose
+its editor immediately before the theme control; solo Board and Code routes do
+not expose it because they have no remote presence. The first online entry
+without a valid profile is gated by a non-dismissible modal before Board, Code,
+or Call mounts. Guest entry initially proposes `Гость`, authenticated lesson
+entry proposes the account display name, and the initial color is `#2563eb`.
+The profile uses the full built-in Board color picker rather than a native
+platform color input.
+
+The strict local envelope is version 1 under `eduri-online-profile-v1` and has
+exactly `version`, `displayName`, and `color`. Display names are NFKC-normalized,
+trimmed with internal whitespace collapsed, non-empty, single-line/control- and
+bidi-format-free, and bounded to 60 Unicode characters and 240 UTF-8 bytes.
+Colors are canonical lowercase six-digit `#rrggbb`. Malformed, noncanonical,
+wrong-version, and extra-field values are rejected. Storage events plus
+page-show/visibility reconciliation propagate changes between tabs. A valid
+external value closes a currently open editor rather than allowing its stale
+draft to overwrite the new value. External key deletion clears configuration;
+an active online route returns to the mandatory gate and unmounts its
+Board/Code/Call providers until a new valid profile is saved. Unavailable browser
+storage falls back to the current process-memory value. This profile is
+application identity preference, never page/manifest CRDT, IndexedDB document
+state, awareness state, or undo history.
+
+The current web client always supplies the validated profile in Board ticket
+requests, Code socket authentication, and Call-token requests. The server
+validates it again and binds the normalized values to the issued ticket,
+participant, or LiveKit token. Wire parsers retain an optional-profile fallback
+for compatible older clients, using the existing authenticated-account or
+generated-guest defaults; current profile-gated web clients do not use that
+fallback. A profile may influence only presentation identity, never stable
+actor IDs, roles, ACL, room capability, or resource scope.
+
+Changing the saved profile sends a bounded, server-validated profile update over
+the current Board and Code connections. Board keeps its negotiated awareness
+client ID; Code keeps the same participant ID, terminal host lease, and active
+run. Both update future reconnect credentials without disconnecting now and
+preserve the same Y.Doc, renderer, camera/selection, Monaco model, IndexedDB
+stores, and durable outbox; a profile edit cannot become a document replacement
+or cause a mixed-identity mount. Board preflights every advertised awareness
+document and applies the connection identity plus all document rewrites as one
+in-memory operation; rejection changes none of them and broadcasts nothing.
+Call uses the current profile when a token is
+issued and updates an already connected participant's LiveKit name/color through
+the authenticated server without replacing its token, room, component, or media
+tracks.
+
+For Board, the web adapter keeps at most one correlated profile request in
+flight and coalesces later saves to the latest still-desired value. An actual
+reconnect resends the latest unconfirmed profile only after the new `READY` and
+uses a fresh correlation ID; it is not a ticket refresh. Server identity rewrite
+advances each stored awareness document from clock `N` to `N + 1` only after all
+documents preflight successfully. The accepted sender then republishes its
+latest cursor/selection or explicit null above `N + 1` (`N + 2` in the minimum
+sequence), preventing the identity rewrite from resurrecting stale presence.
+The exact maximum-clock rejection and ordering rules are normative in
+`BOARD_PROTOCOL_V1.md`.
+
 Awareness is ephemeral and never stored in SQLite or IndexedDB:
 
 - cursor in board coordinates;
@@ -1519,7 +1592,10 @@ awareness heartbeats provide disconnect liveness. Normal release removes it
 from awareness and gives peers an 800 ms fade; cancellation removes it
 immediately. Selection is sent only on change.
 
-The server owns `userId`, display name, role, and color. It validates that a
+The server owns `userId`, display name, role, and color. It accepts display name
+and color only through the validated ticket/connection profile described above,
+then authoritatively injects all four fields into awareness. It never trusts
+identity fields from an awareness payload. The server also validates that a
 connection updates only its negotiated awareness client ID, preventing identity
 spoofing or removal of another participant's presence.
 
@@ -1995,6 +2071,13 @@ cover:
 - schema-poison rejection before durable append and clean reconnect afterward;
 - unauthorized tutor/student/admin, suspension, reassignment, session expiry,
   and lifecycle revocation;
+- strict profile storage parsing and cross-tab/memory fallback, mandatory
+  first-online gating, server rejection of invalid ticket/call profile fields,
+  and live profile refresh without replacing the Board/Code document, camera,
+  Monaco model, local store, or outbox; profile coverage includes correlated
+  rejection, rapid-value coalescing, in-flight reconnect, latest/null awareness
+  republish, multi-document max-clock rollback, malformed/oversized keep-open,
+  rate-limit close, and byte-exact accepted/rejected golden fixtures;
 - awareness spoof/removal rejection;
 - cached offline reload and local quota failure behavior;
 - offline image insert, interrupted upload/resume, remote repair, reload, ACL,

@@ -1,12 +1,13 @@
 import {
   useCallback,
   useEffect,
-  useId,
-  useMemo,
   useRef,
   useState,
 } from "react";
 import {
+  CarouselLayout,
+  FocusLayoutContainer,
+  GridLayout,
   LiveKitRoom,
   ParticipantTile,
   RoomAudioRenderer,
@@ -15,11 +16,15 @@ import {
   useLocalParticipant,
   useParticipants,
   useRoomContext,
+  useMaybeTrackRefContext,
   useTracks,
+  isTrackReference,
   type TrackReferenceOrPlaceholder,
 } from "@livekit/components-react";
 import {
   AlertTriangle,
+  Check,
+  ChevronUp,
   CircleCheck,
   CircleX,
   RefreshCw,
@@ -43,6 +48,7 @@ import {
 import type { LessonSummary } from "../../shared/types";
 import type { CollaborationProfile } from "../../shared/collaborationProfile";
 import { api, type CallCredentials } from "../api";
+import { Modal } from "./UI";
 
 interface LessonCallProps {
   lessonId: string;
@@ -70,6 +76,7 @@ interface CallDevicePreferences {
   readonly audioInput: string;
   readonly audioOutput: string;
   readonly videoInput: string;
+  readonly videoInputSelected: boolean;
 }
 
 const CALL_DEVICE_PREFERENCES_KEY = "eduri-call-devices-v1";
@@ -77,6 +84,7 @@ const DEFAULT_DEVICE_PREFERENCES: CallDevicePreferences = Object.freeze({
   audioInput: "default",
   audioOutput: "default",
   videoInput: "default",
+  videoInputSelected: false,
 });
 
 function collaborationProfileKey(
@@ -111,6 +119,8 @@ function readDevicePreferences(): CallDevicePreferences {
       videoInput: validDeviceId(candidate.videoInput)
         ? candidate.videoInput
         : "default",
+      videoInputSelected: candidate.videoInputSelected === true
+        || (validDeviceId(candidate.videoInput) && candidate.videoInput !== "default"),
     };
   } catch {
     return DEFAULT_DEVICE_PREFERENCES;
@@ -162,12 +172,93 @@ function participantLabel(track: TrackReferenceOrPlaceholder | undefined, localI
   return track.participant.name || "Участник";
 }
 
+function trackReferenceKey(track: TrackReferenceOrPlaceholder): string {
+  return isTrackReference(track)
+    ? `${track.participant.identity}:${track.source}:${track.publication.trackSid}`
+    : `${track.participant.identity}:${track.source}:placeholder`;
+}
+
+function isTrackMediaActive(track: TrackReferenceOrPlaceholder): boolean {
+  return isTrackReference(track) && !track.publication.isMuted;
+}
+
+function participantInitials(name: string): string {
+  const initials = name
+    .trim()
+    .split(/\s+/u)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("");
+  return initials || "?";
+}
+
+function CallTrackTile({
+  trackRef: explicitTrackRef,
+  focusedTrackKey,
+  localIdentity,
+  onSelect,
+}: {
+  trackRef?: TrackReferenceOrPlaceholder;
+  focusedTrackKey: string | null;
+  localIdentity: string;
+  onSelect: (track: TrackReferenceOrPlaceholder) => void;
+}) {
+  const contextTrackRef = useMaybeTrackRefContext();
+  const trackRef = explicitTrackRef ?? contextTrackRef;
+  if (!trackRef) return null;
+
+  const key = trackReferenceKey(trackRef);
+  const mediaActive = isTrackMediaActive(trackRef);
+  const focused = focusedTrackKey === key;
+  const screenShare = trackRef.source === Track.Source.ScreenShare;
+  const name = participantLabel(trackRef, localIdentity);
+  const sourceLabel = screenShare ? "Демонстрация экрана" : mediaActive ? "Камера" : "Без видео";
+
+  const select = () => {
+    if (mediaActive) onSelect(trackRef);
+  };
+
+  return (
+    <div
+      className={`call-track-tile ${mediaActive ? "call-track-tile--media" : "call-track-tile--no-media"} ${screenShare ? "call-track-tile--screen" : "call-track-tile--camera"} ${focused ? "is-focused" : ""}`}
+      data-call-track-key={key}
+      data-participant-identity={trackRef.participant.identity}
+      data-track-source={trackRef.source}
+      role={mediaActive ? "button" : "group"}
+      tabIndex={mediaActive ? 0 : undefined}
+      aria-label={`${name}: ${sourceLabel}`}
+      aria-pressed={mediaActive ? focused : undefined}
+      onClick={select}
+      onKeyDown={(event) => {
+        if (!mediaActive || (event.key !== "Enter" && event.key !== " ")) return;
+        event.preventDefault();
+        select();
+      }}
+    >
+      <ParticipantTile trackRef={trackRef} className="call-participant" />
+      {!mediaActive && (
+        <div className="call-participant-idle" aria-hidden="true">
+          <span>{participantInitials(name)}</span>
+          <strong>{name}</strong>
+          <small>Без видео</small>
+        </div>
+      )}
+      <div className="call-track-label" aria-hidden="true">
+        <span>{name}</span>
+        {screenShare && <small>Экран</small>}
+      </div>
+    </div>
+  );
+}
+
 function CallControl({
   active = false,
   danger = false,
   disabled = false,
   label,
   onClick,
+  split = false,
   children,
 }: {
   active?: boolean;
@@ -175,12 +266,13 @@ function CallControl({
   disabled?: boolean;
   label: string;
   onClick: () => void;
+  split?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <button
       type="button"
-      className={`call-control ${active ? "is-active" : ""} ${danger ? "is-danger" : ""}`}
+      className={`call-control ${split ? "call-control--split" : ""} ${active ? "is-active" : ""} ${danger ? "is-danger" : ""}`}
       aria-label={label}
       title={label}
       aria-pressed={danger ? undefined : active}
@@ -194,7 +286,7 @@ function CallControl({
 
 function deviceFallbackLabel(kind: SelectableDeviceKind, index: number): string {
   if (kind === "audioinput") return `Микрофон ${index + 1}`;
-  if (kind === "audiooutput") return `Динамики ${index + 1}`;
+  if (kind === "audiooutput") return `Наушники ${index + 1}`;
   return `Камера ${index + 1}`;
 }
 
@@ -223,24 +315,9 @@ function deviceOptions(
   return options;
 }
 
-function CallDeviceSettings({
-  id,
-  room,
-  preferences,
-  disabled,
-  onChange,
-  onError,
-}: {
-  id: string;
-  room: Room;
-  preferences: CallDevicePreferences;
-  disabled: boolean;
-  onChange: (kind: SelectableDeviceKind, deviceId: string) => void;
-  onError: (message: string | null) => void;
-}) {
+function useCallDevices(onError: (message: string | null) => void) {
   const [devices, setDevices] = useState<readonly MediaDeviceInfo[]>([]);
   const [refreshing, setRefreshing] = useState(false);
-  const [switching, setSwitching] = useState<SelectableDeviceKind | null>(null);
   const requestGeneration = useRef(0);
 
   const refresh = useCallback(async (requestPermissions: boolean) => {
@@ -270,93 +347,210 @@ function CallDeviceSettings({
     };
   }, [refresh]);
 
-  const selectDevice = useCallback(async (
-    kind: SelectableDeviceKind,
-    deviceId: string,
-  ) => {
-    if (!validDeviceId(deviceId)) return;
-    setSwitching(kind);
-    onError(null);
-    try {
-      const switched = await room.switchActiveDevice(
-        kind,
-        deviceId,
-        deviceId !== "default",
-      );
-      if (!switched) throw new Error("Device switch was rejected");
-      onChange(kind, deviceId);
-    } catch {
-      onError(mediaDeviceMessage(kind));
-    } finally {
-      setSwitching(null);
-    }
-  }, [onChange, onError, room]);
+  return { devices, refresh, refreshing };
+}
 
-  const audioOutputSupported = supportsAudioOutputSelection();
-  const rows = [
+interface DeviceRow {
+  readonly kind: SelectableDeviceKind;
+  readonly label: string;
+  readonly selected: string;
+  readonly supported: boolean;
+}
+
+function callDeviceRows(preferences: CallDevicePreferences): readonly DeviceRow[] {
+  return [
     {
-      kind: "audioinput" as const,
+      kind: "audioinput",
       label: "Микрофон",
       selected: preferences.audioInput,
       supported: true,
     },
     {
-      kind: "audiooutput" as const,
-      label: "Динамики",
+      kind: "audiooutput",
+      label: "Наушники",
       selected: preferences.audioOutput,
-      supported: audioOutputSupported,
+      supported: supportsAudioOutputSelection(),
     },
     {
-      kind: "videoinput" as const,
+      kind: "videoinput",
       label: "Камера",
       selected: preferences.videoInput,
       supported: true,
     },
   ];
+}
+
+function DeviceSettingsForm({
+  devices,
+  preferences,
+  disabled,
+  refreshing,
+  onRefresh,
+  onSelect,
+}: {
+  devices: readonly MediaDeviceInfo[];
+  preferences: CallDevicePreferences;
+  disabled: boolean;
+  refreshing: boolean;
+  onRefresh: () => void;
+  onSelect: (kind: SelectableDeviceKind, deviceId: string) => void;
+}) {
+  const rows = callDeviceRows(preferences);
 
   return (
-    <div
-      id={id}
-      className="call-device-settings"
-      role="dialog"
-      aria-label="Устройства звонка"
-    >
+    <section className="call-settings-form" aria-labelledby="call-settings-devices-title">
       <header>
-        <strong>Устройства</strong>
+        <h3 id="call-settings-devices-title">Устройства</h3>
         <button
           type="button"
-          className="call-device-settings__refresh"
+          className="call-device-refresh"
           aria-label="Разрешить доступ и обновить устройства"
           title="Разрешить доступ и обновить устройства"
-          disabled={disabled || refreshing || switching !== null}
-          onClick={() => void refresh(true)}
+          disabled={disabled || refreshing}
+          onClick={onRefresh}
+        >
+          <RefreshCw className={refreshing ? "spin" : undefined} size={17} />
+        </button>
+      </header>
+      <div className="call-settings-form__fields">
+        {rows.map((row) => {
+          const options = deviceOptions(
+            row.kind,
+            devices.filter((device) => device.kind === row.kind),
+            row.selected,
+          );
+          return (
+            <label key={row.kind}>
+              <span>{row.label}</span>
+              <select
+                aria-label={row.label}
+                value={row.supported ? row.selected : "unsupported"}
+                disabled={disabled || !row.supported}
+                onChange={(event) => onSelect(row.kind, event.target.value)}
+              >
+                {!row.supported && <option value="unsupported">Не поддерживается</option>}
+                {row.supported && options.map((option) => (
+                  <option key={option.id} value={option.id}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function DeviceQuickMenu({
+  label,
+  kinds,
+  devices,
+  preferences,
+  disabled,
+  refreshing,
+  onRefresh,
+  onSelect,
+}: {
+  label: string;
+  kinds: readonly SelectableDeviceKind[];
+  devices: readonly MediaDeviceInfo[];
+  preferences: CallDevicePreferences;
+  disabled: boolean;
+  refreshing: boolean;
+  onRefresh: () => void;
+  onSelect: (kind: SelectableDeviceKind, deviceId: string) => void;
+}) {
+  const rows = callDeviceRows(preferences).filter((row) => kinds.includes(row.kind));
+
+  return (
+    <div className="call-device-menu" role="dialog" aria-label={label}>
+      <header>
+        <strong>{label}</strong>
+        <button
+          type="button"
+          className="call-device-refresh"
+          aria-label="Разрешить доступ и обновить устройства"
+          title="Разрешить доступ и обновить устройства"
+          disabled={disabled || refreshing}
+          onClick={onRefresh}
         >
           <RefreshCw className={refreshing ? "spin" : undefined} size={15} />
         </button>
       </header>
       {rows.map((row) => {
+        if (!row.supported) {
+          return (
+            <div className="call-device-menu__section" key={row.kind}>
+              <span>{row.label}</span>
+              <small>Не поддерживается браузером</small>
+            </div>
+          );
+        }
         const options = deviceOptions(
           row.kind,
           devices.filter((device) => device.kind === row.kind),
           row.selected,
         );
         return (
-          <label key={row.kind}>
+          <div
+            className="call-device-menu__section"
+            role="radiogroup"
+            aria-label={row.label}
+            key={row.kind}
+          >
             <span>{row.label}</span>
-            <select
-              aria-label={row.label}
-              value={row.supported ? row.selected : "unsupported"}
-              disabled={disabled || switching !== null || !row.supported}
-              onChange={(event) => void selectDevice(row.kind, event.target.value)}
-            >
-              {!row.supported && <option value="unsupported">Не поддерживается</option>}
-              {row.supported && options.map((option) => (
-                <option key={option.id} value={option.id}>{option.label}</option>
-              ))}
-            </select>
-          </label>
+            {options.map((option) => (
+              <button
+                type="button"
+                role="radio"
+                aria-checked={option.id === row.selected}
+                disabled={disabled}
+                key={option.id}
+                onClick={() => onSelect(row.kind, option.id)}
+              >
+                <Check size={14} />
+                <span>{option.label}</span>
+              </button>
+            ))}
+          </div>
         );
       })}
+    </div>
+  );
+}
+
+function MediaControl({
+  disabled,
+  menuOpen,
+  menuLabel,
+  onMenuClick,
+  children,
+  menu,
+}: {
+  disabled: boolean;
+  menuOpen: boolean;
+  menuLabel: string;
+  onMenuClick: () => void;
+  children: React.ReactNode;
+  menu?: React.ReactNode;
+}) {
+  return (
+    <div className={`call-media-control${menuOpen ? " is-open" : ""}`}>
+      <div className="call-control-group">
+        {children}
+        <button
+          type="button"
+          className="call-control-menu-trigger"
+          aria-label={menuLabel}
+          title={menuLabel}
+          aria-expanded={menuOpen}
+          disabled={disabled}
+          onClick={onMenuClick}
+        >
+          <ChevronUp size={13} />
+        </button>
+      </div>
+      {menuOpen && menu}
     </div>
   );
 }
@@ -389,18 +583,22 @@ function ActiveCall({
     isMicrophoneEnabled,
     isScreenShareEnabled,
   } = useLocalParticipant();
-  const cameraTracks = useTracks(
-    [{ source: Track.Source.Camera, withPlaceholder: true }],
+  const visualTracks = useTracks(
+    [
+      { source: Track.Source.Camera, withPlaceholder: true },
+      { source: Track.Source.ScreenShare, withPlaceholder: false },
+    ],
     { onlySubscribed: false },
   );
-  const screenTracks = useTracks([Track.Source.ScreenShare], { onlySubscribed: false });
   const [busyControl, setBusyControl] = useState<ControlKind | null>(null);
+  const [switchingDevice, setSwitchingDevice] = useState<SelectableDeviceKind | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const settingsId = useId();
+  const [quickMenu, setQuickMenu] = useState<"audio" | "camera" | "screen" | null>(null);
+  const [cameraMenuPurpose, setCameraMenuPurpose] = useState<"configure" | "enable" | null>(null);
+  const [focusedTrackKey, setFocusedTrackKey] = useState<string | null>(null);
   const frameRef = useRef<HTMLDivElement>(null);
-  const settingsAreaRef = useRef<HTMLDivElement>(null);
-  const settingsButtonRef = useRef<HTMLButtonElement>(null);
+  const controlsRef = useRef<HTMLDivElement>(null);
   const profileUpdateMounted = useRef(true);
   const profileUpdateConnected = useRef(
     connectionState === ConnectionState.Connected,
@@ -418,6 +616,7 @@ function ActiveCall({
   const profileErrorRef = useRef(onMediaError);
   const localIdentity = localParticipant.identity;
   const remoteCount = participants.filter((participant) => participant.identity !== localIdentity).length;
+  const { devices, refresh: refreshDevices, refreshing: refreshingDevices } = useCallDevices(onMediaError);
 
   const flushProfileUpdate = useCallback(async () => {
     if (profileUpdateRunning.current) return;
@@ -493,17 +692,25 @@ function ActiveCall({
     };
   }, []);
 
-  const { mainTrack, pipTrack, isSharing } = useMemo(() => {
-    const remoteScreen = screenTracks.find((track) => track.participant.identity !== localIdentity);
-    const screen = remoteScreen ?? screenTracks[0];
-    const remoteCamera = cameraTracks.find((track) => track.participant.identity !== localIdentity);
-    const localCamera = cameraTracks.find((track) => track.participant.identity === localIdentity);
-    return {
-      mainTrack: screen ?? remoteCamera ?? localCamera,
-      pipTrack: screen ? (remoteCamera ?? localCamera) : remoteCamera && localCamera ? localCamera : undefined,
-      isSharing: Boolean(screen),
-    };
-  }, [cameraTracks, localIdentity, screenTracks]);
+  const focusedTrack = focusedTrackKey
+    ? visualTracks.find((track) => (
+        trackReferenceKey(track) === focusedTrackKey && isTrackMediaActive(track)
+      ))
+    : undefined;
+  const carouselTracks = focusedTrack
+    ? visualTracks.filter((track) => trackReferenceKey(track) !== focusedTrackKey)
+    : [];
+  const hasActiveMedia = visualTracks.some(isTrackMediaActive);
+
+  useEffect(() => {
+    if (focusedTrackKey && !focusedTrack) setFocusedTrackKey(null);
+  }, [focusedTrack, focusedTrackKey]);
+
+  const selectTrack = useCallback((track: TrackReferenceOrPlaceholder) => {
+    if (!isTrackMediaActive(track)) return;
+    const key = trackReferenceKey(track);
+    setFocusedTrackKey((current) => current === key ? null : key);
+  }, []);
 
   useEffect(() => {
     const updateFullscreen = () => setIsFullscreen(document.fullscreenElement === frameRef.current);
@@ -512,21 +719,21 @@ function ActiveCall({
   }, []);
 
   useEffect(() => {
-    if (!settingsOpen) return;
+    if (!quickMenu) return;
     const closeOnOutsidePointer = (event: PointerEvent) => {
       if (
         event.target instanceof Node
-        && !settingsAreaRef.current?.contains(event.target)
-        && !settingsButtonRef.current?.contains(event.target)
+        && !controlsRef.current?.contains(event.target)
       ) {
-        setSettingsOpen(false);
+        setQuickMenu(null);
+        setCameraMenuPurpose(null);
       }
     };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
-      setSettingsOpen(false);
-      settingsButtonRef.current?.focus();
+      setQuickMenu(null);
+      setCameraMenuPurpose(null);
     };
     document.addEventListener("pointerdown", closeOnOutsidePointer);
     document.addEventListener("keydown", closeOnEscape);
@@ -534,9 +741,18 @@ function ActiveCall({
       document.removeEventListener("pointerdown", closeOnOutsidePointer);
       document.removeEventListener("keydown", closeOnEscape);
     };
-  }, [settingsOpen]);
+  }, [quickMenu]);
 
   const toggleMedia = useCallback(async (kind: ControlKind) => {
+    if (
+      kind === "camera"
+      && !isCameraEnabled
+      && !devicePreferences.videoInputSelected
+    ) {
+      setCameraMenuPurpose("enable");
+      setQuickMenu("camera");
+      return;
+    }
     setBusyControl(kind);
     onMediaError(null);
     try {
@@ -562,7 +778,81 @@ function ActiveCall({
     } finally {
       setBusyControl(null);
     }
-  }, [isCameraEnabled, isMicrophoneEnabled, isScreenShareEnabled, localParticipant, onMediaError]);
+  }, [devicePreferences.videoInputSelected, isCameraEnabled, isMicrophoneEnabled, isScreenShareEnabled, localParticipant, onMediaError]);
+
+  const chooseScreenSource = useCallback(async () => {
+    setQuickMenu(null);
+    setBusyControl("screen");
+    onMediaError(null);
+    try {
+      if (isScreenShareEnabled) {
+        await localParticipant.setScreenShareEnabled(false);
+      }
+      await localParticipant.setScreenShareEnabled(true, {
+        audio: true,
+        video: true,
+        contentHint: "detail",
+        selfBrowserSurface: "include",
+        surfaceSwitching: "include",
+        systemAudio: "include",
+        preferCurrentTab: false,
+      });
+    } catch (reason) {
+      if (reason instanceof DOMException && reason.name === "NotAllowedError") {
+        onMediaError("Демонстрация экрана не началась.");
+      } else {
+        onMediaError(errorMessage(reason));
+      }
+    } finally {
+      setBusyControl(null);
+    }
+  }, [isScreenShareEnabled, localParticipant, onMediaError]);
+
+  const selectDevice = useCallback(async (
+    kind: SelectableDeviceKind,
+    deviceId: string,
+    closeQuickMenu: boolean,
+  ) => {
+    if (!validDeviceId(deviceId)) return;
+    setSwitchingDevice(kind);
+    onMediaError(null);
+    try {
+      const switched = await room.switchActiveDevice(
+        kind,
+        deviceId,
+        deviceId !== "default",
+      );
+      if (!switched) throw new Error("Device switch was rejected");
+      onDevicePreferenceChange(kind, deviceId);
+      if (closeQuickMenu) setQuickMenu(null);
+      if (kind === "videoinput" && cameraMenuPurpose === "enable") {
+        setCameraMenuPurpose(null);
+        setBusyControl("camera");
+        await localParticipant.setCameraEnabled(true);
+      } else if (kind === "videoinput") {
+        setCameraMenuPurpose(null);
+      }
+    } catch {
+      onMediaError(mediaDeviceMessage(kind));
+    } finally {
+      setBusyControl(null);
+      setSwitchingDevice(null);
+    }
+  }, [cameraMenuPurpose, localParticipant, onDevicePreferenceChange, onMediaError, room]);
+
+  const toggleQuickMenu = useCallback((menu: "audio" | "camera" | "screen") => {
+    setSettingsOpen(false);
+    const nextMenu = quickMenu === menu ? null : menu;
+    setQuickMenu(nextMenu);
+    setCameraMenuPurpose(nextMenu === "camera" ? "configure" : null);
+  }, [quickMenu]);
+
+  const openSettings = useCallback(async () => {
+    setQuickMenu(null);
+    setCameraMenuPurpose(null);
+    if (document.fullscreenElement) await document.exitFullscreen();
+    setSettingsOpen(true);
+  }, []);
 
   const toggleFullscreen = useCallback(async () => {
     try {
@@ -579,22 +869,39 @@ function ActiveCall({
       ? "Восстанавливаем связь"
       : "Подключаемся";
   const controlsDisabled = connectionState !== ConnectionState.Connected;
+  const mediaControlsDisabled = controlsDisabled || busyControl !== null || switchingDevice !== null;
   const screenShareSupported = typeof navigator.mediaDevices?.getDisplayMedia === "function";
 
   return (
-    <div ref={frameRef} className={`lesson-call lesson-call--active ${isSharing ? "lesson-call--sharing" : ""}`}>
+    <div ref={frameRef} className="lesson-call lesson-call--active">
       <div className="call-stage">
-        {mainTrack ? (
-          <ParticipantTile trackRef={mainTrack} className="call-participant call-participant--main" />
+        {focusedTrack ? (
+          <FocusLayoutContainer className="call-focus-layout">
+            <CarouselLayout tracks={carouselTracks} className="call-track-carousel">
+              <CallTrackTile
+                focusedTrackKey={focusedTrackKey}
+                localIdentity={localIdentity}
+                onSelect={selectTrack}
+              />
+            </CarouselLayout>
+            <CallTrackTile
+              trackRef={focusedTrack}
+              focusedTrackKey={focusedTrackKey}
+              localIdentity={localIdentity}
+              onSelect={selectTrack}
+            />
+          </FocusLayoutContainer>
         ) : (
-          <div className="call-video-placeholder"><VideoOff size={27} /><span>Камера выключена</span></div>
-        )}
-        {mainTrack && <span className="call-participant-label">{participantLabel(mainTrack, localIdentity)}</span>}
-        {pipTrack && (
-          <div className="call-picture-in-picture">
-            <ParticipantTile trackRef={pipTrack} className="call-participant call-participant--pip" />
-            <span>{participantLabel(pipTrack, localIdentity)}</span>
-          </div>
+          <GridLayout
+            tracks={visualTracks}
+            className={`call-layout-grid ${hasActiveMedia ? "has-active-media" : "is-media-empty"}`}
+          >
+            <CallTrackTile
+              focusedTrackKey={focusedTrackKey}
+              localIdentity={localIdentity}
+              onSelect={selectTrack}
+            />
+          </GridLayout>
         )}
         {remoteCount === 0 && connectionState === ConnectionState.Connected && (
           <div className="call-waiting">Ожидаем второго участника</div>
@@ -614,57 +921,101 @@ function ActiveCall({
         </div>
       )}
 
-      <div ref={settingsAreaRef} className="call-device-settings-area">
-        {settingsOpen && (
-          <CallDeviceSettings
-            id={settingsId}
-            room={room}
-            preferences={devicePreferences}
-            disabled={controlsDisabled || busyControl !== null}
-            onChange={onDevicePreferenceChange}
-            onError={onMediaError}
-          />
-        )}
-      </div>
-
-      <div className="call-controls" aria-label="Управление звонком">
-        <CallControl
-          active={isMicrophoneEnabled}
-          disabled={controlsDisabled || busyControl !== null}
-          label={isMicrophoneEnabled ? "Выключить микрофон" : "Включить микрофон"}
-          onClick={() => void toggleMedia("microphone")}
+      <div ref={controlsRef} className="call-controls" aria-label="Управление звонком">
+        <MediaControl
+          disabled={mediaControlsDisabled}
+          menuOpen={quickMenu === "audio"}
+          menuLabel="Выбрать микрофон и наушники"
+          onMenuClick={() => toggleQuickMenu("audio")}
+          menu={(
+            <DeviceQuickMenu
+              label="Звук"
+              kinds={["audioinput", "audiooutput"]}
+              devices={devices}
+              preferences={devicePreferences}
+              disabled={mediaControlsDisabled}
+              refreshing={refreshingDevices}
+              onRefresh={() => void refreshDevices(true)}
+              onSelect={(kind, deviceId) => void selectDevice(kind, deviceId, true)}
+            />
+          )}
         >
-          {busyControl === "microphone" ? <LoaderCircle className="spin" size={18} /> : isMicrophoneEnabled ? <Mic size={18} /> : <MicOff size={18} />}
-        </CallControl>
-        <CallControl
-          active={isCameraEnabled}
-          disabled={controlsDisabled || busyControl !== null}
-          label={isCameraEnabled ? "Выключить камеру" : "Включить камеру"}
-          onClick={() => void toggleMedia("camera")}
+          <CallControl
+            split
+            active={isMicrophoneEnabled}
+            disabled={mediaControlsDisabled}
+            label={isMicrophoneEnabled ? "Выключить микрофон" : "Включить микрофон"}
+            onClick={() => void toggleMedia("microphone")}
+          >
+            {busyControl === "microphone" ? <LoaderCircle className="spin" size={18} /> : isMicrophoneEnabled ? <Mic size={18} /> : <MicOff size={18} />}
+          </CallControl>
+        </MediaControl>
+        <MediaControl
+          disabled={mediaControlsDisabled}
+          menuOpen={quickMenu === "camera"}
+          menuLabel="Выбрать камеру"
+          onMenuClick={() => toggleQuickMenu("camera")}
+          menu={(
+            <DeviceQuickMenu
+              label={cameraMenuPurpose === "enable" ? "Выберите камеру" : "Камера"}
+              kinds={["videoinput"]}
+              devices={devices}
+              preferences={devicePreferences}
+              disabled={mediaControlsDisabled}
+              refreshing={refreshingDevices}
+              onRefresh={() => void refreshDevices(true)}
+              onSelect={(kind, deviceId) => void selectDevice(kind, deviceId, true)}
+            />
+          )}
         >
-          {busyControl === "camera" ? <LoaderCircle className="spin" size={18} /> : isCameraEnabled ? <Video size={18} /> : <VideoOff size={18} />}
-        </CallControl>
-        <CallControl
-          active={isScreenShareEnabled}
-          disabled={controlsDisabled || busyControl !== null || !screenShareSupported}
-          label={screenShareSupported ? (isScreenShareEnabled ? "Остановить демонстрацию" : "Выбрать экран") : "Демонстрация экрана недоступна"}
-          onClick={() => void toggleMedia("screen")}
+          <CallControl
+            split
+            active={isCameraEnabled}
+            disabled={mediaControlsDisabled}
+            label={isCameraEnabled ? "Выключить камеру" : "Включить камеру"}
+            onClick={() => void toggleMedia("camera")}
+          >
+            {busyControl === "camera" ? <LoaderCircle className="spin" size={18} /> : isCameraEnabled ? <Video size={18} /> : <VideoOff size={18} />}
+          </CallControl>
+        </MediaControl>
+        <MediaControl
+          disabled={mediaControlsDisabled || !screenShareSupported}
+          menuOpen={quickMenu === "screen"}
+          menuLabel="Выбрать экран или окно"
+          onMenuClick={() => toggleQuickMenu("screen")}
+          menu={(
+            <div className="call-device-menu call-screen-menu" role="dialog" aria-label="Демонстрация экрана">
+              <button
+                type="button"
+                disabled={mediaControlsDisabled || !screenShareSupported}
+                onClick={() => void chooseScreenSource()}
+              >
+                <MonitorUp size={16} />
+                <span>{isScreenShareEnabled ? "Сменить экран или окно" : "Выбрать экран или окно"}</span>
+              </button>
+            </div>
+          )}
         >
-          {busyControl === "screen" ? <LoaderCircle className="spin" size={18} /> : <MonitorUp size={18} />}
-        </CallControl>
+          <CallControl
+            split
+            active={isScreenShareEnabled}
+            disabled={mediaControlsDisabled || !screenShareSupported}
+            label={screenShareSupported ? (isScreenShareEnabled ? "Остановить демонстрацию" : "Начать демонстрацию") : "Демонстрация экрана недоступна"}
+            onClick={() => void toggleMedia("screen")}
+          >
+            {busyControl === "screen" ? <LoaderCircle className="spin" size={18} /> : <MonitorUp size={18} />}
+          </CallControl>
+        </MediaControl>
         <CallControl active={isFullscreen} label={isFullscreen ? "Свернуть звонок" : "Развернуть звонок"} onClick={() => void toggleFullscreen()}>
           <Maximize2 size={18} />
         </CallControl>
         <button
-          ref={settingsButtonRef}
           type="button"
           className={`call-control${settingsOpen ? " is-active" : ""}`}
-          aria-label="Настроить устройства"
-          title="Настроить устройства"
-          aria-expanded={settingsOpen}
-          aria-controls={settingsId}
-          disabled={controlsDisabled || busyControl !== null}
-          onClick={() => setSettingsOpen((current) => !current)}
+          aria-label="Открыть настройки звонка"
+          title="Открыть настройки звонка"
+          disabled={mediaControlsDisabled}
+          onClick={() => void openSettings()}
         >
           <Settings size={18} />
         </button>
@@ -674,6 +1025,22 @@ function ActiveCall({
       </div>
       <StartAudio className="call-start-audio" label="Включить звук" />
       <RoomAudioRenderer />
+      <Modal
+        open={settingsOpen}
+        title="Настройки звонка"
+        onClose={() => setSettingsOpen(false)}
+        width="medium"
+        backdropClassName="call-settings-modal"
+      >
+        <DeviceSettingsForm
+          devices={devices}
+          preferences={devicePreferences}
+          disabled={mediaControlsDisabled}
+          refreshing={refreshingDevices}
+          onRefresh={() => void refreshDevices(true)}
+          onSelect={(kind, deviceId) => void selectDevice(kind, deviceId, false)}
+        />
+      </Modal>
     </div>
   );
 }
@@ -742,7 +1109,7 @@ export function CallWorkspace({
         ? { ...current, audioInput: deviceId }
         : kind === "audiooutput"
           ? { ...current, audioOutput: deviceId }
-          : { ...current, videoInput: deviceId };
+          : { ...current, videoInput: deviceId, videoInputSelected: true };
       writeDevicePreferences(next);
       return next;
     });

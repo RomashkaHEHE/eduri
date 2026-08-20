@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ConnectionError, ConnectionState, Room } from "livekit-client";
+import { ConnectionError, ConnectionState, Room, Track } from "livekit-client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LessonSummary } from "../../shared/types";
 import { CallWorkspace, LessonCall } from "./LessonCall";
@@ -30,6 +30,8 @@ const mocks = vi.hoisted(() => ({
   isMicrophoneEnabled: false,
   isCameraEnabled: false,
   isScreenShareEnabled: false,
+  visualTracks: [] as Array<Record<string, unknown>>,
+  participants: [] as Array<Record<string, unknown>>,
 }));
 
 vi.mock("../api", () => ({
@@ -41,17 +43,48 @@ vi.mock("../api", () => ({
   },
 }));
 
-vi.mock("@livekit/components-react", () => ({
+vi.mock("@livekit/components-react", async () => {
+  const React = await import("react");
+  const trackContext = React.createContext<Record<string, unknown> | undefined>(undefined);
+  const renderTracks = (
+    tag: "div" | "aside",
+    baseClassName: string,
+    props: Record<string, unknown>,
+  ) => React.createElement(
+    tag,
+    {
+      className: `${baseClassName} ${String(props.className ?? "")}`.trim(),
+      ...(tag === "aside" ? { "data-lk-orientation": "vertical" } : {}),
+    },
+    (props.tracks as Array<Record<string, unknown>>).map((track, index) => React.createElement(
+      trackContext.Provider,
+      { value: track, key: `${String(track.source)}:${index}` },
+      props.children as React.ReactNode,
+    )),
+  );
+
+  return {
   LiveKitRoom: (props: Record<string, unknown>) => {
     mocks.liveKitRoomProps = props;
-    return createElement("div", {
+    return React.createElement("div", {
       className: props.className as string,
       "data-testid": "livekit-room",
     }, props.children as React.ReactNode);
   },
-  ParticipantTile: () => null,
+  CarouselLayout: (props: Record<string, unknown>) => renderTracks("aside", "lk-carousel", props),
+  FocusLayoutContainer: (props: Record<string, unknown>) => React.createElement(
+    "div",
+    { className: `lk-focus-layout ${String(props.className ?? "")}`.trim() },
+    props.children as React.ReactNode,
+  ),
+  GridLayout: (props: Record<string, unknown>) => renderTracks("div", "lk-grid-layout", props),
+  ParticipantTile: (props: Record<string, unknown>) => React.createElement("div", {
+    className: props.className,
+    "data-testid": "participant-media",
+  }),
   RoomAudioRenderer: () => null,
   StartAudio: () => null,
+  isTrackReference: (track: Record<string, unknown> | undefined) => Boolean(track?.publication),
   useConnectionState: () => mocks.connectionState,
   useLocalParticipant: () => ({
     localParticipant: mocks.localParticipant,
@@ -59,10 +92,12 @@ vi.mock("@livekit/components-react", () => ({
     isCameraEnabled: mocks.isCameraEnabled,
     isScreenShareEnabled: mocks.isScreenShareEnabled,
   }),
-  useParticipants: () => [mocks.localParticipant],
+  useMaybeTrackRefContext: () => React.useContext(trackContext),
+  useParticipants: () => mocks.participants.length ? mocks.participants : [mocks.localParticipant],
   useRoomContext: () => mocks.room,
-  useTracks: () => [],
-}));
+  useTracks: () => mocks.visualTracks,
+  };
+});
 
 let container: HTMLDivElement | undefined;
 let root: Root | undefined;
@@ -90,8 +125,59 @@ function mediaDevice(kind: MediaDeviceKind, deviceId: string, label: string): Me
   };
 }
 
+function callParticipant(identity: string, name: string, isLocal = false) {
+  return { identity, name, isLocal };
+}
+
+function visualTrack(
+  participant: ReturnType<typeof callParticipant>,
+  source: Track.Source.Camera | Track.Source.ScreenShare,
+  trackSid?: string,
+  isMuted = false,
+) {
+  return trackSid
+    ? {
+        participant,
+        source,
+        publication: { source, trackSid, isMuted },
+      }
+    : { participant, source };
+}
+
 async function clickButton(label: string) {
-  const button = container?.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
+  const button = document.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
+  expect(button).not.toBeNull();
+  await act(async () => {
+    button?.click();
+    await Promise.resolve();
+  });
+}
+
+async function clickLabeledElement(label: string) {
+  const element = document.querySelector<HTMLElement>(`[aria-label="${label}"]`);
+  expect(element).not.toBeNull();
+  await act(async () => {
+    element?.click();
+    await Promise.resolve();
+  });
+}
+
+async function selectOption(label: string, value: string) {
+  const select = document.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`);
+  expect(select).not.toBeNull();
+  await act(async () => {
+    if (select) {
+      select.value = value;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    await Promise.resolve();
+  });
+}
+
+async function clickDeviceOption(groupLabel: string, optionLabel: string) {
+  const group = document.querySelector(`[role="radiogroup"][aria-label="${groupLabel}"]`);
+  const button = Array.from(group?.querySelectorAll<HTMLButtonElement>("button") ?? [])
+    .find((candidate) => candidate.textContent === optionLabel);
   expect(button).toBeDefined();
   await act(async () => {
     button?.click();
@@ -99,14 +185,12 @@ async function clickButton(label: string) {
   });
 }
 
-async function selectOption(label: string, value: string) {
-  const select = container?.querySelector<HTMLSelectElement>(`select[aria-label="${label}"]`);
-  expect(select).toBeDefined();
+async function clickButtonWithText(label: string) {
+  const button = Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+    .find((candidate) => candidate.textContent === label);
+  expect(button).toBeDefined();
   await act(async () => {
-    if (select) {
-      select.value = value;
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-    }
+    button?.click();
     await Promise.resolve();
   });
 }
@@ -127,6 +211,8 @@ beforeEach(() => {
   mocks.isMicrophoneEnabled = false;
   mocks.isCameraEnabled = false;
   mocks.isScreenShareEnabled = false;
+  mocks.visualTracks = [];
+  mocks.participants = [];
   vi.spyOn(Room, "getLocalDevices").mockResolvedValue([]);
   setAudioOutputSupport(false);
   Object.defineProperty(navigator, "mediaDevices", {
@@ -326,7 +412,80 @@ describe("LessonCall", () => {
     expect(mocks.localParticipant.setCameraEnabled).not.toHaveBeenCalled();
   });
 
-  it("enters every call muted and enables capture only after an explicit click", async () => {
+  it("switches intuitively between equal grid, focused screen, and focused camera", async () => {
+    const tutor = callParticipant("tutor", "Tutor");
+    const student = callParticipant("student", "Student");
+    mocks.participants = [tutor, student];
+    mocks.visualTracks = [
+      visualTrack(tutor, Track.Source.Camera, "camera-tutor"),
+      visualTrack(tutor, Track.Source.ScreenShare, "screen-tutor"),
+      visualTrack(student, Track.Source.Camera),
+    ];
+    await joinActiveCall();
+
+    expect(container?.querySelector(".call-layout-grid")).not.toBeNull();
+    expect(container?.querySelectorAll(".call-track-tile")).toHaveLength(3);
+    expect(container?.querySelector(".call-focus-layout")).toBeNull();
+
+    await clickLabeledElement("Tutor: Демонстрация экрана");
+    expect(container?.querySelector(".call-focus-layout")).not.toBeNull();
+    expect(container?.querySelector('[data-track-source="screen_share"].is-focused')).not.toBeNull();
+    expect(container?.querySelector(".call-track-carousel")?.children).toHaveLength(2);
+
+    await clickLabeledElement("Tutor: Камера");
+    expect(container?.querySelector('[data-track-source="camera"].is-focused')).not.toBeNull();
+    expect(container?.querySelector('[data-track-source="screen_share"].is-focused')).toBeNull();
+
+    await clickLabeledElement("Tutor: Камера");
+    expect(container?.querySelector(".call-focus-layout")).toBeNull();
+    expect(container?.querySelector(".call-layout-grid")).not.toBeNull();
+  });
+
+  it("keeps participants without media as compact non-focusable cards", async () => {
+    const local = callParticipant("local-user", "Call user", true);
+    mocks.participants = [local];
+    mocks.visualTracks = [visualTrack(local, Track.Source.Camera)];
+    await joinActiveCall();
+
+    const grid = container?.querySelector(".call-layout-grid");
+    const tile = container?.querySelector<HTMLElement>(".call-track-tile--no-media");
+    expect(grid?.classList.contains("is-media-empty")).toBe(true);
+    expect(tile?.getAttribute("role")).toBe("group");
+    expect(tile?.getAttribute("tabindex")).toBeNull();
+    expect(tile?.textContent).toContain("Вы");
+    expect(tile?.textContent).toContain("Без видео");
+
+    await act(async () => tile?.click());
+    expect(container?.querySelector(".call-focus-layout")).toBeNull();
+  });
+
+  it("returns to the grid when the focused stream disappears", async () => {
+    const tutor = callParticipant("tutor", "Tutor");
+    const camera = visualTrack(tutor, Track.Source.Camera, "camera-tutor");
+    mocks.participants = [tutor];
+    mocks.visualTracks = [
+      camera,
+      visualTrack(tutor, Track.Source.ScreenShare, "screen-tutor"),
+    ];
+    await joinActiveCall();
+    await clickLabeledElement("Tutor: Демонстрация экрана");
+    expect(container?.querySelector(".call-focus-layout")).not.toBeNull();
+
+    mocks.visualTracks = [camera];
+    await act(async () => {
+      root?.render(createElement(LessonCall, {
+        lessonId: "lesson-id",
+        status: "active",
+        profile: PROFILE,
+      }));
+      await Promise.resolve();
+    });
+
+    expect(container?.querySelector(".call-focus-layout")).toBeNull();
+    expect(container?.querySelector(".call-layout-grid")).not.toBeNull();
+  });
+
+  it("enters muted and asks for a camera choice before its first activation", async () => {
     await joinActiveCall();
 
     expect(mocks.liveKitRoomProps).toMatchObject({ audio: false, video: false });
@@ -338,7 +497,21 @@ describe("LessonCall", () => {
     expect(mocks.localParticipant.setCameraEnabled).not.toHaveBeenCalled();
 
     await clickButton("Включить камеру");
+    expect(mocks.localParticipant.setCameraEnabled).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="dialog"][aria-label="Выберите камеру"]')).not.toBeNull();
+
+    await clickDeviceOption("Камера", "По умолчанию");
+    expect(mocks.room.switchActiveDevice).toHaveBeenCalledWith("videoinput", "default", false);
     expect(mocks.localParticipant.setCameraEnabled).toHaveBeenCalledWith(true);
+    expect(JSON.parse(window.localStorage.getItem("eduri-call-devices-v1") ?? "null")).toMatchObject({
+      videoInput: "default",
+      videoInputSelected: true,
+    });
+
+    mocks.localParticipant.setCameraEnabled.mockClear();
+    await clickButton("Включить камеру");
+    expect(mocks.localParticipant.setCameraEnabled).toHaveBeenCalledWith(true);
+    expect(document.querySelector('[role="dialog"][aria-label="Выберите камеру"]')).toBeNull();
   });
 
   it("enumerates without permission and switches the selected microphone and camera", async () => {
@@ -348,22 +521,25 @@ describe("LessonCall", () => {
     ]);
     await joinActiveCall();
 
-    await clickButton("Настроить устройства");
+    await clickButton("Выбрать микрофон и наушники");
     expect(Room.getLocalDevices).toHaveBeenCalledWith(undefined, false);
 
-    await selectOption("Микрофон", "mic-two");
+    await clickDeviceOption("Микрофон", "Studio microphone");
     expect(mocks.room.switchActiveDevice).toHaveBeenCalledWith("audioinput", "mic-two", true);
-    await selectOption("Камера", "camera-two");
+    await clickButton("Выбрать камеру");
+    await clickDeviceOption("Камера", "Desk camera");
     expect(mocks.room.switchActiveDevice).toHaveBeenCalledWith("videoinput", "camera-two", true);
 
     expect(JSON.parse(window.localStorage.getItem("eduri-call-devices-v1") ?? "null")).toMatchObject({
       version: 1,
       audioInput: "mic-two",
       videoInput: "camera-two",
+      videoInputSelected: true,
     });
     expect(mocks.localParticipant.setMicrophoneEnabled).not.toHaveBeenCalled();
     expect(mocks.localParticipant.setCameraEnabled).not.toHaveBeenCalled();
 
+    await clickButton("Выбрать камеру");
     await clickButton("Разрешить доступ и обновить устройства");
     expect(Room.getLocalDevices).toHaveBeenLastCalledWith(undefined, true);
   });
@@ -391,8 +567,8 @@ describe("LessonCall", () => {
       },
     });
 
-    await clickButton("Настроить устройства");
-    await selectOption("Динамики", "speaker-two");
+    await clickButton("Выбрать микрофон и наушники");
+    await clickDeviceOption("Наушники", "Headphones");
     expect(mocks.room.switchActiveDevice).toHaveBeenCalledWith("audiooutput", "speaker-two", true);
   });
 
@@ -401,8 +577,10 @@ describe("LessonCall", () => {
     const options = mocks.liveKitRoomProps?.options as Record<string, unknown>;
     expect(options).not.toHaveProperty("audioOutput");
 
-    await clickButton("Настроить устройства");
-    const speakers = container?.querySelector<HTMLSelectElement>('select[aria-label="Динамики"]');
+    await clickButton("Открыть настройки звонка");
+    expect(document.querySelector('[role="dialog"][aria-modal="true"]')?.textContent)
+      .toContain("Настройки звонка");
+    const speakers = document.querySelector<HTMLSelectElement>('select[aria-label="Наушники"]');
     expect(speakers?.disabled).toBe(true);
     expect(speakers?.textContent).toContain("Не поддерживается");
   });
@@ -414,8 +592,8 @@ describe("LessonCall", () => {
     mocks.room.switchActiveDevice.mockResolvedValueOnce(false);
     await joinActiveCall();
 
-    await clickButton("Настроить устройства");
-    await selectOption("Микрофон", "rejected-mic");
+    await clickButton("Выбрать микрофон и наушники");
+    await clickDeviceOption("Микрофон", "Rejected microphone");
 
     expect(window.localStorage.getItem("eduri-call-devices-v1")).toBeNull();
     expect(container?.textContent).toContain("Микрофон недоступен");
@@ -424,7 +602,7 @@ describe("LessonCall", () => {
   it("opens the protected browser source chooser when screen sharing starts", async () => {
     await joinActiveCall();
 
-    await clickButton("Выбрать экран");
+    await clickButton("Начать демонстрацию");
     expect(mocks.localParticipant.setScreenShareEnabled).toHaveBeenCalledWith(true, {
       audio: true,
       video: true,
@@ -434,6 +612,18 @@ describe("LessonCall", () => {
       systemAudio: "include",
       preferCurrentTab: false,
     });
+  });
+
+  it("opens the browser source chooser from the screen-share arrow and can switch a source", async () => {
+    mocks.isScreenShareEnabled = true;
+    await joinActiveCall();
+
+    await clickButton("Выбрать экран или окно");
+    expect(mocks.localParticipant.setScreenShareEnabled).not.toHaveBeenCalled();
+    await clickButtonWithText("Сменить экран или окно");
+
+    expect(mocks.localParticipant.setScreenShareEnabled.mock.calls[0]).toEqual([false]);
+    expect(mocks.localParticipant.setScreenShareEnabled.mock.calls[1]?.[0]).toBe(true);
   });
 
   it.each<LessonSummary["status"]>(["completed", "cancelled"])(

@@ -195,7 +195,7 @@ function normalizeStyleValue(
   }
 }
 
-function normalizeToolStyle(
+export function normalizeToolStyle(
   tool: PersistedToolStyleTool,
   source: Readonly<Record<string, unknown>> | undefined,
 ): Readonly<Record<string, unknown>> {

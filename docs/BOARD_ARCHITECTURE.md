@@ -36,19 +36,20 @@ Implemented in the Board v2 path:
   creation instead of turning total document size into one frame;
 - Konva viewport culling, safe unknown/future-object placeholders, local-only
   undo/redo, versioned built-in style capabilities and defaults, atomic mixed
-  multi-selection styling, local creation-tool presets, deterministic
+  multi-selection styling, device-local creation-tool preset palettes rendered
+  through one shared web component, deterministic
   fractional z-order with four layer commands, offline copy/cut/paste through
   the portable Board Fragment v1 format, collaborative text/code/LaTeX source,
   executable code blocks, click-anchored code/LaTeX/image placement tools,
-  straight and quadratic curved line/arrow geometry, remote cursors,
+  ordered-anchor smooth Line/Arrow geometry and renderer-local connector point
+  editing, remote cursors,
   selections, Drawing-integrated multi-stroke laser sessions, bounded live
   gesture previews, hostile-style sanitization and bounded static text previews
   at the renderer boundary, a ref-aware
   decoded-image LRU, a site-wide light/dark local presentation theme,
-  a strict device-local online collaboration profile with a mandatory
-  first-session gate and server-authoritative display name/color,
-  device-local grid,
-  configurable toolbar, and connector-curvature preferences, an accessible
+  a strict device-local online collaboration profile with a first-session
+  suggestion and server-authoritative display name/color,
+  device-local grid and configurable toolbar, an accessible
   object/canvas context menu, display-paced rendering, and standard scoped
   selection and navigation shortcuts;
 - mouse, pen, and touch gesture ownership, pointer capture cleanup, pinch zoom,
@@ -209,9 +210,10 @@ Rules:
 - text, code, and LaTeX source use Y.Text;
 - a completed freehand stroke stores immutable packed/delta-coded points;
 - live stroke preview is awareness data, not hundreds of durable CRDT writes;
-- connectors retain bindings plus fallback coordinates; current built-in line
-  and arrow version 1 geometry stores finite local `start` and `end` points and
-  an optional finite local quadratic `control` point inside versioned `props`;
+- connectors retain bindings plus fallback coordinates; Arrow version 1 keeps
+  finite local `start`/`end` and an optional quadratic `control`, while new Line
+  version 1 records use a bounded ordered `points` array of finite local
+  anchors. Legacy Line start/end/control records remain readable;
 - unknown object kinds and newer versions keep their opaque plugin style/props
   byte-for-byte preserved and render as safe placeholders; generic core
   envelope fields remain subject to schema-safe core commands;
@@ -255,30 +257,30 @@ read to preserve their source but are normalized to the Python workspace and
 can never select or execute a JavaScript runner. The versioned language field
 remains in the renderer-independent object schema so a future explicitly
 approved language plugin does not require changing the CRDT envelope.
+Rendered board objects use flat fills and strokes without decorative depth
+shadows. The ephemeral laser glow remains a pointer-visibility effect rather
+than persisted object styling.
 
 ### Line and arrow geometry
 
-Built-in version 1 line and arrow objects share one DOM-free geometry contract.
-Their local `props.start` and `props.end` are required two-finite-number tuples;
-`props.control`, when present, is one two-finite-number tuple defining a
-quadratic Bezier. Absence of `control` means the historical straight segment,
-so existing straight records need no migration. Invalid or unbounded point
-data follows the ordinary malformed-object placeholder path and must never be
-silently rewritten or deleted.
+Built-in version 1 line and arrow objects share one DOM-free parser with two
+compatible representations. Legacy Arrow and Line records use finite local
+`props.start`/`props.end` tuples plus an optional quadratic `props.control`.
+New Line and Arrow records use `props.points`, an ordered array of 2-128 finite local
+anchors; its first and last entries are the endpoints. Invalid, oversized, or
+unbounded point data follows the ordinary malformed-object placeholder path and
+must never be silently rewritten or deleted.
 
-Creation normalizes all supplied world points into the object's local transform
-and stores the concrete control point, not a toolbar curvature scalar. For the
-current signed creation preference `c` in `-1..1`, the web adapter derives the
-control from start `S`, end `E`, chord length `d`, and its perpendicular unit
-normal `N = (-(E.y-S.y)/d, (E.x-S.x)/d)` as
-`(S + E) / 2 + N * c * d * 0.75`. A near-zero value omits the control point
-completely. This formula is creation policy; the stored three points are
-authoritative and allow a future editor or native client to create curves
-without reproducing a web preference.
+Line and Arrow creation store start, chord midpoint, and end as three ordered anchors;
+the midpoint begins collinear and is edited directly on canvas. A Catmull-Rom
+to cubic conversion passes a smooth renderer-independent path through every
+anchor, while canonical state remains only the ordered anchors. Point edits
+atomically replace transform plus props through `line.points.set`, so undo and
+CRDT observers never see a half-normalized geometry.
 
-Core geometry computes quadratic extrema for bounds and exposes bounded curve
-sampling independently of Konva. The renderer may convert the quadratic to an
-equivalent cubic for a drawing API, but that cubic is never canonical state.
+Core geometry computes quadratic extrema and bounded smooth-point sampling
+independently of Konva. The renderer may convert either representation to
+cubics for a drawing API, but those cubics are never canonical state.
 The arrowhead uses the end tangent from `control` to `end`; selection, default
 containment marquee, `Shift`-inclusive intersection marquee, inclusive lasso,
 viewport spatial indexing, transforms, and continuous eraser collision must
@@ -335,8 +337,19 @@ Choosing an inactive slot in ordinary mode applies the whole preset; choosing
 the active slot again opens its color, thickness, and opacity controls. The
 slot indicator renders opacity over a transparency grid, and at 100% board zoom
 its circle radius in CSS pixels equals the logical stroke width. The supported
-`0.5..16` range therefore fills the 32 px indicator at its maximum. New
-freehand strokes are always solid and source-over. The version-1 `dash` and
+`0.5..16` range therefore fills the 32 px color area inside an exact 34 px
+circular well with a one-pixel border. On a
+fine-pointer device, one 80 ms linear scale transition changes the
+colored circle's diameter by 4 px while that fits within 32 px, or reduces it
+by 2 px instead of overflowing. Compositor-side subpixel interpolation and
+edge antialiasing express partial boundary-pixel coverage through pixel alpha;
+there are no staged ring layers or separate linear transitions. Pointer exit
+restores the exact preview size;
+selection alone never changes it. The active slot uses a compact accent marker below the
+circular cell and never a square outline or selected background. Extra vertical
+clearance applies only to the inline Drawing palette; mounting or opening a
+floating Line/Arrow palette never changes the main style-bar frame. New freehand
+strokes are always solid and source-over. The version-1 `dash` and
 `blendMode` fields remain readable and round-trip-safe for retained data, but
 the web UI does not offer dash for freehand strokes.
 
@@ -354,9 +367,10 @@ like every other palette edit, is outside CRDT, awareness, protocol, and board
 undo.
 
 Palette configuration is web-adapter UI state, not a board mode. Its palette
-toggle applies a restrained, theme-specific scrim to the underlying style bar
-while leaving the toggle and edit controls operable; the pressed toggle uses a
-distinct accent in both themes rather than sharing the dark-theme hover color.
+surface applies a restrained, theme-specific scrim only to itself while leaving
+the toggle and edit controls operable; sibling style-bar controls are never
+dimmed. The pressed toggle uses a distinct accent in both themes rather than
+sharing the dark-theme hover color.
 There is no separate global Drawing-settings dialog yet. While
 configuration is active, pressing any slot opens that slot's editor without
 changing the active preset. Add appends a stable-ID clone of the active preset,
@@ -381,8 +395,9 @@ teardown share a transition-free commit frame, while returning to the source
 index is a local no-op that still suppresses the trailing click. Pointer
 focus and an active pointer drag have no persistent selection ring or synthetic
 drag outline, while keyboard `:focus-visible` retains the accessible slot
-outline. The edit-only add control is an absolute sibling outside the centered
-preset strip's flex/scroll geometry, so its appearance has zero influence on
+  outline. The edit-only add control is an absolutely positioned child of the
+  style-bar root, outside the centered preset strip's flex/scroll geometry, so
+  its appearance has zero influence on
 the strip's centered position; adding a real slot still widens and recenters
 the strip. Width-capped centered layouts reserve enough symmetric side room
 for this docked control, while fixed-left responsive layouts reserve its space
@@ -429,17 +444,30 @@ format is usable, the built-in six slots are copied. Writes are best-effort,
 debounced by 180 ms, flushed synchronously on browser `pagehide` and surface
 unmount, and never block input. Slot count, order, IDs, and values persist;
 configuration/popup state and the active ID do not. Every remount activates the
-first slot in the loaded order.
+  first slot in the loaded order.
 
-Ordinary tools use the same separation between durable object values and local
-input settings. Stroke, fill, and text foreground controls consume one shared
-device-local Color Library, but a durable object always stores the concrete
-color string selected at creation/apply time. No object stores a palette-slot
+Arrow uses the same web palette component and stable-ID 1-24-slot operations as
+Drawing and Line, with its complete declared creation style stored in each
+slot. It persists in the strict device-local
+`eduri-board-tool-style-palettes-v1` envelope. The Arrow target record, a valid
+active ID, unique bounded preset IDs, and only
+renderer-safe normalized capabilities are required; malformed input or input
+above 256 KiB rejects the complete value. Without this envelope, the previous
+single `eduri-board-tool-styles-v1` Arrow value becomes the first active slot,
+preserving device settings during migration. The old envelope remains a
+compatibility mirror of the active cell. Text and each concrete Shape kind use
+their direct singleton style from that older envelope: Shape outline and fill
+are separate color controls, and outline width is an independent control.
+
+Direct selection styling uses the same separation between durable object values
+and local input settings. Stroke, fill, and text foreground controls consume one
+shared device-local Color Library, but a durable object always stores the
+concrete color string selected at apply time. No object stores a palette-slot
 ID, so editing, deleting, or reordering a favorite cannot recolor an object or
 change a creation preset. Transparent fill remains an explicit semantic action
 rather than an alpha-bearing favorite. Existing safe alpha colors continue to
-round-trip and render, while new picker values are canonical opaque six-digit
-sRGB HEX plus the object's separate general opacity.
+round-trip and render, while new direct picker values are canonical opaque
+six-digit sRGB HEX plus the object's separate general opacity.
 
 The Color Library has 1-24 uniquely identified, ordered favorites and up to
 eight canonical, deduplicated MRU colors. Its strict device envelope is
@@ -495,10 +523,16 @@ merge alpha into an ordinary object's color or silently replace the separate
 general object-opacity control. Transparent shape fill remains its existing
 semantic action.
 
-The preview is also the advanced-format trigger. A `contextmenu` action on it
-suppresses the browser menu and lazily mounts the inline format panel;
-`Context Menu` and `Shift+F10` provide the keyboard equivalent and focus the
-first format field. The panel and its draft rows do not exist in the ordinary
+The preview is also the advanced-format trigger. Primary click lazily mounts
+a separate portalled format popup to the left of the picker and a second click
+closes it. Right-side placement is only a board-boundary fallback when the left
+side cannot contain it. A `contextmenu` action
+still suppresses the browser menu and opens the panel; `Context Menu` and
+`Shift+F10` provide the keyboard equivalent and focus the first format field.
+The trigger participates in the popup's outside-pointer ownership, preventing
+a close/reopen race on repeated click. The portalled popup also participates in
+the host palette's pointer/focus ownership rather than dismissing that palette.
+The popup and its draft rows do not exist in the ordinary
 picker DOM while closed. It exposes synchronized RGB/RGBA and HSV/HSVA rows as
 appropriate plus six-digit HEX or eight-digit HEXA when alpha is enabled.
 Native paste/edit followed by a valid commit is parsed through strict finite
@@ -562,16 +596,18 @@ container so native sequential navigation starts inside the portalled subtree;
 pointer-down or focus genuinely outside the trigger and popup retains the
 documented dismissal behavior.
 
-Text, Line, Arrow, Rectangle, Ellipse, Diamond, and Frame keep independent
-device-local creation styles in the strict `eduri-board-tool-styles-v1`
-envelope. All seven records and only the capabilities declared by the exact
-creation tool are serialized; unsafe scalar values fall back to that tool's
-versioned default. The adapter accepts arbitrary safe colors, `0.5..96` stroke
-width, `0.05..1` opacity, up to eight dash segments of `0..256`, `8..256` font
-size, a renderer-safe comma-separated font-family stack, and canonical
-normal/bold/italic tokens. This envelope uses the same 65,536-code-unit,
-version, 180 ms debounce, `pagehide`/unmount flush, and storage-failure rules as
-the Color Library. These records are profile/input state outside the page and
+Arrow keeps an independent device-local creation-preset palette in the strict
+`eduri-board-tool-style-palettes-v1` envelope. It stores only Arrow's declared
+capabilities; unsafe scalar values reject the envelope and rebuild versioned
+safe defaults. The adapter accepts arbitrary safe colors, `0.5..96` stroke
+width, `0.05..1` opacity, and up to eight dash segments of `0..256`. Direct Text
+and Shape styles retain their renderer-safe capabilities in
+`eduri-board-tool-styles-v1`. Persistence uses
+the same 180 ms debounce, `pagehide`/unmount flush, and storage-failure rules as
+the other device-local board palettes. For Arrow, the older
+`eduri-board-tool-styles-v1` value remains a migration source and compatibility
+mirror for the active cell. These records are profile/input
+state outside the page and
 manifest Y.Docs; a later object-add command copies their current concrete
 values into the new object.
 
@@ -582,8 +618,7 @@ safe font-family fallback stack, and bounded dash pattern remain available.
 Mixed values stay explicit, and a change targets only compatible versions. The
 style bar intentionally exposes no broad reset action or callback for a
 creation style or selection; users change its individual properties directly.
-This does not affect the toolbar-layout reset or the independent Line/Arrow
-curvature reset, which remain adapter controls with their documented scopes.
+This does not affect the independent toolbar-layout reset.
 
 Text foreground uses a swatch-only color trigger without a paint-bucket glyph;
 the contextual label and resulting glyph color already identify its meaning.
@@ -597,9 +632,10 @@ show the union's opacity control and apply it to every compatible target.
 The ordinary font-family control is a portalled select-only combobox/listbox
 with the exact friendly labels `Inter`, `Georgia`, `Cascadia Code`, `Arial`,
 `Verdana`, `Trebuchet MS`, `Times New Roman`, and `Courier New`. Every ordinary
-option and the closed selected/custom value renders through the complete stored
-font-family stack it represents. Mixed state and `Другой шрифт...` use the
-interface font instead. Choosing a named option still writes its full validated
+option displays its friendly family name through the complete stored
+font-family stack it represents. The compact closed trigger always displays
+`Шрифт` through the selected known stack; mixed and unsupported historical
+values use the interface font instead. Choosing a named option still writes its full validated
 fallback stack, so presentation labels cannot erase deterministic fallback
 behavior needed by web and future native clients. A stored custom stack is
 represented by its first family name without being collapsed to that label in
@@ -949,12 +985,15 @@ replace the committed selection, invoke `onSelectionChange`, enter awareness,
 write either Y.Doc, or touch `Y.UndoManager`. While the gesture owns input, the
 renderer suppresses committed Transformer/selection chrome and transform
 handles. It draws the dashed translucent rectangle/lasso as the aggregate
-gesture area and solid noninteractive outlines for its materialized candidate
-nodes. Individual preview outlines are capped at 512; above that budget the
-renderer shows bounded aggregate-only candidate chrome while retaining the
-complete candidate set for final selection. Cancellation removes the gesture
-and candidate chrome, cancels a scheduled membership frame, and restores the
-unchanged committed selection chrome without a callback or awareness update.
+gesture area and a theme-aware translucent accent wash with a solid
+noninteractive outline for each materialized candidate node. The wash follows
+display-paced membership changes before pointer-up, so the renderer makes the
+current implicit closed lasso result visible without committing it. Individual
+candidate previews are capped at 512; above that budget the renderer shows
+bounded aggregate-only candidate chrome while retaining the complete candidate
+set for final selection. Cancellation removes the gesture and candidate chrome,
+cancels a scheduled membership frame, and restores the unchanged committed
+selection chrome without a callback or awareness update.
 
 During every selection-area gesture, selected object dragging and Transformer
 input are suspended and restored on finish or cancellation. More generally,
@@ -990,6 +1029,21 @@ selected, keeps `P`/`2`, uses its palette, and remains the advertised active
 tool. Configuration always shows Drawing with Pencil. This transient state does
 not enter the toolbar preference, CRDT, awareness active-tool field, command
 log, or undo.
+
+The renderer also exposes a bounded semantic list of modifier actions that are
+valid for its exact current interaction state. The web adapter renders that
+list as a faint, noninteractive stack immediately left of the toolbar and maps
+semantic actions to localized key/action labels; renderer code does not own UI
+copy. The list changes across idle, gesture, command-latch, transform, and
+cancellation boundaries. In particular, idle Drawing advertises `Alt` laser,
+an ordinary stroke advertises `Shift` straight drawing and only an armed
+`Ctrl`/`Cmd` unfinished-stroke move, active Eraser advertises `Alt` restore,
+selection advertises only its currently applicable additive/area/lasso actions,
+and active rotation advertises `Shift` snapping. States without a special
+held-key action publish an empty list. The adapter suppresses the presentation
+while an editor, context menu, or toolbar-configuration dialog owns input.
+These hints are ephemeral local view/input state: they never enter the board
+document, command schema, persistence, awareness, undo, or wire protocol.
 
 Configuration may reorder all customizable items and toggle their visibility;
 Select cannot be moved or hidden. Native drag/drop, explicit Up/Down commands,
@@ -1031,15 +1085,12 @@ no backing, border, or shadow, remain outside the centered icon footprint, and
 do not adopt the active-tool accent. They do not enter board state, awareness,
 history, or the renderer-independent protocol.
 
-Line and Arrow also keep independent signed creation-curvature preferences
-under `eduri-board-connector-curvature-v1`. The strict device value has exact
-`{"version":1,"values":{"line":number,"arrow":number}}` structure, is bounded
-to 1,024 UTF-16 code units, rejects non-finite/out-of-range `-1..1` input, and
-normalizes accepted values to 0.05 steps. Both default to zero. The slider,
-exact percent input, and reset-to-straight command change only this local
-creation setting; they create no CRDT transaction, awareness update, or undo
-item. A creation gesture snapshots its selected tool's value at pointer-down
-and materializes only the resulting optional control point in the new object.
+Line and Arrow creation materialize the same ordered three-anchor geometry: two
+endpoints and a collinear midpoint. Curvature is edited from those durable
+points on canvas rather than from device-local creation curvature. Enter or a
+double activation opens the shared point editor for either kind; inserted,
+moved, or deleted anchors commit through one `line.points.set` command. The old
+`eduri-board-connector-curvature-v1` preference is no longer read or written.
 
 Code, LaTeX, and Image use the same active-tool lifecycle as other tools.
 Pressing a toolbar/overflow item only selects and advertises the tool; it never
@@ -1105,8 +1156,10 @@ object. `AltGraph` is excluded. Releasing `Alt` during the stroke records a
 pending session release but does not change the latched gesture: laser sampling
 continues until pointer-up and only then may the session fade. Pressing `Alt`
 after an ordinary freehand pointer-down can never activate laser. `Ctrl/Cmd` is
-independent of laser and retains the unfinished-stroke movement behavior below
-whether it was held before pointer-down or pressed afterward.
+independent of laser, but its order is also explicit: a command modifier already
+held at ordinary freehand pointer-down is ignored for stroke movement until both
+command modifiers have been released and one is pressed again during that
+gesture.
 
 A laser stroke snapshots the current Drawing preset at its own pointer-down and
 uses its sanitized color, logical stroke width, and opacity. Its glow follows
@@ -1122,7 +1175,7 @@ without mutating the local session. Each retained stroke keeps its own style
 snapshot.
 
 Releasing `Alt` after pointer-up clears laser awareness and fades the complete
-retained local session together over 800 ms. An `Alt` release during an active
+retained local session together over 300 ms. An `Alt` release during an active
 stroke defers that same action until pointer-up;
 re-pressing before pointer-up does not undo the pending release. While retained,
 the session remains an active awareness value even when its pointer is
@@ -1152,6 +1205,12 @@ release rules as Pointer Events.
 
 During one ordinary active freehand stroke, held `Ctrl/Cmd` temporarily drags
 the complete unfinished stroke without appending points or moving the camera.
+This movement mode is armed immediately only when the gesture began without a
+command modifier. If `Ctrl` or `Cmd` was already held at pointer-down, movement
+with that initial hold continues ordinary freehand sampling; after both command
+modifiers are released, a later press within the same pointer gesture activates
+stroke movement normally. This prevents a pre-held modifier from trying to move
+an empty one-point draft.
 The web adapter accumulates one uniform logical offset, moves its Konva preview
 in constant time, and materializes translated durable points only at commit;
 the bounded awareness preview carries the same visible translation. The last
@@ -1224,6 +1283,8 @@ frames. A native client may implement the same presentation choice without
 changing protocol bytes.
 
 Whether grid lines are shown is also a device-local presentation preference.
+The web adapter defaults that preference to hidden when no valid stored choice
+exists; an explicitly stored enabled choice remains enabled across boards.
 It is independent of the manifest's future shared grid definition: hiding the
 grid changes neither page/manifest CRDT state, awareness, undo, nor the canvas
 background. A future shared grid geometry or policy must use a manifest core
@@ -1516,9 +1577,11 @@ The current web adapter has one origin/device-local online profile containing
 exactly a `displayName` and `color`. Active guest-room and lesson headers expose
 its editor immediately before the theme control; solo Board and Code routes do
 not expose it because they have no remote presence. The first online entry
-without a valid profile is gated by a non-dismissible modal before Board, Code,
-or Call mounts. Guest entry initially proposes `Гость`, authenticated lesson
-entry proposes the account display name, and the initial color is `#2563eb`.
+without a valid profile opens a dismissible profile suggestion. Guest entry
+proposes `Гость` as phantom placeholder text in an otherwise empty field,
+authenticated lesson entry similarly proposes the account display name, and the
+initial color is `#2563eb`. Closing the suggestion starts the Board, Code, or
+Call session with this normalized in-memory default; it does not write storage.
 The profile uses the full built-in Board color picker rather than a native
 platform color input.
 
@@ -1530,10 +1593,10 @@ Colors are canonical lowercase six-digit `#rrggbb`. Malformed, noncanonical,
 wrong-version, and extra-field values are rejected. Storage events plus
 page-show/visibility reconciliation propagate changes between tabs. A valid
 external value closes a currently open editor rather than allowing its stale
-draft to overwrite the new value. External key deletion clears configuration;
-an active online route returns to the mandatory gate and unmounts its
-Board/Code/Call providers until a new valid profile is saved. Unavailable browser
-storage falls back to the current process-memory value. This profile is
+draft to overwrite the new value. External key deletion clears configuration
+and opens the dismissible suggestion; the active online route continues with
+its normalized in-memory default. Unavailable browser storage falls back to the
+current process-memory value. This profile is
 application identity preference, never page/manifest CRDT, IndexedDB document
 state, awareness state, or undo history.
 
@@ -1542,8 +1605,8 @@ requests, Code socket authentication, and Call-token requests. The server
 validates it again and binds the normalized values to the issued ticket,
 participant, or LiveKit token. Wire parsers retain an optional-profile fallback
 for compatible older clients, using the existing authenticated-account or
-generated-guest defaults; current profile-gated web clients do not use that
-fallback. A profile may influence only presentation identity, never stable
+generated-guest defaults; current web clients send either their saved profile
+or the normalized session default. A profile may influence only presentation identity, never stable
 actor IDs, roles, ACL, room capability, or resource scope.
 
 Changing the saved profile sends a bounded, server-validated profile update over
@@ -1589,7 +1652,7 @@ finite points, and sanitizes each optional color/width/opacity style at the
 renderer/network boundary. A retained session stays active until an explicit
 clear or participant-awareness removal, including while stationary; normal
 awareness heartbeats provide disconnect liveness. Normal release removes it
-from awareness and gives peers an 800 ms fade; cancellation removes it
+from awareness and gives peers a 300 ms fade; cancellation removes it
 immediately. Selection is sent only on change.
 
 The server owns `userId`, display name, role, and color. It accepts display name
@@ -2071,8 +2134,8 @@ cover:
 - schema-poison rejection before durable append and clean reconnect afterward;
 - unauthorized tutor/student/admin, suspension, reassignment, session expiry,
   and lifecycle revocation;
-- strict profile storage parsing and cross-tab/memory fallback, mandatory
-  first-online gating, server rejection of invalid ticket/call profile fields,
+- strict profile storage parsing and cross-tab/memory fallback, dismissible
+  first-online suggestion, server rejection of invalid ticket/call profile fields,
   and live profile refresh without replacing the Board/Code document, camera,
   Monaco model, local store, or outbox; profile coverage includes correlated
   rejection, rapid-value coalescing, in-flight reconnect, latest/null awareness
@@ -2088,14 +2151,15 @@ cover:
   mixed pointer/mouse movement, and cursor awareness during renderer-owned
   drag/transform gestures;
 - Drawing modifier ordering: pre-held standalone `Alt` latches an
-  awareness-only laser while `Ctrl/Cmd`, including when pre-held, retains
-  unfinished-stroke movement; `AltGraph` never starts laser; `Alt` release
+  awareness-only laser, while pre-held `Ctrl/Cmd` keeps ordinary freehand
+  sampling until complete release and re-press arms unfinished-stroke movement;
+  `AltGraph` never starts laser; `Alt` release
   during laser remains latched through pointer-up;
   `Alt`-held multi-stroke retention keeps every local path without connecting
   bridges and clears only on final release; per-stroke Drawing-preset
   color/width/opacity snapshots, full-span 16-stroke/160-point awareness
   projection that never prunes local geometry, stationary remote retention, and
-  an 800 ms grouped release fade; immediate cleanup of active and pointer-up
+  a 300 ms grouped release fade; immediate cleanup of active and pointer-up
   retained sessions on pointer cancel/capture loss,
   pinch, `Escape`, context menu, tool/read-only transition, blur, hidden
   document, replacement, and destruction; parity under legacy mouse injection;
@@ -2139,8 +2203,8 @@ cover:
   remaining order/visibility, malformed-v2 precedence, storage failure, remount
   restoration, and numeric shortcut stability independent of order and
   visibility;
-- line/arrow curvature preference independence and strict persistence,
-  straight-object compatibility, quadratic bounds and transform parity,
+- shared Line/Arrow three-anchor creation and point editing, legacy
+  straight/quadratic compatibility, curve bounds and transform parity,
   arrow-end tangent, live preview, marquee/lasso inclusion, viewport indexing,
   and eraser collision across every curve direction and zoom;
 - one-fill eraser-trail silhouette at 2%, 100%, and 2000% zoom, bounded

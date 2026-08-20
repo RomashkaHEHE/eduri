@@ -60,14 +60,16 @@ Board/Code sync tickets must contain a server-authenticated ephemeral guest
 principal derived from the room capability; awareness may not trust a client
 supplied identity or display role.
 
-The current web adapter requires one valid origin/device-local collaboration
-profile before mounting any guest Board, Code, or Call provider. The strict
+The current web adapter offers a first-entry collaboration-profile suggestion
+before mounting guest Board, Code, or Call. The strict
 `eduri-online-profile-v1` record contains only normalized `displayName` and
 canonical `#rrggbb` color presentation preferences; the initial guest proposal
-is `Гость` with `#2563eb`. The gate starts only after the room is active and the
-requested resource has resolved. Loading, missing, expired, error, empty-room,
-and unknown-resource screens neither expose the Profile action nor open its
-mandatory modal. The full storage, picker, validation, cross-tab, and modal
+is `Гость` with `#2563eb`; `Гость` is shown as phantom placeholder text in the
+initially empty input. Closing the suggestion keeps the room usable with this
+in-memory default and does not save browser storage. The suggestion starts only
+after the room is active and the requested resource has resolved. Loading,
+missing, expired, error, empty-room, and unknown-resource screens neither
+expose the Profile action nor open its modal. The full storage, picker, validation, cross-tab, and modal
 interaction contract is normative in `BOARD_ARCHITECTURE.md` and
 `BOARD_CONTROLS.md`.
 
@@ -79,7 +81,7 @@ Call uses the stable LiveKit identity
 `guest:<base64url(HMAC-SHA-256(AUTH_LOOKUP_KEY,
 "eduri-guest-call-actor\0" || shareId || "\0" || deviceId))>`; the older-client
 fallback without a device ID is connection-random and is not used by the
-profile-gated web adapter. Display name or color changes must not change either
+current web adapter. Display name or color changes must not change either
 identity form.
 
 Board and Code validate the profile again at admission and update it on their
@@ -200,7 +202,7 @@ Implemented:
 - stable, explicitly provisioned guest LiveKit room/token issuance with
   source-scoped camera, microphone, and screen-share publishing;
 - public Home, solo Board, solo Python, and guest Call entry points;
-- mandatory first-online collaboration profile gating after valid resource
+- dismissible first-online collaboration profile suggestion after valid resource
   resolution, server-authoritative guest presentation identity, and in-place
   Board, Code, terminal, and connected LiveKit participant updates;
 - guest Code state-vector sync with a durable local update log/outbox,

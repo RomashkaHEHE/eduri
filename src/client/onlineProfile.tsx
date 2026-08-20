@@ -291,18 +291,19 @@ function ProfileDialog({
   readonly onClose: () => void;
 }) {
   const initial = profileInitial(profile, state.defaultDisplayName);
-  const [displayName, setDisplayName] = useState(initial.displayName);
+  const [displayName, setDisplayName] = useState(profile?.displayName ?? "");
   const [color, setColor] = useState<string>(initial.color);
   const [submitted, setSubmitted] = useState(false);
   const [nameTouched, setNameTouched] = useState(false);
-  const nameError = displayNameError(displayName);
-  const previewName = safeDefaultDisplayName(displayName) || "Display Name";
+  const effectiveDisplayName = displayName || (!profile ? initial.displayName : "");
+  const nameError = displayNameError(effectiveDisplayName);
+  const previewName = safeDefaultDisplayName(effectiveDisplayName) || "Display Name";
   const previewLetter = [...previewName][0]?.toLocaleUpperCase() ?? "";
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
     setSubmitted(true);
-    const next = normalizeOnlineProfile({ displayName, color });
+    const next = normalizeOnlineProfile({ displayName: effectiveDisplayName, color });
     if (next) onSave(next);
   };
 
@@ -311,7 +312,8 @@ function ProfileDialog({
       open={state.open}
       title="Профиль"
       width="small"
-      dismissible={!state.required}
+      dismissible
+      backdropClassName="modal-backdrop--online-profile"
       onClose={onClose}
     >
       <form className="online-profile-form" onSubmit={submit}>
@@ -334,6 +336,7 @@ function ProfileDialog({
         >
           <input
             value={displayName}
+            placeholder={profile ? undefined : initial.displayName || "Гость"}
             autoComplete="nickname"
             autoFocus
             aria-invalid={(submitted || nameTouched) && Boolean(nameError)}
@@ -351,11 +354,9 @@ function ProfileDialog({
           />
         </div>
         <div className="modal-actions">
-          {!state.required && (
-            <Button type="button" variant="secondary" onClick={onClose}>
-              Отмена
-            </Button>
-          )}
+          <Button type="button" variant="secondary" onClick={onClose}>
+            Отмена
+          </Button>
           <Button type="submit" disabled={Boolean(nameError)}>
             Сохранить
           </Button>
@@ -369,6 +370,7 @@ export function OnlineProfileProvider({ children }: PropsWithChildren) {
   const [profile, setProfile] = useState<OnlineProfile | null>(loadOnlineProfile);
   const [dialog, setDialog] = useState<ProfileDialogState>(EMPTY_DIALOG);
   const profileRef = useRef(profile);
+  const suggestedDefaultDisplayNameRef = useRef("");
   profileRef.current = profile;
 
   const reconcile = useCallback((next: OnlineProfile | null) => {
@@ -421,19 +423,21 @@ export function OnlineProfileProvider({ children }: PropsWithChildren) {
     setDialog((current) => ({
       open: true,
       required,
-      defaultDisplayName: "",
+      defaultDisplayName: required ? suggestedDefaultDisplayNameRef.current : "",
       revision: current.revision + 1,
     }));
   }, []);
 
   const requireProfile = useCallback((defaultDisplayName = "") => {
     if (profileRef.current) return;
+    const normalizedDefaultDisplayName = safeDefaultDisplayName(defaultDisplayName);
+    suggestedDefaultDisplayNameRef.current = normalizedDefaultDisplayName;
     setDialog((current) => {
       if (current.open && current.required) return current;
       return {
         open: true,
         required: true,
-        defaultDisplayName: safeDefaultDisplayName(defaultDisplayName),
+        defaultDisplayName: normalizedDefaultDisplayName,
         revision: current.revision + 1,
       };
     });
@@ -446,9 +450,7 @@ export function OnlineProfileProvider({ children }: PropsWithChildren) {
   }, []);
 
   const closeEditor = useCallback(() => {
-    setDialog((current) => current.required
-      ? current
-      : { ...EMPTY_DIALOG, revision: current.revision });
+    setDialog((current) => ({ ...EMPTY_DIALOG, revision: current.revision }));
   }, []);
 
   const value = useMemo<OnlineProfileContextValue>(() => ({
@@ -498,6 +500,9 @@ export function useOnlineProfile(
   const context = useOnlineProfileContext();
   const shouldRequire = options.required
     ?? Object.prototype.hasOwnProperty.call(options, "defaultDisplayName");
+  const activeProfile = shouldRequire
+    ? profileInitial(context.profile, options.defaultDisplayName ?? "")
+    : context.profile;
   useEffect(() => {
     if (shouldRequire && !context.configured) {
       context.requireProfile(options.defaultDisplayName);
@@ -512,7 +517,7 @@ export function useOnlineProfile(
     shouldRequire,
   ]);
   return {
-    profile: context.profile,
+    profile: activeProfile,
     configured: context.configured,
     save: context.save,
     openEditor: context.openEditor,

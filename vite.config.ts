@@ -25,6 +25,18 @@ const OFFLINE_PUBLIC_ASSETS = [
 const BOARD_COMPACTION_WORKER =
   /^assets\/documentCompaction\.worker-[A-Za-z0-9_-]+\.js$/u;
 
+export function developmentPort(value: string | undefined, fallback: number): number {
+  if (value === undefined || value.trim() === "") return fallback;
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error(`Invalid development port: ${value}`);
+  }
+  return port;
+}
+
+const developmentWebPort = developmentPort(process.env.EDURI_DEV_WEB_PORT, 5173);
+const developmentApiPort = developmentPort(process.env.EDURI_DEV_API_PORT, 3020);
+
 function offlinePrecacheManifest(): Plugin {
   let projectRoot = process.cwd();
   return {
@@ -111,7 +123,7 @@ export default defineConfig({
   ],
   server: {
     host: "127.0.0.1",
-    port: 5173,
+    port: developmentWebPort,
     strictPort: true,
     headers: {
       "Cross-Origin-Embedder-Policy": "require-corp",
@@ -120,11 +132,11 @@ export default defineConfig({
     },
     proxy: {
       "/api": {
-        target: "http://127.0.0.1:3020",
+        target: `http://127.0.0.1:${developmentApiPort}`,
         ws: true,
       },
       "/socket.io": {
-        target: "ws://127.0.0.1:3020",
+        target: `ws://127.0.0.1:${developmentApiPort}`,
         ws: true,
       },
     },

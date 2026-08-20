@@ -1,0 +1,25 @@
+port: 7880
+bind_addresses:
+  - 127.0.0.1
+
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: false
+  node_ip: 127.0.0.1
+  enable_loopback_candidate: true
+  ips:
+    includes:
+      - 127.0.0.1/32
+  allow_tcp_fallback: true
+
+room:
+  auto_create: false
+  max_participants: 2
+  empty_timeout: 300
+  departure_timeout: 60
+
+logging:
+  level: warn
+  pion_level: error
+  json: false

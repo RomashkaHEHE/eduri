@@ -2,14 +2,17 @@ import Konva from "konva";
 import { clampBoardZoom } from "../boardZoom";
 import {
   BUILTIN_OBJECT_KINDS,
+  boardPointLineCubicPoints,
   compareBoardObjectZOrder,
-  createBoardLineObjectGeometry,
+  createBoardPointLineObjectGeometry,
   type AtomicTransform,
+  type BoardLineObjectGeometry,
   type BoardLinePoint,
 } from "../../../board/core";
 import {
   RENDERED_FRAME_LABEL_HEIGHT,
   renderedFrameLabelWidth,
+  renderedLineGeometry,
   renderedLinePath,
   renderedStrokePoints,
   safeRendererTransform,
@@ -48,6 +51,7 @@ import type {
   BoardGesturePreviewTool,
   BoardLaserPreview,
   BoardLaserStroke,
+  BoardModifierHintAction,
   BoardObjectDraft,
   BoardObjectSnapshot,
   BoardPlacementTool,
@@ -75,7 +79,7 @@ const WHEEL_DELTA_MODE_LINE = 1;
 const WHEEL_DELTA_MODE_PAGE = 2;
 const VIEWPORT_OVERSCAN_PX = 480;
 const CURSOR_INTERPOLATION_MS = 72;
-const LASER_FADE_MS = 800;
+const LASER_FADE_MS = 300;
 const LASER_GLOW_PX = 8;
 const MAX_TRANSFORMER_NODES = 256;
 export const MAX_LOCAL_SELECTION_OUTLINES = 512;
@@ -95,6 +99,9 @@ const GROUP_SELECTION_DASH_PX = [7, 5] as const;
 const TRANSFORMER_ANCHOR_SIZE_PX = 9;
 const TRANSFORMER_STROKE_WIDTH_PX = 1.5;
 const TRANSFORMER_PADDING_PX = 4;
+const LINE_POINT_RADIUS_PX = 5;
+const LINE_MIDPOINT_RADIUS_PX = 3.5;
+const LINE_MIDPOINT_INSERT_THRESHOLD_PX = 3;
 const TRANSFORMER_ROTATION_SNAPS_DEGREES = [
   0,
   45,
@@ -118,6 +125,7 @@ interface BoardThemePalette {
   readonly minorGrid: string;
   readonly majorGrid: string;
   readonly accent: string;
+  readonly selectionCandidateFill: string;
   readonly transformerAnchor: string;
   readonly placeholderFill: string;
   readonly placeholderStroke: string;
@@ -133,6 +141,7 @@ const BOARD_THEME_PALETTES: Readonly<Record<BoardTheme, BoardThemePalette>> = {
     minorGrid: "#e8edf2",
     majorGrid: "#dce3ea",
     accent: DEFAULT_ACCENT,
+    selectionCandidateFill: "rgba(49,94,251,0.11)",
     transformerAnchor: "#ffffff",
     placeholderFill: "#f4f6f8",
     placeholderStroke: "#8f9baa",
@@ -146,6 +155,7 @@ const BOARD_THEME_PALETTES: Readonly<Record<BoardTheme, BoardThemePalette>> = {
     minorGrid: "#242522",
     majorGrid: "#353632",
     accent: "#86a7e8",
+    selectionCandidateFill: "rgba(134,167,232,0.15)",
     transformerAnchor: "#151614",
     placeholderFill: "#20211f",
     placeholderStroke: "#6f706b",
@@ -186,9 +196,22 @@ interface DrawingGesture {
   previousScreen: BoardPoint;
   strokeOffset: BoardPoint;
   straightPointActive: boolean;
+  strokeMoveArmed: boolean;
   strokeMoveActive: boolean;
-  readonly connectorCurvature: number;
   readonly fixedConnectorControl: BoardPoint | null;
+}
+
+interface LinePointEditor {
+  readonly objectId: string;
+  readonly group: Konva.Group;
+  readonly path: Konva.Line;
+  points: BoardLinePoint[];
+  selectedIndex: number | null;
+  previewInsert: {
+    readonly segmentIndex: number;
+    readonly start: BoardLinePoint;
+    point: BoardLinePoint;
+  } | null;
 }
 
 interface LaserGesture {
@@ -951,23 +974,6 @@ function normalizedTransform(
   ];
 }
 
-function connectorControlPoint(
-  start: BoardPoint,
-  end: BoardPoint,
-  curvature: number,
-): BoardPoint | null {
-  if (!Number.isFinite(curvature) || Math.abs(curvature) < 0.001) return null;
-  const deltaX = end.x - start.x;
-  const deltaY = end.y - start.y;
-  const length = Math.hypot(deltaX, deltaY);
-  if (length < 0.001) return null;
-  const bend = Math.max(-1, Math.min(1, curvature)) * length * 0.75;
-  return {
-    x: (start.x + end.x) / 2 - deltaY / length * bend,
-    y: (start.y + end.y) / 2 + deltaX / length * bend,
-  };
-}
-
 function connectorPreviewPoints(
   start: BoardPoint,
   end: BoardPoint,
@@ -1303,7 +1309,6 @@ function shapeDraft(
   end: BoardPoint,
   points: readonly (BoardPoint & { pressure: number })[],
   style: Readonly<Record<string, unknown>>,
-  connectorCurvature = 0,
 ): BoardObjectDraft | null {
   if (tool === "text") {
     return {
@@ -1350,12 +1355,11 @@ function shapeDraft(
   const transform = normalizedTransform(start, end);
   if (transform[2] < 3 && transform[3] < 3) return null;
   if (tool === "line" || tool === "arrow") {
-    const control = connectorControlPoint(start, end, connectorCurvature);
-    const geometry = createBoardLineObjectGeometry(
-      [start.x, start.y] as BoardLinePoint,
-      [end.x, end.y] as BoardLinePoint,
-      control ? [control.x, control.y] as BoardLinePoint : undefined,
-    );
+    const geometry = createBoardPointLineObjectGeometry([
+      [start.x, start.y],
+      [(start.x + end.x) / 2, (start.y + end.y) / 2],
+      [end.x, end.y],
+    ]);
     return {
       kind: tool === "arrow" ? BUILTIN_OBJECT_KINDS.arrow : BUILTIN_OBJECT_KINDS.line,
       transform: geometry.transform,
@@ -1559,8 +1563,7 @@ function updateDrawingPreview(gesture: DrawingGesture, end: BoardPoint): void {
     return;
   }
   if (tool === "line" || tool === "arrow") {
-    const control = gesture.fixedConnectorControl
-      ?? connectorControlPoint(start, end, gesture.connectorCurvature);
+    const control = gesture.fixedConnectorControl;
     (preview as Konva.Line).setAttrs({
       points: connectorPreviewPoints(start, end, control),
       bezier: control !== null,
@@ -1629,8 +1632,8 @@ export function renderGesturePreviewNode(
     previousScreen: { x: 0, y: 0 },
     strokeOffset: { x: 0, y: 0 },
     straightPointActive: false,
+    strokeMoveArmed: true,
     strokeMoveActive: false,
-    connectorCurvature: 0,
     fixedConnectorControl: (
       (gesture.kind === "line" || gesture.kind === "arrow")
       && points.length === 3
@@ -1836,10 +1839,6 @@ export function renderObjectNode(
       stroke: "#323a45",
       strokeWidth: 1,
       cornerRadius: 5,
-      shadowColor: "#0a0d10",
-      shadowOpacity: 0.16,
-      shadowBlur: 10,
-      shadowOffsetY: 3,
     }));
     group.add(new Konva.Text({
       x: 12,
@@ -2015,11 +2014,11 @@ export class KonvaBoardRenderer implements BoardRenderer {
   private currentTool: BoardTool = "select";
   private currentShapeKind: BoardShapeKind = "rectangle";
   private currentCreationStyle: Readonly<Record<string, unknown>> = {};
-  private currentConnectorCurvature = 0;
   private currentCamera: BoardCamera = { x: 0, y: 0, zoom: 1 };
   private currentTheme: BoardTheme;
   private gridVisible: boolean;
   private inlineEditingObjectId: string | null = null;
+  private linePointEditor: LinePointEditor | null = null;
   private selectedIds: string[] = [];
   private selectedIdSet = new Set<string>();
   private selectedIndexById = new Map<string, number>();
@@ -2028,6 +2027,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
   private spacePressed = false;
   private laserModifierPressed = false;
   private penLaserPresentationActive = false;
+  private modifierHintSignature: string | null = null;
   private activeGesture: ActiveGesture | null = null;
   private laserSession: LaserSession | null = null;
   private dragStart = new Map<string, BoardPoint>();
@@ -2065,7 +2065,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
     this.callbacks = callbacks;
     this.options = options;
     this.currentTheme = options.theme ?? "light";
-    this.gridVisible = options.gridVisible ?? true;
+    this.gridVisible = options.gridVisible ?? false;
     this.decodedImages = options.resolveAssetUrl
       ? new DecodedImageCache(options.resolveAssetUrl)
       : null;
@@ -2154,6 +2154,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
     );
     this.transformer.on("transformstart.eduri", () => {
       this.callbacks.onTransformStart();
+      this.emitModifierHints();
     });
     this.transformer.on("transform.eduriSelection", () => {
       this.updateSelectionObjectOutlines(this.selectionChromeVisible());
@@ -2161,7 +2162,10 @@ export class KonvaBoardRenderer implements BoardRenderer {
     });
     this.transformer.on("transformend.eduri", () => {
       this.transformer.rotationSnaps(TRANSFORMER_FREE_ROTATION_SNAPS);
-      if (this.cancellingInteraction) return;
+      if (this.cancellingInteraction) {
+        this.emitModifierHints();
+        return;
+      }
       const transforms = new Map<string, AtomicTransform>();
       for (const node of this.transformer.nodes()) {
         const id = node.getAttr("boardObjectId") as string;
@@ -2179,6 +2183,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
         ]);
       }
       if (transforms.size) this.callbacks.onTransformObjects(transforms);
+      this.emitModifierHints();
     });
     this.stage.add(this.gridLayer, this.objectLayer, this.previewLayer, this.presenceLayer);
 
@@ -2198,6 +2203,12 @@ export class KonvaBoardRenderer implements BoardRenderer {
       const object = objectId ? this.objects.get(objectId) : undefined;
       if (object && isBoardObjectInlineEditable(object)) {
         this.callbacks.onEditObject(object.id);
+      } else if (
+        object?.kind === BUILTIN_OBJECT_KINDS.line
+        || object?.kind === BUILTIN_OBJECT_KINDS.arrow
+      ) {
+        this.changeSelection([object.id]);
+        this.enterLinePointEditing();
       }
     });
     this.stage.on("wheel", (event) => this.onWheel(event));
@@ -2234,6 +2245,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
           this.activeGesture.tool === "pen"
           || this.activeGesture.tool === "highlighter"
         )
+        && this.activeGesture.strokeMoveArmed
       ) {
         this.activeGesture.strokeMoveActive = true;
         this.updateCursor();
@@ -2254,6 +2266,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
       ) {
         this.spacePressed = true;
         this.updateCursor();
+        this.emitModifierHints();
         event.preventDefault();
       }
     };
@@ -2274,12 +2287,14 @@ export class KonvaBoardRenderer implements BoardRenderer {
       if (
         commandKey
         && this.activeGesture?.kind === "drawing"
-        && this.activeGesture.strokeMoveActive
         && !event.ctrlKey
         && !event.metaKey
       ) {
+        const wasArmed = this.activeGesture.strokeMoveArmed;
+        this.activeGesture.strokeMoveArmed = true;
         this.activeGesture.strokeMoveActive = false;
         this.updateCursor();
+        if (!wasArmed) this.emitModifierHints();
       }
       if (
         commandKey
@@ -2287,13 +2302,16 @@ export class KonvaBoardRenderer implements BoardRenderer {
         && !event.ctrlKey
         && !event.metaKey
       ) {
+        const wasArmed = this.activeGesture.commandMoveArmed;
         this.activeGesture.commandMoveArmed = true;
         this.activeGesture.commandMoveActive = false;
         this.updateCursor();
+        if (!wasArmed) this.emitModifierHints();
       }
       if (event.code === "Space") {
         this.spacePressed = false;
         this.updateCursor();
+        this.emitModifierHints();
       }
     };
     this.windowBlur = () => {
@@ -2319,6 +2337,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
     this.resizeObserver.observe(element);
     this.setCamera({ x: this.stage.width() / 2, y: this.stage.height() / 2, zoom: 1 });
     this.updateCursor();
+    this.emitModifierHints();
   }
 
   get camera(): BoardCamera {
@@ -2331,6 +2350,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
 
   setTool(tool: BoardTool): void {
     if (this.currentTool === tool) return;
+    this.exitLinePointEditing();
     this.cancelActiveGesture();
     this.clearLaserSession(false);
     this.currentTool = tool;
@@ -2339,6 +2359,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
     this.updateCursor();
     this.updateDraggable();
     this.updateTransformer();
+    this.emitModifierHints();
   }
 
   setShapeKind(kind: BoardShapeKind): void {
@@ -2349,22 +2370,18 @@ export class KonvaBoardRenderer implements BoardRenderer {
     this.currentCreationStyle = { ...style };
   }
 
-  setConnectorCurvature(curvature: number): void {
-    this.currentConnectorCurvature = Number.isFinite(curvature)
-      ? Math.max(-1, Math.min(1, curvature))
-      : 0;
-  }
-
   setReadOnly(readOnly: boolean): void {
     if (this.readOnly === readOnly) return;
     this.readOnly = readOnly;
     if (readOnly) {
+      this.exitLinePointEditing();
       this.cancelActiveGesture();
       this.clearLaserSession(false);
     }
     this.updatePenLaserPresentation();
     this.updateDraggable();
     this.updateTransformer();
+    this.emitModifierHints();
   }
 
   setTheme(theme: BoardTheme): void {
@@ -2380,6 +2397,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
       anchorFill: palette.transformerAnchor,
       anchorStroke: palette.accent,
     });
+    if (this.linePointEditor) this.syncLinePointEditor(true);
     for (const node of this.nodes.values()) releaseRenderedObjectNode(node);
     this.nodes.clear();
     this.visibleIds.clear();
@@ -2404,6 +2422,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
   }
 
   setObjects(objects: readonly BoardObjectSnapshot[]): void {
+    this.exitLinePointEditing();
     this.objects.clear();
     for (const object of objects) this.objects.set(object.id, object);
     if (
@@ -2493,6 +2512,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
         this.scheduleVisibleReorder();
       }
       node.draggable(this.nodeShouldBeDraggable(object.id, object));
+      if (this.linePointEditor?.objectId === object.id) node.visible(false);
       if (
         this.activeGesture?.kind === "eraser"
         && this.activeGesture.objectIds.has(object.id)
@@ -2523,6 +2543,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
   }
 
   deleteObject(id: string): void {
+    if (this.linePointEditor?.objectId === id) this.exitLinePointEditing();
     if (this.activeGesture?.kind === "eraser") {
       this.activeGesture.objectIds.delete(id);
     }
@@ -2565,6 +2586,10 @@ export class KonvaBoardRenderer implements BoardRenderer {
     ) {
       return;
     }
+    if (
+      this.linePointEditor
+      && (selectedIds.length !== 1 || selectedIds[0] !== this.linePointEditor.objectId)
+    ) this.exitLinePointEditing();
     this.selectedIds = selectedIds;
     this.selectedIdSet = new Set(selectedIds);
     this.selectedIndexById = new Map(
@@ -2572,6 +2597,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
     );
     this.updateDraggable();
     this.updateTransformer();
+    this.emitModifierHints();
   }
 
   setInlineEditingObject(id: string | null): void {
@@ -2592,6 +2618,272 @@ export class KonvaBoardRenderer implements BoardRenderer {
     this.updateDraggable();
     this.updateTransformer();
     this.objectLayer.batchDraw();
+    this.emitModifierHints();
+  }
+
+  enterLinePointEditing(): boolean {
+    if (this.readOnly || this.linePointEditor) return this.linePointEditor !== null;
+    if (this.selectedIds.length !== 1) return false;
+    const objectId = this.selectedIds[0];
+    const object = this.objects.get(objectId);
+    if (
+      !object
+      || (
+        object.kind !== BUILTIN_OBJECT_KINDS.line
+        && object.kind !== BUILTIN_OBJECT_KINDS.arrow
+      )
+      || !isBoardObjectMutable(object)
+    ) {
+      return false;
+    }
+    const geometry = renderedLineGeometry(object);
+    if (!geometry) return false;
+    const points = geometry.points
+      ? geometry.points.map((point) => [...point] as BoardLinePoint)
+      : geometry.control
+        ? [
+            geometry.start,
+            [
+              (geometry.start[0] + geometry.control[0] * 2 + geometry.end[0]) / 4,
+              (geometry.start[1] + geometry.control[1] * 2 + geometry.end[1]) / 4,
+            ] as BoardLinePoint,
+            geometry.end,
+          ]
+        : [
+            geometry.start,
+            [
+              (geometry.start[0] + geometry.end[0]) / 2,
+              (geometry.start[1] + geometry.end[1]) / 2,
+            ] as BoardLinePoint,
+            geometry.end,
+          ];
+    const group = new Konva.Group({
+      x: object.transform[0],
+      y: object.transform[1],
+      rotation: object.transform[4] * 180 / Math.PI,
+    });
+    const pathConfig = {
+      points: [],
+      stroke: adaptiveInkColor(object.style.stroke, DEFAULT_STROKE, this.currentTheme),
+      strokeWidth: strokeWidth(object),
+      opacity: renderedObjectOpacity(object),
+      dash: dashValue(object.style.dash),
+      lineCap: "round" as const,
+      lineJoin: "round" as const,
+      listening: false,
+      perfectDrawEnabled: false,
+    };
+    const path = object.kind === BUILTIN_OBJECT_KINDS.arrow
+      ? new Konva.Arrow({
+          ...pathConfig,
+          fill: pathConfig.stroke,
+          pointerLength: 12,
+          pointerWidth: 9,
+        })
+      : new Konva.Line(pathConfig);
+    group.add(path);
+    this.linePointEditor = {
+      objectId,
+      group,
+      path,
+      points,
+      selectedIndex: null,
+      previewInsert: null,
+    };
+    this.previewWorld.add(group);
+    this.nodes.get(objectId)?.visible(false);
+    this.syncLinePointEditor(true);
+    this.updateDraggable();
+    this.updateTransformer();
+    this.objectLayer.batchDraw();
+    this.previewLayer.batchDraw();
+    this.emitModifierHints();
+    return true;
+  }
+
+  deleteSelectedLinePoint(): boolean {
+    const editor = this.linePointEditor;
+    if (!editor) return false;
+    if (editor.selectedIndex === null || editor.points.length <= 2) return true;
+    this.callbacks.onTransformStart();
+    editor.points.splice(editor.selectedIndex, 1);
+    editor.selectedIndex = null;
+    editor.previewInsert = null;
+    this.commitLinePointEditor();
+    return true;
+  }
+
+  exitLinePointEditing(): boolean {
+    const editor = this.linePointEditor;
+    if (!editor) return false;
+    editor.group.destroy();
+    this.nodes.get(editor.objectId)?.visible(true);
+    this.linePointEditor = null;
+    this.callbacks.onTransformCancel();
+    this.updateDraggable();
+    this.updateTransformer();
+    this.objectLayer.batchDraw();
+    this.previewLayer.batchDraw();
+    this.emitModifierHints();
+    return true;
+  }
+
+  private lineEditorDisplayPoints(editor: LinePointEditor): BoardLinePoint[] {
+    if (!editor.previewInsert) return editor.points;
+    const points = [...editor.points];
+    points.splice(editor.previewInsert.segmentIndex + 1, 0, editor.previewInsert.point);
+    return points;
+  }
+
+  private syncLinePointSelection(): void {
+    const editor = this.linePointEditor;
+    if (!editor) return;
+    const palette = themePalette(this.currentTheme);
+    for (const child of editor.group.getChildren()) {
+      const index = (child as Konva.Node).getAttr("lineAnchorIndex") as unknown;
+      if (typeof index === "number" && child instanceof Konva.Circle) {
+        child.fill(editor.selectedIndex === index
+          ? palette.accent
+          : palette.transformerAnchor);
+      }
+    }
+    this.previewLayer.batchDraw();
+  }
+
+  private syncLinePointEditor(rebuildHandles: boolean): void {
+    const editor = this.linePointEditor;
+    if (!editor) return;
+    const displayPoints = this.lineEditorDisplayPoints(editor);
+    const cubic = boardPointLineCubicPoints(displayPoints);
+    editor.path.setAttrs({
+      points: cubic ? [...cubic] : flattenedPoints(displayPoints.map(([x, y]) => ({ x, y }))),
+      bezier: Boolean(cubic),
+    });
+    if (!rebuildHandles) {
+      this.previewLayer.batchDraw();
+      return;
+    }
+    for (const child of editor.group.getChildren().slice(1)) child.destroy();
+    const palette = themePalette(this.currentTheme);
+    const zoom = this.currentCamera.zoom;
+    const anchorRadius = LINE_POINT_RADIUS_PX / zoom;
+    const midpointRadius = LINE_MIDPOINT_RADIUS_PX / zoom;
+    const strokeWidthPx = 1.5 / zoom;
+    editor.points.forEach((point, index) => {
+      const handle = new Konva.Circle({
+        x: point[0],
+        y: point[1],
+        radius: anchorRadius,
+        fill: editor.selectedIndex === index ? palette.accent : palette.transformerAnchor,
+        stroke: palette.accent,
+        strokeWidth: strokeWidthPx,
+        draggable: true,
+        hitStrokeWidth: 8 / zoom,
+      });
+      handle.setAttr("lineAnchorIndex", index);
+      handle.on("pointerdown", (event) => {
+        event.cancelBubble = true;
+        editor.selectedIndex = index;
+        this.syncLinePointSelection();
+        this.emitModifierHints();
+      });
+      handle.on("dragstart", () => this.callbacks.onTransformStart());
+      handle.on("dragmove", () => {
+        editor.points[index] = [handle.x(), handle.y()];
+        this.syncLinePointEditor(false);
+      });
+      handle.on("dragend", () => this.commitLinePointEditor());
+      editor.group.add(handle);
+    });
+    for (let index = 0; index < editor.points.length - 1; index += 1) {
+      const first = editor.points[index];
+      const second = editor.points[index + 1];
+      const start: BoardLinePoint = [
+        (first[0] + second[0]) / 2,
+        (first[1] + second[1]) / 2,
+      ];
+      const handle = new Konva.Circle({
+        x: start[0],
+        y: start[1],
+        radius: midpointRadius,
+        fill: palette.transformerAnchor,
+        stroke: palette.accent,
+        strokeWidth: strokeWidthPx,
+        opacity: 0.64,
+        draggable: true,
+        hitStrokeWidth: 10 / zoom,
+      });
+      handle.on("pointerdown", (event) => {
+        event.cancelBubble = true;
+        editor.selectedIndex = null;
+        editor.previewInsert = { segmentIndex: index, start, point: start };
+        this.syncLinePointSelection();
+        this.emitModifierHints();
+      });
+      handle.on("dragstart", () => this.callbacks.onTransformStart());
+      handle.on("dragmove", () => {
+        if (!editor.previewInsert || editor.previewInsert.segmentIndex !== index) return;
+        editor.previewInsert.point = [handle.x(), handle.y()];
+        this.syncLinePointEditor(false);
+      });
+      handle.on("dragend", () => {
+        const insertion = editor.previewInsert;
+        editor.previewInsert = null;
+        if (
+          insertion
+          && Math.hypot(
+            insertion.point[0] - insertion.start[0],
+            insertion.point[1] - insertion.start[1],
+          ) * this.currentCamera.zoom >= LINE_MIDPOINT_INSERT_THRESHOLD_PX
+        ) {
+          editor.points.splice(index + 1, 0, insertion.point);
+          editor.selectedIndex = index + 1;
+          this.commitLinePointEditor();
+        } else {
+          this.syncLinePointEditor(true);
+          this.callbacks.onTransformCancel();
+        }
+      });
+      editor.group.add(handle);
+    }
+    this.previewLayer.batchDraw();
+  }
+
+  private commitLinePointEditor(): void {
+    const editor = this.linePointEditor;
+    const object = editor ? this.objects.get(editor.objectId) : undefined;
+    if (!editor || !object) return;
+    let minX = editor.points[0][0];
+    let minY = editor.points[0][1];
+    let maxX = minX;
+    let maxY = minY;
+    for (const point of editor.points.slice(1)) {
+      minX = Math.min(minX, point[0]);
+      minY = Math.min(minY, point[1]);
+      maxX = Math.max(maxX, point[0]);
+      maxY = Math.max(maxY, point[1]);
+    }
+    const width = Math.max(1, maxX - minX);
+    const height = Math.max(1, maxY - minY);
+    const angle = object.transform[4];
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    const normalized = editor.points.map(([x, y]) => [x - minX, y - minY] as BoardLinePoint);
+    const transform: AtomicTransform = [
+      object.transform[0] + cos * minX - sin * minY,
+      object.transform[1] + sin * minX + cos * minY,
+      width,
+      height,
+      angle,
+    ];
+    editor.points = normalized;
+    editor.group.position({ x: transform[0], y: transform[1] });
+    const geometry: BoardLineObjectGeometry = {
+      transform,
+      props: { points: normalized },
+    };
+    this.syncLinePointEditor(true);
+    this.callbacks.onEditLineGeometry?.(editor.objectId, geometry);
   }
 
   setCamera(camera: BoardCamera): void {
@@ -2618,6 +2910,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
     this.drawGrid();
     this.refreshViewport();
     if (zoom !== previousZoom) {
+      if (this.linePointEditor) this.syncLinePointEditor(true);
       this.refreshLocalLaserAppearance();
       this.updateTransformer();
       if (isSelectionGesture(this.activeGesture)) {
@@ -2686,11 +2979,13 @@ export class KonvaBoardRenderer implements BoardRenderer {
       this.cancellingInteraction = wasCancelling;
     }
     this.callbacks.onTransformCancel();
+    this.emitModifierHints();
     return true;
   }
 
   cancelInteraction(): void {
     if (this.destroyed || this.cancellingInteraction) return;
+    this.exitLinePointEditing();
     this.clearActiveMousePointer();
     this.cancellingInteraction = true;
     try {
@@ -2710,6 +3005,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
     }
     this.resetSpaceHand();
     this.updateCursor();
+    this.emitModifierHints();
   }
 
   destroy(): void {
@@ -2748,6 +3044,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
     if (!this.spacePressed) return;
     this.spacePressed = false;
     this.updateCursor();
+    this.emitModifierHints();
   }
 
   private setLaserModifierPressed(pressed: boolean): void {
@@ -2774,6 +3071,66 @@ export class KonvaBoardRenderer implements BoardRenderer {
     if (active === this.penLaserPresentationActive) return;
     this.penLaserPresentationActive = active;
     this.callbacks.onPenLaserModeChange?.(active);
+  }
+
+  private currentModifierHints(): readonly BoardModifierHintAction[] {
+    if (this.linePointEditor) {
+      return this.linePointEditor.selectedIndex !== null
+        && this.linePointEditor.points.length > 2
+        ? ["line-delete-point"]
+        : [];
+    }
+    if (
+      this.inlineEditingObjectId !== null
+      || this.spacePressed
+      || this.dragStart.size > 0
+    ) {
+      return [];
+    }
+    if (this.transformer.isTransforming()) {
+      return this.transformer.getActiveAnchor() === "rotater"
+        ? ["rotation-snap"]
+        : [];
+    }
+
+    const gesture = this.activeGesture;
+    if (gesture?.kind === "drawing") {
+      if (gesture.tool !== "pen" && gesture.tool !== "highlighter") return [];
+      return gesture.strokeMoveArmed
+        ? ["pen-move", "pen-straight"]
+        : ["pen-straight"];
+    }
+    if (gesture?.kind === "eraser") return ["eraser-restore"];
+    if (gesture?.kind === "marquee") {
+      return gesture.commandMoveArmed
+        ? ["marquee-intersection", "selection-area-move"]
+        : ["marquee-intersection"];
+    }
+    if (gesture?.kind === "lasso") {
+      return gesture.commandMoveArmed ? ["selection-area-move"] : [];
+    }
+    if (gesture) return [];
+
+    if (this.currentTool === "select") {
+      if (
+        this.selectedIds.length === 1
+        && (
+          this.objects.get(this.selectedIds[0])?.kind === BUILTIN_OBJECT_KINDS.line
+          || this.objects.get(this.selectedIds[0])?.kind === BUILTIN_OBJECT_KINDS.arrow
+        )
+      ) return ["line-edit-points"];
+      return ["select-add", "select-area", "select-lasso"];
+    }
+    if (this.currentTool === "pen") return ["pen-laser"];
+    return [];
+  }
+
+  private emitModifierHints(): void {
+    const actions = this.currentModifierHints();
+    const signature = actions.join("\u0000");
+    if (signature === this.modifierHintSignature) return;
+    this.modifierHintSignature = signature;
+    this.callbacks.onModifierHintsChange?.(actions);
   }
 
   private laserPreview(session: LaserSession): BoardLaserPreview | null {
@@ -2943,6 +3300,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
     };
     this.updateDraggable();
     this.updateCursor();
+    this.emitModifierHints();
     return true;
   }
 
@@ -3047,6 +3405,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
     this.capturePointer(nativeEvent);
     nativeEvent.preventDefault();
     this.previewLayer.batchDraw();
+    this.emitModifierHints();
   }
 
   private startLaserGesture(
@@ -3096,6 +3455,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
     this.updatePenLaserPresentation();
     this.updateCursor();
     this.previewLayer.batchDraw();
+    this.emitModifierHints();
   }
 
   private onPointerDown(event: Konva.KonvaEventObject<PointerEvent>): void {
@@ -3119,6 +3479,8 @@ export class KonvaBoardRenderer implements BoardRenderer {
     }
     if (this.activeGesture) return;
 
+    if (this.linePointEditor) this.exitLinePointEditing();
+
     const commandHeldAtStart = commandModifierHeld(nativeEvent);
     const laserHeldAtStart = standaloneAltHeld(nativeEvent);
     this.setLaserModifierPressed(laserHeldAtStart);
@@ -3140,6 +3502,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
       this.updateDraggable();
       this.capturePointer(nativeEvent);
       this.updateCursor();
+      this.emitModifierHints();
       return;
     }
 
@@ -3223,6 +3586,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
         this.objectLayer.batchDraw();
       }
       this.previewLayer.batchDraw();
+      this.emitModifierHints();
       return;
     }
     if (this.currentTool === "pen" && laserHeldAtStart) {
@@ -3242,6 +3606,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
       };
       this.capturePointer(nativeEvent);
       nativeEvent.preventDefault();
+      this.emitModifierHints();
       return;
     }
 
@@ -3270,14 +3635,15 @@ export class KonvaBoardRenderer implements BoardRenderer {
       previousScreen: screen,
       strokeOffset: { x: 0, y: 0 },
       straightPointActive: false,
+      strokeMoveArmed: !commandHeldAtStart,
       strokeMoveActive: false,
-      connectorCurvature: this.currentConnectorCurvature,
       fixedConnectorControl: null,
     };
     this.capturePointer(nativeEvent);
     nativeEvent.preventDefault();
     this.emitDrawingGesturePreview(this.activeGesture, point);
     this.previewLayer.batchDraw();
+    this.emitModifierHints();
   }
 
   private compactLassoGesture(gesture: LassoGesture): void {
@@ -3465,6 +3831,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
     const commandHeld = commandModifierHeld(nativeEvent);
     if (!gesture.commandMoveArmed && !commandHeld) {
       gesture.commandMoveArmed = true;
+      this.emitModifierHints();
     }
     if (gesture.commandMoveArmed && commandHeld) {
       const deltaX = (
@@ -3801,7 +4168,8 @@ export class KonvaBoardRenderer implements BoardRenderer {
     screenTransform: PointerScreenTransform,
     screen: BoardPoint,
   ): "changed" | "unchanged" {
-    if (nativeEvent.ctrlKey || nativeEvent.metaKey) {
+    const commandHeld = commandModifierHeld(nativeEvent);
+    if (commandHeld && gesture.strokeMoveArmed) {
       const deltaX = (
         screen.x - gesture.previousScreen.x
       ) / this.currentCamera.zoom;
@@ -3820,6 +4188,10 @@ export class KonvaBoardRenderer implements BoardRenderer {
       return "changed";
     }
 
+    if (!commandHeld && !gesture.strokeMoveArmed) {
+      gesture.strokeMoveArmed = true;
+      this.emitModifierHints();
+    }
     if (gesture.strokeMoveActive) {
       gesture.strokeMoveActive = false;
       this.updateCursor();
@@ -3931,6 +4303,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
       );
     }
     this.activeGesture = null;
+    this.emitModifierHints();
     this.updateDraggable();
     this.updatePenLaserPresentation();
     this.releasePointer(pointerId);
@@ -4003,12 +4376,12 @@ export class KonvaBoardRenderer implements BoardRenderer {
       point,
       draftPoints,
       gesture.style,
-      gesture.connectorCurvature,
     );
     if (draft) this.callbacks.onCreateObject(draft);
     this.updatePenLaserPresentation();
     this.updateCursor();
     this.previewLayer.batchDraw();
+    this.emitModifierHints();
   }
 
   private onWheel(event: Konva.KonvaEventObject<WheelEvent>): void {
@@ -4056,12 +4429,10 @@ export class KonvaBoardRenderer implements BoardRenderer {
         }))
       : gesture.tool === "line" || gesture.tool === "arrow"
         ? (() => {
-            const control = gesture.fixedConnectorControl
-              ?? connectorControlPoint(
-                gesture.start,
-                end,
-                gesture.connectorCurvature,
-              );
+            const control = gesture.fixedConnectorControl ?? {
+              x: (gesture.start.x + end.x) / 2,
+              y: (gesture.start.y + end.y) / 2,
+            };
             return control
               ? [{ ...gesture.start }, control, { ...end }]
               : [{ ...gesture.start }, { ...end }];
@@ -4366,6 +4737,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
     );
     this.applyInlineEditingPresentation(node, object.id);
     this.bindObjectNode(node, object.id);
+    if (this.linePointEditor?.objectId === object.id) node.visible(false);
     return node;
   }
 
@@ -4458,6 +4830,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
       this.dragSelectionOutlineStart = this.selectionOutline.visible()
         ? { x: this.selectionOutline.x(), y: this.selectionOutline.y() }
         : null;
+      this.emitModifierHints();
     });
     node.on("dragmove", () => {
       const anchorStart = this.dragStart.get(objectId);
@@ -4484,6 +4857,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
         this.dragStart.clear();
         this.dragVisibleIds = [];
         this.dragSelectionOutlineStart = null;
+        this.emitModifierHints();
         return;
       }
       const transforms = new Map<string, AtomicTransform>();
@@ -4508,6 +4882,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
       this.dragVisibleIds = [];
       this.dragSelectionOutlineStart = null;
       if (transforms.size) this.callbacks.onTransformObjects(transforms);
+      this.emitModifierHints();
     });
   }
 
@@ -4536,6 +4911,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
     object: BoardObjectSnapshot | undefined,
   ): boolean {
     return !this.readOnly
+      && this.linePointEditor === null
       && id !== this.inlineEditingObjectId
       && this.currentTool === "select"
       && this.activeGesture === null
@@ -4607,6 +4983,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
   ): boolean {
     return !this.readOnly
       && this.inlineEditingObjectId === null
+      && this.linePointEditor === null
       && this.currentTool === "select"
       && selectedIds.length > 0;
   }
@@ -4681,9 +5058,12 @@ export class KonvaBoardRenderer implements BoardRenderer {
       outline.setAttrs({
         points,
         stroke: palette.accent,
-        strokeWidth: 1.25 * inverseZoom,
+        strokeWidth: (forceIndividual ? 1.5 : 1.25) * inverseZoom,
+        fill: forceIndividual
+          ? palette.selectionCandidateFill
+          : "rgba(0,0,0,0)",
         dash: [],
-        opacity: 0.9,
+        opacity: forceIndividual ? 1 : 0.9,
       });
     }
   }

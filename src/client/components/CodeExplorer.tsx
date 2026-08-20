@@ -7,7 +7,6 @@ import {
   FilePlus2,
   Folder,
   FolderPlus,
-  MoreHorizontal,
   Pencil,
   Trash2,
   Upload,
@@ -331,24 +330,6 @@ export function CodeExplorer({
   const selectionContainsMain = selectedEntries.some((entry) => (
     containsRequiredMainEntry(entries, entry.id)
   ));
-  const deleteDisabled = readOnly
-    || renamingId !== null
-    || selectedEntries.length === 0
-    || selectionContainsMain;
-  const deleteLabel = readOnly
-    ? "Удаление недоступно в режиме просмотра"
-    : renamingId !== null
-      ? "Завершите переименование перед удалением"
-      : selectedEntries.length === 0
-        ? "Выберите файл или папку для удаления"
-        : selectionContainsMain
-          ? selectedEntries.length === 1 && selectedEntries[0]?.id === "main-py"
-            ? "main.py нельзя удалить"
-            : "Выборку с main.py нельзя удалить"
-          : selectedEntries.length === 1
-            ? `Удалить ${selectedEntries[0]!.name}`
-            : `Удалить выбранные элементы (${selectedEntries.length})`;
-
   const chooseUpload = (parentId: string | null): void => {
     setUploadParentId(parentId);
     setMenu(null);
@@ -673,39 +654,6 @@ export function CodeExplorer({
     >
       <div className="code-explorer__head">
         <strong>Проводник</strong>
-        <div className="code-explorer__actions">
-          <button
-            type="button"
-            className="code-explorer__delete"
-            aria-label={deleteLabel}
-            title={deleteLabel}
-            disabled={deleteDisabled}
-            onClick={() => {
-              if (deleteDisabled) return;
-              onDelete(selectedEntries);
-              restoreTreeFocus();
-            }}
-          >
-            <Trash2 size={16} />
-          </button>
-          <button
-            type="button"
-            aria-label="Меню проводника"
-            title="Меню проводника"
-            aria-haspopup="menu"
-            aria-expanded={menu?.entryId === null}
-            onClick={(event) => {
-              const rect = event.currentTarget.getBoundingClientRect();
-              openMenu({
-                preventDefault: () => undefined,
-                clientX: rect.right,
-                clientY: rect.bottom,
-              }, null);
-            }}
-          >
-            <MoreHorizontal size={16} />
-          </button>
-        </div>
       </div>
       <div
         ref={treeRef}

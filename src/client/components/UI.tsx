@@ -50,6 +50,7 @@ export function Modal({
   onClose,
   width = "medium",
   dismissible = true,
+  backdropClassName = "",
 }: PropsWithChildren<{
   open: boolean;
   title: string;
@@ -57,6 +58,7 @@ export function Modal({
   onClose: () => void;
   width?: "small" | "medium" | "large";
   dismissible?: boolean;
+  backdropClassName?: string;
 }>) {
   const headingId = useId();
   const descriptionId = useId();
@@ -111,7 +113,7 @@ export function Modal({
   if (!open) return null;
   return createPortal(
     <div
-      className="modal-backdrop"
+      className={`modal-backdrop ${backdropClassName}`.trim()}
       onMouseDown={(event) => {
         if (dismissible && event.target === event.currentTarget) onClose();
       }}

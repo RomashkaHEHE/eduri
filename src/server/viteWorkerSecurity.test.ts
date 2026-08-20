@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
-import viteConfig, { pythonWorkerSecurityHeaders } from "../../vite.config.js";
+import viteConfig, {
+  developmentPort,
+  pythonWorkerSecurityHeaders,
+} from "../../vite.config.js";
 import {
   PYTHON_RUNNER_WORKER_URL,
   PYTHON_TERMINAL_WORKER_URL,
@@ -13,6 +16,13 @@ describe("Vite Python worker security headers", () => {
       port: 5173,
       strictPort: true,
     });
+  });
+
+  it("accepts explicit alternate development ports and rejects invalid ones", () => {
+    expect(developmentPort("5174", 5173)).toBe(5174);
+    expect(developmentPort(undefined, 5173)).toBe(5173);
+    expect(() => developmentPort("0", 5173)).toThrow(/development port/u);
+    expect(() => developmentPort("not-a-port", 5173)).toThrow(/development port/u);
   });
 
   it("sets the network-denying development CSP only on Python workers", () => {

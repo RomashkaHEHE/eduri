@@ -1,4 +1,5 @@
 import * as Y from "yjs";
+import type { BoardLineObjectGeometry } from "./lineGeometry.js";
 import {
   type AtomicTransform,
   type BoardObjectInput,
@@ -155,6 +156,30 @@ export function transformObjects(
 
   executeBoardCommand(doc, origin, "objects.transform", () => {
     for (const change of changes) change.record.set("transform", change.transform);
+  });
+}
+
+/** Replaces a line's transform and geometry props as one undoable CRDT command. */
+export function setLineObjectGeometry(
+  doc: Y.Doc,
+  objectId: string,
+  geometry: BoardLineObjectGeometry,
+  origin: BoardCommandOrigin,
+): void {
+  const record = requireObject(doc, objectId);
+  const { props } = readBoardObject(record);
+  const transform = normalizeAtomicTransform(geometry.transform);
+  const nextProps = Object.entries(geometry.props).map(([property, value]) => [
+    property,
+    cloneValueForBoard(value, `props.${property}`),
+  ] as const);
+  executeBoardCommand(doc, origin, "line.points.set", () => {
+    record.set("transform", transform);
+    props.delete("start");
+    props.delete("end");
+    props.delete("control");
+    props.delete("points");
+    for (const [property, value] of nextProps) props.set(property, value);
   });
 }
 

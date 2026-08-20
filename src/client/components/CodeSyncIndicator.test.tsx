@@ -74,7 +74,7 @@ function pointerEvent(
 }
 
 describe("CodeSyncIndicator", () => {
-  it("opens on hover or focus and dismisses with pointer leave or Escape", async () => {
+  it("keeps hover open only while the pointer is on the cloud", async () => {
     await renderIndicator(ONLINE_STATUS);
     const rootElement = indicator();
     const button = trigger();
@@ -84,17 +84,19 @@ describe("CodeSyncIndicator", () => {
     expect(container.querySelector('[role="tooltip"]')).toBeNull();
 
     await act(async () => {
-      rootElement.dispatchEvent(pointerEvent("pointerover", "mouse", document.body));
+      button.dispatchEvent(pointerEvent("pointerover", "mouse", document.body));
     });
     const hoveredPopup = container.querySelector<HTMLElement>('[role="tooltip"]');
     expect(hoveredPopup).not.toBeNull();
+    expect(hoveredPopup?.textContent).toContain("Синхронизация");
+    expect(hoveredPopup?.textContent).toContain("Изменения синхронизированы");
     expect(rootElement.dataset.popupPlacement).toBe("below");
     expect(button.getAttribute("aria-expanded")).toBe("true");
     expect(button.getAttribute("aria-controls")).toBe(hoveredPopup?.id);
     expect(button.getAttribute("aria-describedby")).toBe(hoveredPopup?.id);
 
     await act(async () => {
-      rootElement.dispatchEvent(pointerEvent("pointerout", "mouse", document.body));
+      button.dispatchEvent(pointerEvent("pointerout", "mouse", hoveredPopup));
     });
     expect(button.getAttribute("aria-expanded")).toBe("false");
     expect(rootElement.hasAttribute("data-popup-placement")).toBe(false);
@@ -157,7 +159,7 @@ describe("CodeSyncIndicator", () => {
     const rootBefore = indicator();
     const triggerBefore = trigger();
     await act(async () => {
-      rootBefore.dispatchEvent(pointerEvent("pointerover", "mouse", document.body));
+      triggerBefore.dispatchEvent(pointerEvent("pointerover", "mouse", document.body));
     });
     const popupBefore = container.querySelector<HTMLElement>('[role="tooltip"]');
     const popupId = popupBefore?.id;
@@ -179,13 +181,12 @@ describe("CodeSyncIndicator", () => {
     expect(triggerBefore.getAttribute("aria-expanded")).toBe("true");
     expect(triggerBefore.getAttribute("aria-controls")).toBe(popupId);
     expect(indicator().dataset.state).toBe("error");
-    expect(container.querySelector(".code-sync-indicator__count")?.textContent)
-      .toBe("99+");
     expect(popupAfter?.textContent).toContain("Ошибка синхронизации");
-    expect(popupAfter?.textContent).toContain("Локальное сохранение недоступно");
     expect(popupAfter?.textContent).toContain("127");
-    expect(popupAfter?.textContent).toContain("Только чтение");
-    expect(popupAfter?.textContent).toContain("Общий терминалНедоступен");
+    expect(popupAfter?.textContent).not.toContain("Локальные данные");
+    expect(popupAfter?.textContent).not.toContain("Редактор");
+    expect(popupAfter?.textContent).not.toContain("Общий терминал");
+    expect(popupAfter?.querySelector('[aria-label="Соединение"] svg')).not.toBeNull();
     expect(popupAfter?.textContent).toContain("IndexedDB недоступен");
     expect(container.querySelector('[role="alert"]')?.textContent)
       .toBe("IndexedDB недоступен");
@@ -202,7 +203,7 @@ describe("CodeSyncIndicator", () => {
       .toContain("Синхронизация недоступна");
 
     await act(async () => {
-      indicator().dispatchEvent(pointerEvent("pointerover", "mouse", document.body));
+      trigger().dispatchEvent(pointerEvent("pointerover", "mouse", document.body));
     });
     expect(container.querySelector('[role="tooltip"]')?.textContent)
       .toContain("Синхронизация недоступна");
@@ -210,18 +211,37 @@ describe("CodeSyncIndicator", () => {
       .toBe("Сервер отклонил обновление");
   });
 
-  it("does not pin hover details with an ordinary mouse click", async () => {
+  it("pins with a mouse click until a second cloud click or an outside click", async () => {
     await renderIndicator(ONLINE_STATUS);
-    const rootElement = indicator();
     const button = trigger();
 
     await act(async () => {
-      rootElement.dispatchEvent(pointerEvent("pointerover", "mouse", document.body));
-      button.dispatchEvent(pointerEvent("pointerdown", "mouse"));
+      button.dispatchEvent(pointerEvent("pointerover", "mouse", document.body));
       button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      rootElement.dispatchEvent(pointerEvent("pointerout", "mouse", document.body));
+      button.dispatchEvent(pointerEvent("pointerout", "mouse", document.body));
     });
 
+    const pinnedPopup = container.querySelector<HTMLElement>('[role="tooltip"]');
+    expect(button.getAttribute("aria-expanded")).toBe("true");
+    expect(pinnedPopup?.classList.contains("is-pinned")).toBe(true);
+
+    await act(async () => {
+      pinnedPopup?.dispatchEvent(pointerEvent("pointerdown", "mouse"));
+    });
+    expect(button.getAttribute("aria-expanded")).toBe("true");
+
+    await act(async () => {
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(button.getAttribute("aria-expanded")).toBe("false");
+
+    await act(async () => {
+      button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    expect(button.getAttribute("aria-expanded")).toBe("true");
+    await act(async () => {
+      document.body.dispatchEvent(pointerEvent("pointerdown", "mouse"));
+    });
     expect(button.getAttribute("aria-expanded")).toBe("false");
     expect(container.querySelector('[role="tooltip"]')).toBeNull();
   });
@@ -232,16 +252,14 @@ describe("CodeSyncIndicator", () => {
       connection: "offline",
       pendingUpdates: 2,
     });
-    const rootElement = indicator();
     const button = trigger();
 
     await act(async () => {
-      rootElement.dispatchEvent(pointerEvent("pointerover", "touch", document.body));
+      button.dispatchEvent(pointerEvent("pointerover", "touch", document.body));
     });
     expect(container.querySelector('[role="tooltip"]')).toBeNull();
 
     await act(async () => {
-      button.dispatchEvent(pointerEvent("pointerdown", "touch"));
       button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(button.getAttribute("aria-expanded")).toBe("true");
@@ -249,12 +267,11 @@ describe("CodeSyncIndicator", () => {
       .toContain("Ожидают подтверждения2");
 
     await act(async () => {
-      rootElement.dispatchEvent(pointerEvent("pointerout", "touch", document.body));
+      button.dispatchEvent(pointerEvent("pointerout", "touch", document.body));
     });
     expect(button.getAttribute("aria-expanded")).toBe("true");
 
     await act(async () => {
-      button.dispatchEvent(pointerEvent("pointerdown", "touch"));
       button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     });
     expect(button.getAttribute("aria-expanded")).toBe("false");
@@ -288,7 +305,7 @@ describe("CodeSyncIndicator", () => {
     });
 
     await act(async () => {
-      rootElement.dispatchEvent(pointerEvent("pointerover", "mouse", document.body));
+      trigger().dispatchEvent(pointerEvent("pointerover", "mouse", document.body));
     });
     const popup = container.querySelector<HTMLElement>('[role="tooltip"]');
     if (!popup) throw new Error("Code sync popup was not rendered");
@@ -302,7 +319,7 @@ describe("CodeSyncIndicator", () => {
     expect(popup.dataset.placement).toBe("above");
     expect(rootElement.dataset.popupPlacement).toBe("above");
     expect(rootElement.style.getPropertyValue("--code-sync-popup-max-height")).toBe("85px");
-    expect(rootElement.style.getPropertyValue("--code-sync-popup-width")).toBe("300px");
-    expect(rootElement.style.getPropertyValue("--code-sync-popup-right-offset")).toBe("-8px");
+    expect(rootElement.style.getPropertyValue("--code-sync-popup-width")).toBe("260px");
+    expect(rootElement.style.getPropertyValue("--code-sync-popup-right-offset")).toBe("0px");
   });
 });

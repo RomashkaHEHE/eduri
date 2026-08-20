@@ -140,14 +140,16 @@ function setElementRect(
   element: HTMLElement,
   width = 100,
   height = 30,
+  left = 0,
+  top = 0,
 ): void {
   vi.spyOn(element, "getBoundingClientRect").mockReturnValue({
-    x: 0,
-    y: 0,
-    left: 0,
-    top: 0,
-    right: width,
-    bottom: height,
+    x: left,
+    y: top,
+    left,
+    top,
+    right: left + width,
+    bottom: top + height,
     width,
     height,
     toJSON: () => ({}),
@@ -928,6 +930,10 @@ describe("BoardColorPicker", () => {
       ".board-color-picker__preview",
     );
     if (!picker || !preview) throw new Error("Picker preview not rendered");
+    vi.stubGlobal("innerWidth", 1200);
+    vi.stubGlobal("innerHeight", 800);
+    setElementRect(picker, 300, 200, 400, 100);
+    setElementRect(preview, 28, 28, 410, 250);
 
     preview.focus();
     await act(async () => {
@@ -937,10 +943,14 @@ describe("BoardColorPicker", () => {
         button: 2,
       }));
     });
-    let formats = container.querySelector<HTMLElement>(
+    let formats = document.body.querySelector<HTMLElement>(
       ".board-color-picker__formats",
     );
     expect(formats).not.toBeNull();
+    expect(container.querySelector(".board-color-picker__formats")).toBeNull();
+    expect(formats?.dataset.boardColorFormatsPopup).toBe("true");
+    expect(formats?.dataset.positioned).toBe("true");
+    expect(formats?.style.left).toBe("106px");
     expect(document.activeElement).toBe(preview);
     expect(picker.dataset.formatsOpen).toBe("true");
     expect(preview.getAttribute("aria-controls")).toBe(formats?.id);
@@ -953,7 +963,7 @@ describe("BoardColorPicker", () => {
       }));
     });
     await act(async () => flushAnimationFrames());
-    expect(container.querySelector(".board-color-picker__formats")).toBeNull();
+    expect(document.body.querySelector(".board-color-picker__formats")).toBeNull();
     expect(picker.hasAttribute("data-formats-open")).toBe(false);
     expect(preview.getAttribute("aria-controls")).toBeNull();
     expect(document.activeElement).toBe(preview);
@@ -966,10 +976,10 @@ describe("BoardColorPicker", () => {
         shiftKey: true,
       }));
     });
-    formats = container.querySelector<HTMLElement>(
+    formats = document.body.querySelector<HTMLElement>(
       ".board-color-picker__formats",
     );
-    const rgb = container.querySelector<HTMLInputElement>(
+    const rgb = document.body.querySelector<HTMLInputElement>(
       '[aria-label="Цвет в формате RGB"]',
     );
     if (!rgb) throw new Error("Keyboard-opened RGB format not rendered");
@@ -985,17 +995,17 @@ describe("BoardColorPicker", () => {
       }));
     });
     await act(async () => flushAnimationFrames());
-    expect(container.querySelector(".board-color-picker__formats")).toBeNull();
+    expect(document.body.querySelector(".board-color-picker__formats")).toBeNull();
     expect(document.activeElement).toBe(preview);
     expect(events.preview).not.toHaveBeenCalled();
     expect(events.commit).not.toHaveBeenCalled();
   });
 
-  it("mounts formats only on context menu and applies valid Enter once", async () => {
+  it("lazily toggles formats on primary click and applies valid Enter once", async () => {
     const events = createEvents();
     const addEventListener = vi.spyOn(document, "addEventListener");
     await renderPicker(events, { initialColor: "#00a6ff" });
-    expect(container.querySelector(".board-color-picker__formats")).toBeNull();
+    expect(document.body.querySelector(".board-color-picker__formats")).toBeNull();
     expect(addEventListener.mock.calls.filter(([type]) => type === "pointerdown"))
       .toHaveLength(0);
     const preview = container.querySelector<HTMLButtonElement>(
@@ -1004,20 +1014,18 @@ describe("BoardColorPicker", () => {
     if (!preview) throw new Error("Color preview not rendered");
 
     await act(async () => {
-      preview.dispatchEvent(new MouseEvent("contextmenu", {
-        bubbles: true,
-        cancelable: true,
-        button: 2,
-      }));
+      preview.dispatchEvent(pointerEvent("pointerdown", { x: 0 }));
+      preview.click();
     });
-    const formats = container.querySelector(".board-color-picker__formats");
+    const formats = document.body.querySelector(".board-color-picker__formats");
     expect(formats).not.toBeNull();
+    expect(container.querySelector(".board-color-picker__formats")).toBeNull();
     expect(addEventListener.mock.calls.filter(([type]) => type === "pointerdown"))
       .toHaveLength(1);
-    expect([...container.querySelectorAll(".board-color-picker__format-row > span")]
+    expect([...document.body.querySelectorAll(".board-color-picker__format-row > span")]
       .map((node) => node.textContent)).toEqual(["RGB", "HSV", "HEX"]);
 
-    const hex = container.querySelector<HTMLInputElement>(
+    const hex = document.body.querySelector<HTMLInputElement>(
       '[aria-label="Цвет в формате HEX"]',
     );
     if (!hex) throw new Error("HEX format not rendered");
@@ -1038,6 +1046,12 @@ describe("BoardColorPicker", () => {
     });
     expect(events.preview).toHaveBeenCalledOnce();
     expect(events.commit).toHaveBeenCalledOnce();
+
+    await act(async () => {
+      preview.dispatchEvent(pointerEvent("pointerdown", { x: 0 }));
+      preview.click();
+    });
+    expect(document.body.querySelector(".board-color-picker__formats")).toBeNull();
   });
 
   it("rejects invalid formats, discards drafts on Escape, and reports copy outcome", async () => {
@@ -1064,7 +1078,7 @@ describe("BoardColorPicker", () => {
         shiftKey: true,
       }));
     });
-    const rgb = container.querySelector<HTMLInputElement>(
+    const rgb = document.body.querySelector<HTMLInputElement>(
       '[aria-label="Цвет в формате RGB"]',
     );
     if (!rgb) throw new Error("RGB format not rendered");
@@ -1076,10 +1090,10 @@ describe("BoardColorPicker", () => {
     expect(events.preview).not.toHaveBeenCalled();
     expect(events.commit).not.toHaveBeenCalled();
 
-    const copy = container.querySelector<HTMLButtonElement>(
+    const copy = document.body.querySelector<HTMLButtonElement>(
       '[aria-label="Скопировать HEX"]',
     );
-    const hex = container.querySelector<HTMLInputElement>(
+    const hex = document.body.querySelector<HTMLInputElement>(
       '[aria-label="Цвет в формате HEX"]',
     );
     if (!copy || !hex) throw new Error("HEX copy controls not rendered");
@@ -1089,7 +1103,7 @@ describe("BoardColorPicker", () => {
       await Promise.resolve();
     });
     expect(writeText).toHaveBeenCalledWith("#FF0000");
-    expect(container.querySelector('[role="status"]')?.textContent)
+    expect(document.body.querySelector('[role="status"]')?.textContent)
       .toContain("HEX");
 
     writeText.mockRejectedValueOnce(new Error("Clipboard blocked"));
@@ -1097,7 +1111,7 @@ describe("BoardColorPicker", () => {
       copy.click();
       await Promise.resolve();
     });
-    expect(container.querySelector('[role="alert"]')?.textContent)
+    expect(document.body.querySelector('[role="alert"]')?.textContent)
       .toContain("Не удалось");
 
     await act(async () => {
@@ -1107,7 +1121,7 @@ describe("BoardColorPicker", () => {
         key: "Escape",
       }));
     });
-    expect(container.querySelector(".board-color-picker__formats")).toBeNull();
+    expect(document.body.querySelector(".board-color-picker__formats")).toBeNull();
     expect(events.preview).not.toHaveBeenCalled();
     if (clipboardDescriptor) {
       Object.defineProperty(navigator, "clipboard", clipboardDescriptor);
@@ -1130,12 +1144,12 @@ describe("BoardColorPicker", () => {
         button: 2,
       }));
     });
-    expect([...container.querySelectorAll(".board-color-picker__format-row > span")]
+    expect([...document.body.querySelectorAll(".board-color-picker__format-row > span")]
       .map((node) => node.textContent)).toEqual(["RGBA", "HSVA", "HEX"]);
-    const hex = container.querySelector<HTMLInputElement>(
+    const hex = document.body.querySelector<HTMLInputElement>(
       '[aria-label="Цвет в формате HEX"]',
     );
-    const rgba = container.querySelector<HTMLInputElement>(
+    const rgba = document.body.querySelector<HTMLInputElement>(
       '[aria-label="Цвет в формате RGBA"]',
     );
     if (!hex || !rgba) throw new Error("Alpha formats not rendered");

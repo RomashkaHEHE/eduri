@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { loadConfig } from "./config.js";
+import { DEVELOPMENT_LIVEKIT_CONFIG, loadConfig } from "./config.js";
 
 const productionOverrides = {
   nodeEnv: "production" as const,
@@ -24,6 +24,31 @@ describe("runtime environment and origin configuration", () => {
     expect(() => loadConfig()).toThrow(
       /NODE_ENV must be one of development, test, or production/u,
     );
+  });
+
+  it("uses the isolated local LiveKit service by default only in development", () => {
+    vi.stubEnv("LIVEKIT_URL", "");
+    vi.stubEnv("LIVEKIT_API_URL", "");
+    vi.stubEnv("LIVEKIT_API_KEY", "");
+    vi.stubEnv("LIVEKIT_API_SECRET", "");
+
+    expect(loadConfig({ nodeEnv: "development" })).toMatchObject(
+      DEVELOPMENT_LIVEKIT_CONFIG,
+    );
+    expect(loadConfig({ nodeEnv: "test" })).toMatchObject({
+      livekitUrl: undefined,
+      livekitApiUrl: undefined,
+      livekitApiKey: undefined,
+      livekitApiSecret: undefined,
+    });
+  });
+
+  it("still rejects a partial explicit LiveKit development configuration", () => {
+    expect(() => loadConfig({
+      nodeEnv: "development",
+      livekitUrl: "ws://127.0.0.1:7880",
+      livekitApiKey: "",
+    })).toThrow(/must be configured together/u);
   });
 
   it("normalizes and deduplicates root HTTP origins", () => {

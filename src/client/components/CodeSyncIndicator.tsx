@@ -1,4 +1,10 @@
-import { Cloud, CloudOff, LoaderCircle } from "lucide-react";
+import {
+  CircleAlert,
+  Cloud,
+  LoaderCircle,
+  Wifi,
+  WifiOff,
+} from "lucide-react";
 import {
   useEffect,
   useId,
@@ -7,7 +13,6 @@ import {
   useState,
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
-  type PointerEvent as ReactPointerEvent,
 } from "react";
 
 export type CodeSyncConnection =
@@ -62,17 +67,6 @@ function connectionLabel(connection: CodeSyncConnection): string {
   }
 }
 
-function durabilityLabel(durability: CodeSyncDurability): string {
-  switch (durability) {
-    case "ready":
-      return "Сохранено на устройстве";
-    case "writing":
-      return "Сохраняем на устройстве";
-    case "at-risk":
-      return "Локальное сохранение недоступно";
-  }
-}
-
 function indicatorState({
   connection,
   durability,
@@ -121,7 +115,6 @@ export function CodeSyncIndicator(status: CodeSyncIndicatorProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
-  const lastPointerTypeRef = useRef<string | null>(null);
   const [hovered, setHovered] = useState(false);
   const [focused, setFocused] = useState(false);
   const [pinned, setPinned] = useState(false);
@@ -130,10 +123,6 @@ export function CodeSyncIndicator(status: CodeSyncIndicatorProps) {
   const state = indicatorState(status);
   const summary = summaryLabel(status);
   const open = !dismissed && (hovered || focused || pinned);
-  const pendingLabel = status.pendingUpdates > 99 ? "99+" : String(status.pendingUpdates);
-  const terminalAvailable = status.connection === "online"
-    && status.durability !== "at-risk"
-    && !status.readOnly;
   const popupStyle = popupGeometry ? {
     "--code-sync-popup-max-height": `${popupGeometry.maxHeight}px`,
     "--code-sync-popup-width": `${popupGeometry.width}px`,
@@ -181,7 +170,7 @@ export function CodeSyncIndicator(status: CodeSyncIndicatorProps) {
       );
       const width = Math.max(
         0,
-        Math.floor(Math.min(300, clipRight - clipLeft - POPUP_VIEWPORT_MARGIN * 2)),
+        Math.floor(Math.min(260, clipRight - clipLeft - POPUP_VIEWPORT_MARGIN * 2)),
       );
       const unclampedLeft = rootRect.right - width;
       const minimumLeft = clipLeft + POPUP_VIEWPORT_MARGIN;
@@ -269,20 +258,21 @@ export function CodeSyncIndicator(status: CodeSyncIndicatorProps) {
     event.currentTarget.scrollTop = nextScrollTop;
   };
 
-  const handlePointerDown = (event: ReactPointerEvent<HTMLButtonElement>): void => {
-    lastPointerTypeRef.current = event.pointerType || "mouse";
+  const handleClick = (): void => {
+    setPinned((current) => {
+      const next = !current;
+      setDismissed(!next);
+      return next;
+    });
   };
 
-  const handleClick = (): void => {
-    if (lastPointerTypeRef.current !== "touch") return;
-    if (pinned) {
-      setPinned(false);
-      setDismissed(true);
-    } else {
-      setPinned(true);
-      setDismissed(false);
-    }
-  };
+  const connectionIcon = state === "online"
+    ? <Wifi size={14} />
+    : state === "syncing"
+      ? <LoaderCircle className="spin" size={14} />
+      : state === "offline"
+        ? <WifiOff size={14} />
+        : <CircleAlert size={14} />;
 
   return (
     <div
@@ -302,15 +292,6 @@ export function CodeSyncIndicator(status: CodeSyncIndicatorProps) {
         setDismissed(false);
       }}
       onKeyDown={handleKeyDown}
-      onPointerEnter={(event) => {
-        if (event.pointerType === "touch") return;
-        setHovered(true);
-        setDismissed(false);
-      }}
-      onPointerLeave={(event) => {
-        if (event.pointerType === "touch") return;
-        setHovered(false);
-      }}
     >
       <button
         ref={triggerRef}
@@ -320,28 +301,25 @@ export function CodeSyncIndicator(status: CodeSyncIndicatorProps) {
         aria-expanded={open}
         aria-controls={open ? popupId : undefined}
         aria-describedby={open ? popupId : undefined}
-        onPointerDown={handlePointerDown}
         onClick={handleClick}
+        onPointerEnter={(event) => {
+          if (event.pointerType === "touch") return;
+          setHovered(true);
+          setDismissed(false);
+        }}
+        onPointerLeave={(event) => {
+          if (event.pointerType === "touch") return;
+          setHovered(false);
+        }}
       >
-        {state === "online" ? (
-          <Cloud size={16} />
-        ) : state === "syncing" ? (
-          <LoaderCircle className="spin" size={16} />
-        ) : (
-          <CloudOff size={16} />
-        )}
-        {status.pendingUpdates > 0 && (
-          <span className="code-sync-indicator__count" aria-hidden="true">
-            {pendingLabel}
-          </span>
-        )}
+        <Cloud size={15} />
       </button>
 
       {open && (
         <div
           ref={popupRef}
           id={popupId}
-          className="code-sync-indicator__popup"
+          className={`code-sync-indicator__popup${pinned ? " is-pinned" : ""}`}
           data-placement={popupGeometry?.placement ?? "below"}
           role="tooltip"
           tabIndex={0}
@@ -351,28 +329,19 @@ export function CodeSyncIndicator(status: CodeSyncIndicatorProps) {
             <strong>Синхронизация</strong>
             <span>{summary}</span>
           </div>
-          <dl>
-            <div>
-              <dt>Соединение</dt>
-              <dd>{connectionLabel(status.connection)}</dd>
+          <div className="code-sync-indicator__connection">
+            <span
+              className="code-sync-indicator__connection-icon"
+              aria-label="Соединение"
+            >{connectionIcon}</span>
+            <span>{connectionLabel(status.connection)}</span>
+          </div>
+          {status.pendingUpdates > 0 && (
+            <div className="code-sync-indicator__pending">
+              <span>Ожидают подтверждения</span>
+              <strong>{status.pendingUpdates}</strong>
             </div>
-            <div>
-              <dt>Локальные данные</dt>
-              <dd>{durabilityLabel(status.durability)}</dd>
-            </div>
-            <div>
-              <dt>Ожидают подтверждения</dt>
-              <dd>{status.pendingUpdates}</dd>
-            </div>
-            <div>
-              <dt>Редактор</dt>
-              <dd>{status.readOnly ? "Только чтение" : "Редактирование"}</dd>
-            </div>
-            <div>
-              <dt>Общий терминал</dt>
-              <dd>{terminalAvailable ? "Доступен" : "Недоступен"}</dd>
-            </div>
-          </dl>
+          )}
           {status.error && (
             <p className="code-sync-indicator__error">{status.error}</p>
           )}

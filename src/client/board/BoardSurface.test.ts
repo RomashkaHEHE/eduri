@@ -36,8 +36,6 @@ import {
   type BoardSystemClipboardItem,
 } from "./boardClipboard";
 import { FREE_DRAWING_PRESETS_STORAGE_KEY } from "./freeDrawingPresets";
-import { BOARD_CONNECTOR_CURVATURE_STORAGE_KEY } from "./connectorCurvature";
-import { STYLE_COLOR_PALETTE_STORAGE_KEY } from "./styleColorPalette";
 import { TOOL_STYLE_PRESETS_STORAGE_KEY } from "./toolStylePresets";
 import type {
   BoardCamera,
@@ -148,9 +146,8 @@ class FakeRenderer implements BoardRenderer {
   tool: BoardTool = "select";
   shapeKind: BoardShapeKind = "rectangle";
   theme: BoardTheme = "light";
-  gridVisible = true;
+  gridVisible = false;
   creationStyle: Readonly<Record<string, unknown>> = {};
-  connectorCurvature = 0;
   inlineEditingObjectId: string | null = null;
   readOnly = false;
   destroyCount = 0;
@@ -165,7 +162,7 @@ class FakeRenderer implements BoardRenderer {
     this.element = element;
     this.callbacks = callbacks;
     this.options = options;
-    this.gridVisible = options?.gridVisible ?? true;
+    this.gridVisible = options?.gridVisible ?? false;
   }
 
   setTool(tool: BoardTool): void {
@@ -180,9 +177,6 @@ class FakeRenderer implements BoardRenderer {
     this.creationStyle = style;
   }
 
-  setConnectorCurvature(curvature: number): void {
-    this.connectorCurvature = curvature;
-  }
 
   setReadOnly(readOnly: boolean): void {
     this.readOnly = readOnly;
@@ -412,6 +406,28 @@ function openColorFormats(scope: ParentNode): void {
     bubbles: true,
     cancelable: true,
   }));
+}
+
+async function openActiveCreationPreset(): Promise<HTMLElement> {
+  const current = container?.querySelector<HTMLButtonElement>(
+    ".board-stylebar__line-current .board-stylebar__pen-preset",
+  );
+  if (!current) throw new Error("Current creation preset not rendered");
+  await act(async () => current.click());
+  const palette = container?.querySelector<HTMLElement>(
+    ".board-stylebar__free-drawing.is-floating",
+  );
+  if (!palette) throw new Error("Creation preset palette not rendered");
+  const active = palette.querySelector<HTMLButtonElement>(
+    '.board-stylebar__pen-preset[aria-pressed="true"]',
+  );
+  if (!active) throw new Error("Active creation preset not rendered");
+  await act(async () => active.click());
+  const popover = container?.querySelector<HTMLElement>(
+    ".board-stylebar__pen-popover",
+  );
+  if (!popover) throw new Error("Creation preset editor not rendered");
+  return popover;
 }
 
 function axisAlignedObjectsOverlap(
@@ -2486,10 +2502,9 @@ describe("BoardSurface context menu", () => {
     expect(context.undo.canUndo).toBe(false);
   });
 
-  it("persists grid visibility and updates the renderer without board data", async () => {
+  it("starts with the grid hidden and persists visibility without board data", async () => {
     const context = createBoardContext(PAGE_ONE);
     contexts.push(context);
-    window.localStorage.setItem(BOARD_GRID_VISIBILITY_STORAGE_KEY, "false");
     const updates = vi.fn();
     context.document.on("update", updates);
     const factory = new FakeRendererFactory();
@@ -2933,73 +2948,22 @@ describe("BoardSurface context menu", () => {
 });
 
 describe("BoardSurface style and layer controls", () => {
-  it("keeps Line and Arrow curvature independent, local, and persistent", async () => {
-    window.localStorage.setItem(
-      BOARD_CONNECTOR_CURVATURE_STORAGE_KEY,
-      JSON.stringify({
-        version: 1,
-        values: { line: 0.35, arrow: -0.4 },
-      }),
-    );
+  it("uses the shared point-style palette for Arrow without a curvature control", async () => {
     const context = createBoardContext(PAGE_ONE);
     contexts.push(context);
     const factory = new FakeRendererFactory();
-    const documentUpdates = vi.fn();
-    context.document.on("update", documentUpdates);
 
-    await act(async () => {
-      root?.render(createElement(BoardSurface, surfaceProps(context, factory)));
-    });
-    const renderer = factory.instances[0];
-    const line = container?.querySelector<HTMLButtonElement>(
-      '[data-toolbar-tool="line"]',
-    );
-    const arrow = container?.querySelector<HTMLButtonElement>(
-      '[data-toolbar-tool="arrow"]',
-    );
-
-    await act(async () => line?.click());
-    expect(renderer.connectorCurvature).toBeCloseTo(0.35);
-    let slider = container?.querySelector<HTMLInputElement>(
-      '.board-stylebar__curvature input[type="range"]',
-    );
-    await act(async () => {
-      if (slider) setRangeValue(slider, "0.65");
-    });
-    expect(renderer.connectorCurvature).toBeCloseTo(0.65);
-
-    await act(async () => arrow?.click());
-    expect(renderer.connectorCurvature).toBeCloseTo(-0.4);
-    slider = container?.querySelector<HTMLInputElement>(
-      '.board-stylebar__curvature input[type="range"]',
-    );
-    await act(async () => {
-      if (slider) setRangeValue(slider, "-0.2");
-    });
-    expect(renderer.connectorCurvature).toBeCloseTo(-0.2);
-    await act(async () => line?.click());
-    expect(renderer.connectorCurvature).toBeCloseTo(0.65);
-
-    expect(documentUpdates).not.toHaveBeenCalled();
-    expect(context.undo.canUndo).toBe(false);
-    expect(JSON.parse(
-      window.localStorage.getItem(BOARD_CONNECTOR_CURVATURE_STORAGE_KEY) ?? "{}",
-    )).toEqual({
-      version: 1,
-      values: { line: 0.65, arrow: -0.2 },
-    });
-
-    await act(async () => root?.unmount());
-    root = createRoot(container!);
     await act(async () => {
       root?.render(createElement(BoardSurface, surfaceProps(context, factory)));
     });
     await act(async () => container?.querySelector<HTMLButtonElement>(
-      '[data-toolbar-tool="line"]',
+      '[data-toolbar-tool="arrow"]',
     )?.click());
-    expect(factory.instances.at(-1)?.connectorCurvature).toBeCloseTo(0.65);
-    expect(documentUpdates).not.toHaveBeenCalled();
-    expect(context.undo.canUndo).toBe(false);
+
+    expect(container?.querySelector(".board-stylebar__curvature")).toBeNull();
+    const editor = await openActiveCreationPreset();
+    expect(editor.querySelector('[aria-label="Толщина: стрелка"]')).not.toBeNull();
+    expect(editor.querySelector('[aria-label="Тип линии"]')).not.toBeNull();
   });
 
   it("configures independent free-drawing presets without rebuilding or mutating the board", async () => {
@@ -3084,10 +3048,10 @@ describe("BoardSurface style and layer controls", () => {
       if (popover) openColorFormats(popover);
     });
     const customColor = container?.querySelector<HTMLInputElement>(
-      '.board-stylebar__pen-popover [aria-label="Цвет в формате HEX"]',
+      '[data-board-color-formats-popup] [aria-label="Цвет в формате HEX"]',
     );
     const freeDrawingWidth = container?.querySelector<HTMLInputElement>(
-      '[aria-label="Толщина линии рисования"]',
+      '[aria-label="Точная толщина линии рисования"]',
     );
     const freeDrawingOpacity = container?.querySelector<HTMLInputElement>(
       '.board-stylebar__pen-popover [aria-label="Непрозрачность"]',
@@ -3158,16 +3122,23 @@ describe("BoardSurface style and layer controls", () => {
     );
     await act(async () => shape?.click());
     expect(container?.querySelector('[role="dialog"]')).toBeNull();
-    await act(async () => container?.querySelector<HTMLButtonElement>(
+    expect(container?.querySelector(".board-stylebar__line-current")).toBeNull();
+    const fillTrigger = container?.querySelector<HTMLButtonElement>(
       '[aria-label^="Цвет заливки:"]',
-    )?.click());
-    const blueFill = styleSwatch("#dbeafe");
-    expect(blueFill).not.toBeNull();
-    await act(async () => blueFill?.click());
-    const rectangleWidth = container?.querySelector<HTMLInputElement>(
-      '[aria-label="Толщина линии"]',
     );
-    expect(rectangleWidth?.type).toBe("range");
+    const outlineTrigger = container?.querySelector<HTMLButtonElement>(
+      '[aria-label^="Цвет контура:"]',
+    );
+    expect(fillTrigger).not.toBeNull();
+    expect(outlineTrigger).not.toBeNull();
+    await act(async () => fillTrigger?.click());
+    await act(async () => container?.querySelector<HTMLButtonElement>(
+      '[aria-label^="Выбрать цвет #DBEAFE,"]',
+    )?.click());
+    const rectangleWidth = container?.querySelector<HTMLInputElement>(
+      '[aria-label="Точная толщина линии"]',
+    );
+    expect(rectangleWidth?.type).toBe("number");
     await act(async () => {
       if (rectangleWidth) setRangeValue(rectangleWidth, "6");
     });
@@ -3253,7 +3224,7 @@ describe("BoardSurface style and layer controls", () => {
       if (popover) openColorFormats(popover);
     });
     const color = container?.querySelector<HTMLInputElement>(
-      '.board-stylebar__pen-popover [aria-label="Цвет в формате HEX"]',
+      '[data-board-color-formats-popup] [aria-label="Цвет в формате HEX"]',
     );
     await act(async () => {
       if (color) {
@@ -3366,7 +3337,7 @@ describe("BoardSurface style and layer controls", () => {
     )?.getAttribute("aria-pressed")).toBe("true");
   });
 
-  it("persists unrestricted ordinary styles and keeps shared palette edits outside CRDT", async () => {
+  it("persists direct Shape and Text settings outside CRDT", async () => {
     const context = createBoardContext(PAGE_ONE);
     contexts.push(context);
     const firstFactory = new FakeRendererFactory();
@@ -3383,67 +3354,36 @@ describe("BoardSurface style and layer controls", () => {
       '[data-toolbar-tool="shape"]',
     )?.click());
     const renderer = firstFactory.instances[0];
-
-    await act(async () => container?.querySelector<HTMLButtonElement>(
+    expect(container?.querySelector(".board-stylebar__line-current")).toBeNull();
+    const outlineTrigger = container?.querySelector<HTMLButtonElement>(
+      '[aria-label^="Цвет контура:"]',
+    );
+    const fillTrigger = container?.querySelector<HTMLButtonElement>(
       '[aria-label^="Цвет заливки:"]',
-    )?.click());
-    await act(async () => {
-      if (container) openColorFormats(container);
-    });
-    const hex = container?.querySelector<HTMLInputElement>(
-      '[aria-label="Цвет в формате HEX"]',
     );
-    await act(async () => {
-      if (hex) setRangeValue(hex, "#12abef");
-      hex?.dispatchEvent(new KeyboardEvent("keydown", {
-        bubbles: true,
-        cancelable: true,
-        key: "Enter",
-      }));
-    });
-    expect(renderer.creationStyle.fill).toBe("#12abef");
-
+    expect(outlineTrigger).not.toBeNull();
+    expect(fillTrigger).not.toBeNull();
+    await act(async () => outlineTrigger?.click());
     await act(async () => container?.querySelector<HTMLButtonElement>(
-      ".board-color-control__palette-toggle",
+      '[aria-label^="Выбрать цвет #2563EB,"]',
     )?.click());
+    await act(async () => fillTrigger?.click());
     await act(async () => container?.querySelector<HTMLButtonElement>(
-      '[data-color-slot-id="graphite"] .board-color-control__favorite',
+      '[aria-label^="Выбрать цвет #DBEAFE,"]',
     )?.click());
-    await act(async () => {
-      if (container) openColorFormats(container);
+    expect(renderer.creationStyle).toMatchObject({
+      stroke: "#2563eb",
+      fill: "#dbeafe",
     });
-    const slotPicker = container?.querySelector<HTMLInputElement>(
-      '[aria-label="Цвет в формате HEX"]',
-    );
-    await act(async () => {
-      if (slotPicker) {
-        setRangeValue(slotPicker, "#abcdef");
-        slotPicker.dispatchEvent(new KeyboardEvent("keydown", {
-          bubbles: true,
-          cancelable: true,
-          key: "Enter",
-        }));
-      }
-    });
-    expect(renderer.creationStyle.fill).toBe("#12abef");
-    expect(documentUpdates).not.toHaveBeenCalled();
-    expect(context.undo.canUndo).toBe(false);
-
-    await act(async () => container?.querySelector<HTMLButtonElement>(
-      ".board-color-control__close",
-    )?.click());
-    await act(async () => {
-      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-    });
-    const exactWidth = container?.querySelector<HTMLInputElement>(
+    const width = container?.querySelector<HTMLInputElement>(
       '[aria-label="Точная толщина линии"]',
     );
-    const exactOpacity = container?.querySelector<HTMLInputElement>(
+    const opacity = container?.querySelector<HTMLInputElement>(
       '[aria-label="Точная непрозрачность в процентах"]',
     );
     await act(async () => {
-      if (exactWidth) setRangeValue(exactWidth, "12.5");
-      if (exactOpacity) setRangeValue(exactOpacity, "73");
+      if (width) setRangeValue(width, "12.5");
+      if (opacity) setRangeValue(opacity, "73");
     });
     await act(async () => container?.querySelector<HTMLButtonElement>(
       '[aria-label="Свой рисунок штриха"]',
@@ -3460,7 +3400,8 @@ describe("BoardSurface style and layer controls", () => {
       }));
     });
     expect(renderer.creationStyle).toMatchObject({
-      fill: "#12abef",
+      stroke: "#2563eb",
+      fill: "#dbeafe",
       strokeWidth: 12.5,
       opacity: 0.73,
       dash: [12, 4, 2, 4],
@@ -3469,21 +3410,15 @@ describe("BoardSurface style and layer controls", () => {
     await act(async () => container?.querySelector<HTMLButtonElement>(
       '[aria-label="Текст"]',
     )?.click());
+    expect(container?.querySelector(".board-stylebar__line-current")).toBeNull();
     const fontSize = container?.querySelector<HTMLInputElement>(
       '[aria-label="Размер текста"]',
     );
     const fontFamily = container?.querySelector<HTMLButtonElement>(
       'button[role="combobox"][aria-label="Шрифт"]',
     );
-    const textColor = container?.querySelector<HTMLButtonElement>(
-      '[aria-label^="Цвет текста:"]',
-    );
-    expect(textColor?.querySelector(".lucide-paint-bucket")).toBeNull();
-    expect(container?.querySelector(
-      '[aria-label="Точная непрозрачность в процентах"]',
-    )).toBeNull();
     await act(async () => {
-      if (fontSize) setRangeValue(fontSize, "37.5");
+      if (fontSize) setRangeValue(fontSize, "38");
       fontFamily?.click();
     });
     const georgiaOption = [...document.body.querySelectorAll<HTMLButtonElement>(
@@ -3492,13 +3427,6 @@ describe("BoardSurface style and layer controls", () => {
     await act(async () => {
       georgiaOption?.click();
     });
-    const wheel = new WheelEvent("wheel", {
-      bubbles: true,
-      cancelable: true,
-      deltaY: -100,
-    });
-    await act(async () => fontSize?.dispatchEvent(wheel));
-    expect(wheel.defaultPrevented).toBe(true);
     expect(container?.querySelector('input[type="color"]')).toBeNull();
     expect(renderer.creationStyle).toMatchObject({
       fontSize: 38,
@@ -3509,24 +3437,13 @@ describe("BoardSurface style and layer controls", () => {
 
     await act(async () => root?.unmount());
     root = undefined;
-    const storedPalette = JSON.parse(
-      window.localStorage.getItem(STYLE_COLOR_PALETTE_STORAGE_KEY) ?? "{}",
-    ) as {
-      version?: unknown;
-      slots?: Array<{ id?: unknown; color?: unknown }>;
-      recentColors?: unknown[];
-    };
-    expect(storedPalette.version).toBe(1);
-    expect(storedPalette.slots?.find((slot) => slot.id === "graphite")?.color)
-      .toBe("#abcdef");
-    expect(storedPalette.recentColors?.[0]).toBe("#12abef");
-
     const storedTools = JSON.parse(
       window.localStorage.getItem(TOOL_STYLE_PRESETS_STORAGE_KEY) ?? "{}",
     ) as { version?: unknown; styles?: Record<string, Record<string, unknown>> };
     expect(storedTools.version).toBe(1);
     expect(storedTools.styles?.rectangle).toMatchObject({
-      fill: "#12abef",
+      stroke: "#2563eb",
+      fill: "#dbeafe",
       strokeWidth: 12.5,
       opacity: 0.73,
       dash: [12, 4, 2, 4],
@@ -3548,7 +3465,8 @@ describe("BoardSurface style and layer controls", () => {
       '[data-toolbar-tool="shape"]',
     )?.click());
     expect(secondFactory.instances[0].creationStyle).toMatchObject({
-      fill: "#12abef",
+      stroke: "#2563eb",
+      fill: "#dbeafe",
       strokeWidth: 12.5,
       opacity: 0.73,
       dash: [12, 4, 2, 4],
@@ -3590,10 +3508,10 @@ describe("BoardSurface style and layer controls", () => {
       if (popover) openColorFormats(popover);
     });
     const color = container?.querySelector<HTMLInputElement>(
-      '.board-stylebar__pen-popover [aria-label="Цвет в формате HEX"]',
+      '[data-board-color-formats-popup] [aria-label="Цвет в формате HEX"]',
     );
     const width = container?.querySelector<HTMLInputElement>(
-      '[aria-label="Толщина линии рисования"]',
+      '[aria-label="Точная толщина линии рисования"]',
     );
     const opacity = container?.querySelector<HTMLInputElement>(
       '.board-stylebar__pen-popover [aria-label="Непрозрачность"]',
@@ -4570,6 +4488,37 @@ describe("BoardSurface theme and standard controls", () => {
     expect(drawingButton()?.querySelector(".lucide-pencil")).not.toBeNull();
   });
 
+  it("renders and clears the modifier hints reported by the active renderer state", async () => {
+    const context = createBoardContext(PAGE_ONE);
+    contexts.push(context);
+    const factory = new FakeRendererFactory();
+
+    await act(async () => {
+      root?.render(createElement(BoardSurface, surfaceProps(context, factory)));
+    });
+    const renderer = factory.instances[0];
+
+    await act(async () => {
+      renderer.callbacks.onModifierHintsChange?.([
+        "pen-move",
+        "pen-straight",
+      ]);
+    });
+    expect([
+      ...(container?.querySelectorAll<HTMLElement>(
+        ".board-modifier-hints__item",
+      ) ?? []),
+    ].map((item) => item.textContent)).toEqual([
+      "Ctrlдвигать штрих",
+      "Shiftпрямая линия",
+    ]);
+
+    await act(async () => {
+      renderer.callbacks.onModifierHintsChange?.([]);
+    });
+    expect(container?.querySelector(".board-modifier-hints")).toBeNull();
+  });
+
   it("publishes segmented Drawing laser previews and their release through awareness", async () => {
     const context = createBoardContext(PAGE_ONE);
     contexts.push(context);
@@ -4813,7 +4762,7 @@ describe("BoardSurface theme and standard controls", () => {
       ?.getAttribute("aria-pressed")).toBe("true");
 
     const strokeWidth = container?.querySelector<HTMLInputElement>(
-      '[aria-label="Толщина линии"]',
+      '[aria-label="Точная толщина линии"]',
     );
     expect(strokeWidth).not.toBeNull();
     await act(async () => setRangeValue(strokeWidth!, "5"));

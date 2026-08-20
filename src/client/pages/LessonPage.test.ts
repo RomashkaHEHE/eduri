@@ -140,7 +140,7 @@ afterEach(async () => {
 });
 
 describe("LessonPage local-first bootstrap", () => {
-  it("requires the first online profile before mounting collaboration", async () => {
+  it("suggests the first online profile while mounting collaboration with its default", async () => {
     window.localStorage.clear();
     resetOnlineProfileMemoryForTests();
     networkLesson.mockResolvedValue({
@@ -163,17 +163,14 @@ describe("LessonPage local-first bootstrap", () => {
     }));
 
     expect(document.body.textContent).toContain("Display Name");
-    expect(container?.querySelector('[data-testid="board-v2-probe"]')).toBeNull();
-    expect(container?.textContent).not.toContain("call");
+    expect(container?.querySelector('[data-testid="board-v2-probe"]')).not.toBeNull();
+    expect(container?.textContent).toContain("call");
 
     await act(async () => {
       document.body.querySelector<HTMLButtonElement>(
-        '[role="dialog"] button[type="submit"]',
+        '[role="dialog"] [aria-label="Закрыть"]',
       )?.click();
     });
-    await act(async () => vi.waitFor(() => {
-      expect(container?.querySelector('[data-testid="board-v2-probe"]')).not.toBeNull();
-    }));
 
     expect(document.body.querySelector('[role="dialog"]')).toBeNull();
     expect(container?.textContent).toContain("call");

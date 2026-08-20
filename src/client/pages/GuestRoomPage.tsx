@@ -15,6 +15,7 @@ import {
   useNavigate,
   useParams,
 } from "react-router-dom";
+import { Button, Modal } from "../components/UI";
 import type { CollaborationProfile } from "../../shared/collaborationProfile";
 import {
   ApiError,
@@ -67,13 +68,14 @@ function GuestRoomPageContent() {
   const navigate = useNavigate();
   const [state, setState] = useState<RoomState>({ kind: "loading" });
   const [copied, setCopied] = useState(false);
+  const [leaveOpen, setLeaveOpen] = useState(false);
   const [adding, setAdding] = useState<GuestResourceKind | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [autoJoinCall, setAutoJoinCall] = useState(() => (
     (location.state as { autoJoinCall?: unknown } | null)?.autoJoinCall === true
   ));
   const deviceId = useMemo(guestDeviceId, []);
-  const { profile, configured } = useOnlineProfile({
+  const { profile } = useOnlineProfile({
     defaultDisplayName: "Гость",
     required: state.kind === "active",
   });
@@ -195,11 +197,17 @@ function GuestRoomPageContent() {
   };
 
   return (
-    <main className="guest-room">
+    <>
+      <main className="guest-room">
       <header className="public-workspace__bar guest-room__bar">
-        <Link className="public-workspace__back" to="/" aria-label="На главную">
+        <button
+          type="button"
+          className="public-workspace__back"
+          aria-label="На главную"
+          onClick={() => setLeaveOpen(true)}
+        >
           <ArrowLeft size={18} />
-        </Link>
+        </button>
         <nav className="guest-room__tabs" aria-label="Инструменты комнаты">
           {state.room.resources.map((resource) => (
             <Link
@@ -270,7 +278,7 @@ function GuestRoomPageContent() {
         className={`guest-room__content ${callResource ? "has-call" : ""} ${resourceKind === "call" ? "is-call-focused" : ""}`}
       >
         <div className="guest-room__stage">
-          {configured && profile && resourceKind === "board" ? (
+          {profile && resourceKind === "board" ? (
             <GuestBoard
               shareId={shareId}
               deviceId={deviceId}
@@ -279,7 +287,7 @@ function GuestRoomPageContent() {
                 kind: kind === "expired" ? "expired" : "missing",
               })}
             />
-          ) : configured && profile && resourceKind === "code" ? (
+          ) : profile && resourceKind === "code" ? (
             <GuestCodeWorkspace
               shareId={shareId}
               resourceId={activeResource.id}
@@ -291,7 +299,7 @@ function GuestRoomPageContent() {
             />
           ) : null}
         </div>
-        {configured && profile && callResource && (
+        {profile && callResource && (
           <aside className="guest-room__call" aria-label="Звонок">
             <CallWorkspace
               requestCredentials={requestCredentials}
@@ -302,6 +310,25 @@ function GuestRoomPageContent() {
           </aside>
         )}
       </section>
-    </main>
+      </main>
+      <Modal
+        open={leaveOpen}
+        title="Покинуть комнату?"
+        description={
+          callResource
+            ? "Звонок будет отключён. Доска, код и материалы останутся в комнате — вернуться можно по этой ссылке."
+            : "Доска, код и материалы останутся в комнате — вернуться можно по этой ссылке."
+        }
+        onClose={() => setLeaveOpen(false)}
+        width="small"
+      >
+        <div className="modal-actions">
+          <Button variant="secondary" autoFocus onClick={() => setLeaveOpen(false)}>
+            Остаться
+          </Button>
+          <Button onClick={() => navigate("/")}>Покинуть комнату</Button>
+        </div>
+      </Modal>
+    </>
   );
 }

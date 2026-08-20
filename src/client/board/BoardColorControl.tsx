@@ -649,6 +649,10 @@ export function BoardColorControl({
       return Boolean(path.includes(rootRef.current as EventTarget)
         || path.includes(dialogRef.current as EventTarget)
         || (
+          event.target instanceof Element
+          && event.target.closest('[data-board-color-formats-popup="true"]')
+        )
+        || (
           event.target instanceof Node
           && (
             rootRef.current?.contains(event.target)

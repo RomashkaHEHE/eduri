@@ -25,6 +25,7 @@ import {
   moveFreeDrawingPreset,
   patchFreeDrawingPreset,
   type FreeDrawingPreset,
+  type FreeDrawingPresetPatch,
 } from "./freeDrawingPresets";
 import { BoardStyleBar } from "./BoardStyleBar";
 import type { BoardShapeKind } from "./rendering/types";
@@ -52,9 +53,11 @@ function updatePalette(
 function PaletteHarness({
   events,
   initialState,
+  collapsed = false,
 }: {
   readonly events: PaletteEvents;
   readonly initialState?: PaletteState;
+  readonly collapsed?: boolean;
 }) {
   const [state, setState] = useState<PaletteState>(() => ({
     presets: (initialState?.presets ?? DEFAULT_FREE_DRAWING_PRESETS.slice(0, 3))
@@ -71,8 +74,14 @@ function PaletteHarness({
     values: freeDrawingPresetStyle(activePreset),
     mixed: new Set<string>(),
     fontStyleState: { bold: false, italic: false },
-    freeDrawingPalette: {
-      presets: state.presets,
+    stylePresetPalette: {
+      kind: collapsed ? "line" : "drawing",
+      collapsed,
+      properties: ["stroke", "strokeWidth", "opacity"],
+      presets: state.presets.map((preset) => ({
+        id: preset.id,
+        style: freeDrawingPresetStyle(preset),
+      })),
       activePresetId: state.activePresetId,
       onSelectPreset: (presetId) => {
         events.select(presetId);
@@ -87,7 +96,10 @@ function PaletteHarness({
         updatePalette(setState, (current) => ({
           ...current,
           presets: current.presets.map((preset) => preset.id === presetId
-            ? patchFreeDrawingPreset(preset, patch)
+              ? patchFreeDrawingPreset(
+                  preset,
+                  patch as FreeDrawingPresetPatch,
+                )
             : preset),
         }));
       },
@@ -304,9 +316,10 @@ afterEach(async () => {
 async function renderPalette(
   events: PaletteEvents,
   initialState?: PaletteState,
+  collapsed = false,
 ): Promise<void> {
   await act(async () => {
-    root.render(createElement(PaletteHarness, { events, initialState }));
+    root.render(createElement(PaletteHarness, { events, initialState, collapsed }));
   });
 }
 
@@ -333,7 +346,7 @@ function fontFamilyTrigger(): HTMLButtonElement {
 function fontFamilyOption(label: string): HTMLButtonElement | null {
   return [...document.body.querySelectorAll<HTMLButtonElement>(
     '.board-font-family-menu button[role="option"]',
-  )].find((option) => option.textContent?.trim() === label) ?? null;
+  )].find((option) => option.getAttribute("aria-label") === label) ?? null;
 }
 
 async function openFontFamilyMenu(): Promise<HTMLElement> {
@@ -435,7 +448,7 @@ describe("BoardStyleBar font family menu", () => {
     ["Courier New", "Courier New, monospace"],
   ] as const;
 
-  it("previews the current font and renders every known option in that font", async () => {
+  it("renders the sample word in the trigger and family names in the options", async () => {
     const changes = vi.fn();
     await renderFontFamily(changes);
 
@@ -443,14 +456,19 @@ describe("BoardStyleBar font family menu", () => {
     const current = trigger.querySelector<HTMLElement>(
       ".board-font-family-control__current",
     );
-    expect(current?.textContent).toBe("Inter");
-    expect(current?.style.fontFamily).toBe("Inter, Arial, sans-serif");
+    expect(current?.textContent).toBe("Шрифт");
+    expect(current?.style.fontFamily).toBe(serializedFontFamily(
+      "Inter, Arial, sans-serif",
+    ));
 
     const listbox = await openFontFamilyMenu();
     const options = [...listbox.querySelectorAll<HTMLButtonElement>(
       'button[role="option"]',
     )];
     expect(options.map((option) => option.textContent?.trim())).toEqual(
+      expectedOptions.map(([label]) => label),
+    );
+    expect(options.map((option) => option.getAttribute("aria-label"))).toEqual(
       expectedOptions.map(([label]) => label),
     );
 
@@ -472,10 +490,10 @@ describe("BoardStyleBar font family menu", () => {
       "Georgia, Times New Roman, serif",
     );
     expect(document.body.querySelector('[role="listbox"]')).toBeNull();
-    expect(current?.textContent).toBe("Georgia");
-    expect(current?.style.fontFamily).toBe(
-      serializedFontFamily("Georgia, Times New Roman, serif"),
-    );
+    expect(current?.textContent).toBe("Шрифт");
+    expect(current?.style.fontFamily).toBe(serializedFontFamily(
+      "Georgia, Times New Roman, serif",
+    ));
     expect(document.activeElement).toBe(trigger);
   });
 
@@ -488,7 +506,7 @@ describe("BoardStyleBar font family menu", () => {
     let current = fontFamilyTrigger().querySelector<HTMLElement>(
       ".board-font-family-control__current",
     );
-    expect(current?.textContent).toBe("Выберите шрифт");
+    expect(current?.textContent).toBe("Шрифт");
     expect(current?.style.fontFamily).toBe("");
 
     await act(async () => {
@@ -501,7 +519,7 @@ describe("BoardStyleBar font family menu", () => {
     current = fontFamilyTrigger().querySelector<HTMLElement>(
       ".board-font-family-control__current",
     );
-    expect(current?.textContent).toBe("Смешанный");
+    expect(current?.textContent).toBe("Шрифт");
     expect(current?.style.fontFamily).toBe("");
   });
 
@@ -570,6 +588,173 @@ describe("BoardStyleBar font family menu", () => {
 });
 
 describe("BoardStyleBar drawing palette configuration", () => {
+  it("shows one Line cell, then selects and reopens the active chooser cell for editing", async () => {
+    const events = createPaletteEvents();
+    await renderPalette(events, undefined, true);
+    const stylebar = container.querySelector(".board-v2__stylebar");
+    expect(stylebar?.classList.contains(
+      "board-v2__stylebar--inline-palette",
+    )).toBe(false);
+    expect(presetButtons(container)).toHaveLength(1);
+
+    await act(async () => presetButtons(container)[0].click());
+    expect(stylebar?.classList.contains(
+      "board-v2__stylebar--inline-palette",
+    )).toBe(false);
+    const chooser = container.querySelector<HTMLElement>(
+      ".board-stylebar__free-drawing.is-floating",
+    );
+    expect(chooser).not.toBeNull();
+    const choices = [...chooser!.querySelectorAll<HTMLButtonElement>(
+      ".board-stylebar__pen-preset",
+    )];
+    expect(choices).toHaveLength(3);
+
+    await act(async () => choices[1].click());
+    expect(events.select).toHaveBeenCalledWith("red");
+    expect(container.querySelector(
+      ".board-stylebar__free-drawing.is-floating",
+    )).toBe(chooser);
+    const selected = container.querySelector<HTMLElement>(
+      '.board-stylebar__free-drawing.is-floating [aria-pressed="true"]',
+    );
+    await act(async () => selected?.click());
+    expect(container.querySelector(
+      ".board-stylebar__free-drawing.is-floating",
+    )).toBe(chooser);
+    const editor = container.querySelector(".board-stylebar__pen-popover");
+    expect(editor).not.toBeNull();
+    expect(editor?.querySelector(":scope > header")).toBeNull();
+    expect(editor?.querySelector('[aria-label^="Закрыть настройки:"]')).toBeNull();
+  });
+
+  it("keeps one shared Line palette mounted when configuration starts", async () => {
+    const events = createPaletteEvents();
+    await renderPalette(events, undefined, true);
+    expect(container.querySelector(
+      '[aria-label="Настроить палитру линий"]',
+    )).toBeNull();
+
+    await act(async () => presetButtons(container)[0].click());
+    const chooser = container.querySelector<HTMLElement>(
+      ".board-stylebar__free-drawing.is-floating",
+    );
+    const settings = chooser?.querySelector<HTMLButtonElement>(
+      '[aria-label="Настроить палитру линий"]',
+    );
+    expect(settings).not.toBeNull();
+    await act(async () => settings?.click());
+
+    expect(container.querySelector(
+      ".board-stylebar__free-drawing.is-floating",
+    )).toBe(chooser);
+    expect(chooser?.classList.contains("is-palette-editing")).toBe(true);
+    expect(container.querySelector(".board-v2__stylebar")?.classList.contains(
+      "board-v2__stylebar--palette-editing",
+    )).toBe(true);
+    expect(container.querySelector(
+      '[aria-label="Завершить настройку палитры"]',
+    )).not.toBeNull();
+    expect(container.querySelectorAll(
+      ".board-stylebar__free-drawing.is-floating .board-stylebar__pen-preset",
+    )).toHaveLength(3);
+    expect(chooser?.querySelectorAll(
+      ".board-stylebar__pen-delete",
+    )).toHaveLength(3);
+    const stylebar = container.querySelector(".board-v2__stylebar");
+    const lineAdd = container.querySelector(".board-stylebar__pen-add");
+    expect(lineAdd).not.toBeNull();
+    expect(lineAdd?.parentElement).toBe(stylebar);
+    expect(chooser?.contains(lineAdd ?? null)).toBe(false);
+    expect(presetButtons(container)).toHaveLength(4);
+  });
+
+  it("renders Drawing, Line, and Arrow palettes through the same element structure", async () => {
+    const events = createPaletteEvents();
+    const signature = (palette: HTMLElement): string[] => [
+      palette,
+      ...palette.querySelectorAll<HTMLElement>("*"),
+    ].map((element) => {
+      const classes = [...element.classList]
+        .filter((className) =>
+          className !== "is-floating" && className !== "is-adaptive-ink")
+        .join(".");
+      return `${element.tagName.toLowerCase()}${classes ? `.${classes}` : ""}`;
+    });
+
+    await renderPalette(events);
+    expect(container.querySelector(".board-v2__stylebar")?.classList.contains(
+      "board-v2__stylebar--inline-palette",
+    )).toBe(true);
+    const drawingPalette = container.querySelector<HTMLElement>(
+      ".board-stylebar__free-drawing",
+    );
+    expect(drawingPalette).not.toBeNull();
+    const drawingSignature = signature(drawingPalette!);
+
+    await renderPalette(events, undefined, true);
+    await act(async () => presetButtons(container)[0].click());
+    const linePalette = container.querySelector<HTMLElement>(
+      ".board-stylebar__free-drawing.is-floating",
+    );
+    expect(linePalette).not.toBeNull();
+    expect(signature(linePalette!)).toEqual(drawingSignature);
+
+    const genericCases = [{
+      kind: "arrow" as const,
+      properties: ["stroke", "strokeWidth", "opacity", "dash"],
+      style: {
+        stroke: "#17212b",
+        strokeWidth: 2,
+        opacity: 1,
+        dash: [],
+      },
+    }];
+    for (const entry of genericCases) {
+      await act(async () => root.render(createElement(BoardStyleBar, {
+        available: new Set(entry.properties),
+        values: entry.style,
+        mixed: new Set<string>(),
+        fontStyleState: { bold: false, italic: false },
+        stylePresetPalette: {
+          kind: entry.kind,
+          collapsed: true,
+          properties: entry.properties,
+          presets: [
+            { id: "graphite", style: entry.style },
+            { id: "red", style: entry.style },
+            { id: "blue", style: entry.style },
+          ],
+          activePresetId: "graphite",
+          onSelectPreset: vi.fn(),
+          onChangePreset: vi.fn(),
+          onAddPreset: () => null,
+          onDeletePreset: vi.fn(),
+          onMovePreset: vi.fn(),
+        },
+        onStyleChange: vi.fn(),
+        onFontStyleToggle: vi.fn(),
+      })));
+      await act(async () => presetButtons(container)[0].click());
+      const palette = container.querySelector<HTMLElement>(
+        ".board-stylebar__free-drawing.is-floating",
+      );
+      expect(palette, entry.kind).not.toBeNull();
+      expect(signature(palette!), entry.kind).toEqual(drawingSignature);
+      const active = palette!.querySelector<HTMLButtonElement>(
+        '.board-stylebar__pen-preset[aria-pressed="true"]',
+      );
+      await act(async () => active?.click());
+      const editor = container.querySelector<HTMLElement>(
+        ".board-stylebar__pen-popover",
+      );
+      expect(editor, `${entry.kind} editor`).not.toBeNull();
+      expect(editor?.querySelector('[aria-label="Толщина: стрелка"]'))
+        .not.toBeNull();
+      expect(editor?.querySelector('[aria-label="Тип линии"]')).not.toBeNull();
+    }
+  });
+
   it("adjusts the hovered preset width by wheel without selecting it or reaching the board", async () => {
     const events = createPaletteEvents();
     await renderPalette(events);
@@ -800,9 +985,21 @@ describe("BoardStyleBar drawing palette configuration", () => {
     expect(buttons[0].style.getPropertyValue("--board-pen-radius")).toBe(
       "16px",
     );
+    expect(buttons[0].style.getPropertyValue(
+      "--board-pen-hover-diameter",
+    )).toBe("30px");
+    expect(buttons[0].style.getPropertyValue(
+      "--board-pen-hover-scale",
+    )).toBe("0.9375");
     expect(buttons[1].style.getPropertyValue("--board-pen-radius")).toBe(
       "0.5px",
     );
+    expect(buttons[1].style.getPropertyValue(
+      "--board-pen-hover-diameter",
+    )).toBe("5px");
+    expect(buttons[1].style.getPropertyValue(
+      "--board-pen-hover-scale",
+    )).toBe("5");
     expect(events.select).not.toHaveBeenCalled();
 
     await act(async () => container.querySelector<HTMLButtonElement>(
@@ -854,7 +1051,13 @@ describe("BoardStyleBar drawing palette configuration", () => {
     expect(container.querySelector('[role="dialog"]')).toBeNull();
     expect(container.querySelectorAll(".board-stylebar__pen-delete"))
       .toHaveLength(3);
-    expect(container.querySelector(".board-stylebar__pen-add")).not.toBeNull();
+    const drawingAdd = container.querySelector(
+      ".board-stylebar__pen-add",
+    );
+    expect(drawingAdd).not.toBeNull();
+    expect(drawingAdd?.parentElement).toBe(
+      container.querySelector(".board-v2__stylebar"),
+    );
 
     buttons = presetButtons(container);
     await act(async () => buttons[0].click());
@@ -946,9 +1149,18 @@ describe("BoardStyleBar drawing palette configuration", () => {
         button: 2,
       }));
     });
-    const color = container.querySelector<HTMLInputElement>(
-      '.board-stylebar__pen-popover [aria-label="Цвет в формате HEX"]',
+    const color = document.body.querySelector<HTMLInputElement>(
+      '[data-board-color-formats-popup="true"] [aria-label="Цвет в формате HEX"]',
     );
+    expect(container.querySelector(
+      ".board-stylebar__pen-popover .board-color-picker__formats",
+    )).toBeNull();
+    await act(async () => {
+      color?.dispatchEvent(pointerEvent("pointerdown", { x: 20 }));
+      color?.focus();
+    });
+    expect(container.querySelector(".board-stylebar__pen-popover"))
+      .not.toBeNull();
     await act(async () => {
       if (!color) throw new Error("Pen HEX input not rendered");
       setInputValue(color, "#abcdefff");
@@ -973,7 +1185,7 @@ describe("BoardStyleBar drawing palette configuration", () => {
         key: "Escape",
       }));
     });
-    expect(container.querySelector(".board-color-picker__formats")).toBeNull();
+    expect(document.body.querySelector(".board-color-picker__formats")).toBeNull();
     expect(container.querySelector(".board-stylebar__pen-popover"))
       .not.toBeNull();
     expect(document.activeElement).toBe(preview);
@@ -1005,11 +1217,11 @@ describe("BoardStyleBar drawing palette configuration", () => {
       ".board-stylebar__palette-toggle",
     )?.click());
 
-    const stylebar = container.querySelector<HTMLElement>(
-      ".board-v2__stylebar",
-    );
     const strip = container.querySelector<HTMLElement>(
       ".board-stylebar__strip",
+    );
+    const stylebar = container.querySelector<HTMLElement>(
+      ".board-v2__stylebar",
     );
     const add = container.querySelector<HTMLButtonElement>(
       ".board-stylebar__pen-add",

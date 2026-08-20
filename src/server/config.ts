@@ -37,6 +37,13 @@ export interface AppConfig {
 
 export type AppConfigOverrides = Partial<AppConfig>;
 
+export const DEVELOPMENT_LIVEKIT_CONFIG = Object.freeze({
+  livekitUrl: "ws://127.0.0.1:7880",
+  livekitApiUrl: "http://127.0.0.1:7880",
+  livekitApiKey: "devkey",
+  livekitApiSecret: "eduri-local-livekit-development-secret",
+});
+
 const DEVELOPMENT_AUTH_LOOKUP_KEY = "eduri-development-lookup-key-change-me";
 const PRODUCTION_AUTH_LOOKUP_KEY_PLACEHOLDERS = new Set([
   DEVELOPMENT_AUTH_LOOKUP_KEY,
@@ -256,12 +263,33 @@ export function loadConfig(overrides: AppConfigOverrides = {}): AppConfig {
   const trustProxy = resolveTrustProxy(overrides.trustProxy, nodeEnv);
   const adminPassword = overrides.adminPassword ?? process.env.ADMIN_PASSWORD ?? (nodeEnv === "production" ? undefined : "change-me-admin");
   const configuredDatabasePath = overrides.databasePath ?? path.join(dataDir, "eduri.sqlite");
-  const configuredLiveKitUrl = optionalValue(overrides.livekitUrl ?? process.env.LIVEKIT_URL);
-  const configuredLiveKitApiUrl = optionalValue(
+  const explicitLiveKitUrl = optionalValue(overrides.livekitUrl ?? process.env.LIVEKIT_URL);
+  const explicitLiveKitApiUrl = optionalValue(
     overrides.livekitApiUrl ?? process.env.LIVEKIT_API_URL,
   );
-  const livekitApiKey = optionalValue(overrides.livekitApiKey ?? process.env.LIVEKIT_API_KEY);
-  const livekitApiSecret = optionalValue(overrides.livekitApiSecret ?? process.env.LIVEKIT_API_SECRET);
+  const explicitLiveKitApiKey = optionalValue(
+    overrides.livekitApiKey ?? process.env.LIVEKIT_API_KEY,
+  );
+  const explicitLiveKitApiSecret = optionalValue(
+    overrides.livekitApiSecret ?? process.env.LIVEKIT_API_SECRET,
+  );
+  const hasExplicitLiveKitConfig = Boolean(
+    explicitLiveKitUrl
+    || explicitLiveKitApiUrl
+    || explicitLiveKitApiKey
+    || explicitLiveKitApiSecret,
+  );
+  const useDevelopmentLiveKitDefaults = (
+    nodeEnv === "development" && !hasExplicitLiveKitConfig
+  );
+  const configuredLiveKitUrl = explicitLiveKitUrl
+    ?? (useDevelopmentLiveKitDefaults ? DEVELOPMENT_LIVEKIT_CONFIG.livekitUrl : undefined);
+  const configuredLiveKitApiUrl = explicitLiveKitApiUrl
+    ?? (useDevelopmentLiveKitDefaults ? DEVELOPMENT_LIVEKIT_CONFIG.livekitApiUrl : undefined);
+  const livekitApiKey = explicitLiveKitApiKey
+    ?? (useDevelopmentLiveKitDefaults ? DEVELOPMENT_LIVEKIT_CONFIG.livekitApiKey : undefined);
+  const livekitApiSecret = explicitLiveKitApiSecret
+    ?? (useDevelopmentLiveKitDefaults ? DEVELOPMENT_LIVEKIT_CONFIG.livekitApiSecret : undefined);
   const hasAnyLiveKitConfig = Boolean(
     configuredLiveKitUrl
     || configuredLiveKitApiUrl

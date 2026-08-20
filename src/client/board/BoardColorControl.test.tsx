@@ -859,7 +859,12 @@ describe("BoardColorControl", () => {
     );
     expect(formatInput).not.toBeNull();
     await act(async () => {
+      formatInput?.dispatchEvent(pointerEvent("pointerdown", { x: 20 }));
       formatInput?.focus();
+    });
+    expect(container.querySelector(".board-color-control__popover"))
+      .not.toBeNull();
+    await act(async () => {
       formatInput?.dispatchEvent(new KeyboardEvent("keydown", {
         bubbles: true,
         cancelable: true,

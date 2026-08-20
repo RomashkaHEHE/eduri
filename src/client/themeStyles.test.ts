@@ -152,7 +152,16 @@ describe("site theme CSS contract", () => {
     );
   });
 
-  it("preserves themed form states, card affordances, and the light sidebar", () => {
+  it("preserves themed form states, flat surfaces, and the light sidebar", () => {
+    const light = declarationsFrom(siteStyles, ":root {");
+    const dark = declarationsFrom(siteStyles, ':root[data-theme="dark"] {');
+    for (const tokens of [light, dark]) {
+      expect(token(tokens, "--shadow-card")).toBe("none");
+      expect(token(tokens, "--shadow-card-hover")).toBe("none");
+      expect(token(tokens, "--shadow-side-panel")).toBe("none");
+      expect(token(tokens, "--shadow-dock")).toBe("none");
+      expect(token(tokens, "--shadow")).toBe("none");
+    }
     expect(siteStyles).toContain(
       "border: 1px solid var(--control-border)",
     );
@@ -206,6 +215,7 @@ describe("Code workspace theme CSS contract", () => {
         .toBeGreaterThanOrEqual(3);
       expect(contrast(token(tokens, "--code-border-strong"), token(tokens, "--code-console-bg")))
         .toBeGreaterThanOrEqual(3);
+      expect(token(tokens, "--code-shadow")).toBe("none");
     }
   });
 

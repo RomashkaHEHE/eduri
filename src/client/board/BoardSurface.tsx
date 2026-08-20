@@ -66,6 +66,7 @@ import {
   reorderObjects,
   resolveObjectStyleDefaults,
   setObjectProperty,
+  setLineObjectGeometry,
   stateVectorsEqual,
   transformObjects,
   compareBoardObjectZOrder,
@@ -89,6 +90,7 @@ import type {
   BoardGesturePreview,
   BoardLaserClearMode,
   BoardLaserPreview,
+  BoardModifierHintAction,
   BoardObjectDraft,
   BoardObjectSnapshot,
   BoardPlacementTool,
@@ -119,6 +121,20 @@ import {
   type BoardToolStyles,
 } from "./toolStylePresets";
 import {
+  TOOL_STYLE_PALETTES_STORAGE_KEY,
+  TOOL_STYLE_PALETTE_TARGETS,
+  activeToolStylePreset,
+  addToolStylePreset,
+  deleteToolStylePreset,
+  loadToolStylePalettes,
+  moveToolStylePreset,
+  patchToolStylePreset,
+  selectToolStylePreset,
+  serializeToolStylePalettes,
+  type ToolStylePaletteTarget,
+  type ToolStylePalettes,
+} from "./toolStylePalettes";
+import {
   changeStyleColorSlot,
   createStyleColorSlot,
   deleteStyleColorSlot,
@@ -148,12 +164,6 @@ import {
   type FreeDrawingPreset,
   type FreeDrawingPresetPatch,
 } from "./freeDrawingPresets";
-import {
-  clampBoardConnectorCurvature,
-  loadBoardConnectorCurvature,
-  persistBoardConnectorCurvature,
-  type BoardConnectorCurvaturePreferences,
-} from "./connectorCurvature";
 import { BoardToolbar } from "./BoardToolbar";
 import {
   loadBoardToolbarPreferences,
@@ -251,6 +261,7 @@ const BOARD_THEME_STORAGE_KEY = "eduri-board-theme";
 export const BOARD_GRID_VISIBILITY_STORAGE_KEY =
   "eduri-board-grid-visible";
 const FREE_DRAWING_PRESET_PERSIST_DELAY_MS = 180;
+const LINE_PRESETS_STORAGE_KEY = "eduri-board-line-presets-v1";
 const STYLE_SETTINGS_PERSIST_DELAY_MS = 180;
 const ZOOM_STEP_FACTOR = 1.1;
 const CAMERA_CENTER_EPSILON_PX = 0.5;
@@ -312,6 +323,40 @@ function initialBoardToolStyles(): BoardToolStyles {
     }
   }
   return loadToolStylePresets(null);
+}
+
+function initialBoardToolStylePalettes(
+  legacyStyles: BoardToolStyles,
+): ToolStylePalettes {
+  if (typeof window !== "undefined") {
+    try {
+      return loadToolStylePalettes(
+        window.localStorage.getItem(TOOL_STYLE_PALETTES_STORAGE_KEY),
+        legacyStyles,
+      );
+    } catch {
+      // Device preset persistence is best-effort and never blocks input.
+    }
+  }
+  return loadToolStylePalettes(null, legacyStyles);
+}
+
+function isToolStylePaletteTarget(
+  value: string,
+): value is ToolStylePaletteTarget {
+  return (TOOL_STYLE_PALETTE_TARGETS as readonly string[]).includes(value);
+}
+
+function persistBoardToolStylePalettes(palettes: ToolStylePalettes): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      TOOL_STYLE_PALETTES_STORAGE_KEY,
+      serializeToolStylePalettes(palettes),
+    );
+  } catch {
+    // Device preset persistence is best-effort and never blocks input.
+  }
 }
 
 function styleValueEqual(left: unknown, right: unknown): boolean {
@@ -1129,13 +1174,13 @@ function initialBoardTheme(): BoardTheme {
 }
 
 function initialBoardGridVisible(): boolean {
-  if (typeof window === "undefined") return true;
+  if (typeof window === "undefined") return false;
   try {
     return window.localStorage.getItem(
       BOARD_GRID_VISIBILITY_STORAGE_KEY,
-    ) !== "false";
+    ) === "true";
   } catch {
-    return true;
+    return false;
   }
 }
 
@@ -1235,6 +1280,21 @@ function initialFreeDrawingPalette(): FreeDrawingPaletteState {
   };
 }
 
+function initialLinePalette(): FreeDrawingPaletteState {
+  let presets = DEFAULT_FREE_DRAWING_PRESETS.map((preset) => ({ ...preset }));
+  if (typeof window !== "undefined") {
+    try {
+      presets = loadFreeDrawingPresets(
+        window.localStorage.getItem(LINE_PRESETS_STORAGE_KEY),
+        null,
+      );
+    } catch {
+      // Device preset persistence is best-effort and never blocks drawing.
+    }
+  }
+  return { presets, activePresetId: presets[0].id };
+}
+
 function persistFreeDrawingPresets(
   presets: readonly FreeDrawingPreset[],
 ): void {
@@ -1242,6 +1302,18 @@ function persistFreeDrawingPresets(
   try {
     window.localStorage.setItem(
       FREE_DRAWING_PRESETS_STORAGE_KEY,
+      serializeFreeDrawingPresets(presets),
+    );
+  } catch {
+    // Device preset persistence is best-effort and never blocks drawing.
+  }
+}
+
+function persistLinePresets(presets: readonly FreeDrawingPreset[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      LINE_PRESETS_STORAGE_KEY,
       serializeFreeDrawingPresets(presets),
     );
   } catch {
@@ -1395,6 +1467,8 @@ export function BoardSurface({
   const [toolbarPreferences, setToolbarPreferences] =
     useState<BoardToolbarPreferences>(loadBoardToolbarPreferences);
   const [penLaserActive, setPenLaserActive] = useState(false);
+  const [modifierHints, setModifierHints] =
+    useState<readonly BoardModifierHintAction[]>([]);
   const appTheme = useOptionalTheme();
   const [localTheme, setLocalTheme] = useState<BoardTheme>(initialBoardTheme);
   const theme: BoardTheme = appTheme?.theme ?? localTheme;
@@ -1412,12 +1486,24 @@ export function BoardSurface({
     freeDrawingPaletteState.activePresetId;
   const freeDrawingPresetsRef = useRef(freeDrawingPresets);
   const freeDrawingPresetPersistTimerRef = useRef<number | null>(null);
+  const [linePaletteState, dispatchLinePalette] = useReducer(
+    reduceFreeDrawingPalette,
+    undefined,
+    initialLinePalette,
+  );
+  const linePaletteStateRef = useRef(linePaletteState);
+  const linePresets = linePaletteState.presets;
+  const linePresetsRef = useRef(linePresets);
+  const linePresetPersistTimerRef = useRef<number | null>(null);
   const [toolStyles, setToolStyles] =
     useState<BoardToolStyles>(initialBoardToolStyles);
   const toolStylesRef = useRef(toolStyles);
   const toolStylePersistTimerRef = useRef<number | null>(null);
-  const [connectorCurvatures, setConnectorCurvatures] =
-    useState<BoardConnectorCurvaturePreferences>(loadBoardConnectorCurvature);
+  const [toolStylePalettes, setToolStylePalettes] = useState<ToolStylePalettes>(
+    () => initialBoardToolStylePalettes(toolStyles),
+  );
+  const toolStylePalettesRef = useRef(toolStylePalettes);
+  const toolStylePalettePersistTimerRef = useRef<number | null>(null);
   const [styleColorPalette, setStyleColorPalette] =
     useState<StyleColorPaletteState>(initialStyleColorPalette);
   const styleColorPaletteRef = useRef(styleColorPalette);
@@ -1445,15 +1531,40 @@ export function BoardSurface({
     ) ?? freeDrawingPresets[0] ?? DEFAULT_FREE_DRAWING_PRESETS[0],
     [activeFreeDrawingPresetId, freeDrawingPresets],
   );
+  const activeLinePreset = useMemo(
+    () => linePresets.find(
+      (preset) => preset.id === linePaletteState.activePresetId,
+    ) ?? linePresets[0] ?? DEFAULT_FREE_DRAWING_PRESETS[0],
+    [linePaletteState.activePresetId, linePresets],
+  );
   const currentStyleTool = tool === "shape" ? shapeKind : tool;
+  const currentStylePaletteTarget = currentStyleTool === "arrow"
+    && isToolStylePaletteTarget(currentStyleTool)
+    ? currentStyleTool
+    : null;
+  const currentStylePalette = currentStylePaletteTarget
+    ? toolStylePalettes[currentStylePaletteTarget]
+    : null;
+  const activeToolPalettePreset = currentStylePaletteTarget
+    ? activeToolStylePreset(toolStylePalettes, currentStylePaletteTarget)
+    : null;
   const currentToolStyle = useMemo(
     () => tool === "pen"
       ? freeDrawingPresetStyle(activeFreeDrawingPreset)
-      : toolStyles[currentStyleTool] ?? defaultBoardToolStyle(currentStyleTool),
-    [activeFreeDrawingPreset, currentStyleTool, tool, toolStyles],
+      : tool === "line"
+        ? freeDrawingPresetStyle(activeLinePreset)
+        : activeToolPalettePreset?.style
+          ?? toolStyles[currentStyleTool]
+          ?? defaultBoardToolStyle(currentStyleTool),
+    [
+      activeFreeDrawingPreset,
+      activeLinePreset,
+      activeToolPalettePreset,
+      currentStyleTool,
+      tool,
+      toolStyles,
+    ],
   );
-  const currentConnectorCurvature =
-    tool === "line" || tool === "arrow" ? connectorCurvatures[tool] : 0;
   const editingRef = useRef(editing);
   const promotedPendingTextRef = useRef(
     new WeakSet<NonNullable<EditingState["pendingText"]>>(),
@@ -1479,7 +1590,10 @@ export function BoardSurface({
   selectionRef.current = selection;
   freeDrawingPaletteStateRef.current = freeDrawingPaletteState;
   freeDrawingPresetsRef.current = freeDrawingPresets;
+  linePaletteStateRef.current = linePaletteState;
+  linePresetsRef.current = linePresets;
   toolStylesRef.current = toolStyles;
+  toolStylePalettesRef.current = toolStylePalettes;
   styleColorPaletteRef.current = styleColorPalette;
 
   useEffect(() => {
@@ -1563,6 +1677,37 @@ export function BoardSurface({
   }, []);
 
   useEffect(() => {
+    if (linePresetPersistTimerRef.current !== null) {
+      window.clearTimeout(linePresetPersistTimerRef.current);
+    }
+    linePresetPersistTimerRef.current = window.setTimeout(() => {
+      linePresetPersistTimerRef.current = null;
+      persistLinePresets(linePresetsRef.current);
+    }, FREE_DRAWING_PRESET_PERSIST_DELAY_MS);
+    return () => {
+      if (linePresetPersistTimerRef.current !== null) {
+        window.clearTimeout(linePresetPersistTimerRef.current);
+        linePresetPersistTimerRef.current = null;
+      }
+    };
+  }, [linePresets]);
+
+  useEffect(() => {
+    const flushLinePresets = () => {
+      if (linePresetPersistTimerRef.current !== null) {
+        window.clearTimeout(linePresetPersistTimerRef.current);
+        linePresetPersistTimerRef.current = null;
+      }
+      persistLinePresets(linePresetsRef.current);
+    };
+    window.addEventListener("pagehide", flushLinePresets);
+    return () => {
+      window.removeEventListener("pagehide", flushLinePresets);
+      flushLinePresets();
+    };
+  }, []);
+
+  useEffect(() => {
     if (toolStylePersistTimerRef.current !== null) {
       window.clearTimeout(toolStylePersistTimerRef.current);
     }
@@ -1577,6 +1722,22 @@ export function BoardSurface({
       }
     };
   }, [toolStyles]);
+
+  useEffect(() => {
+    if (toolStylePalettePersistTimerRef.current !== null) {
+      window.clearTimeout(toolStylePalettePersistTimerRef.current);
+    }
+    toolStylePalettePersistTimerRef.current = window.setTimeout(() => {
+      toolStylePalettePersistTimerRef.current = null;
+      persistBoardToolStylePalettes(toolStylePalettesRef.current);
+    }, STYLE_SETTINGS_PERSIST_DELAY_MS);
+    return () => {
+      if (toolStylePalettePersistTimerRef.current !== null) {
+        window.clearTimeout(toolStylePalettePersistTimerRef.current);
+        toolStylePalettePersistTimerRef.current = null;
+      }
+    };
+  }, [toolStylePalettes]);
 
   useEffect(() => {
     if (styleColorPalettePersistTimerRef.current !== null) {
@@ -1604,7 +1765,12 @@ export function BoardSurface({
         window.clearTimeout(styleColorPalettePersistTimerRef.current);
         styleColorPalettePersistTimerRef.current = null;
       }
+      if (toolStylePalettePersistTimerRef.current !== null) {
+        window.clearTimeout(toolStylePalettePersistTimerRef.current);
+        toolStylePalettePersistTimerRef.current = null;
+      }
       persistToolStylePresets(toolStylesRef.current);
+      persistBoardToolStylePalettes(toolStylePalettesRef.current);
       persistStyleColorPaletteState(styleColorPaletteRef.current);
     };
     window.addEventListener("pagehide", flushStyleSettings);
@@ -1706,6 +1872,94 @@ export function BoardSurface({
       targetIndex,
     });
   }, [applyFreeDrawingPaletteAction]);
+
+  const applyLinePaletteAction = useCallback((action: FreeDrawingPaletteAction) => {
+    linePaletteStateRef.current = reduceFreeDrawingPalette(
+      linePaletteStateRef.current,
+      action,
+    );
+    dispatchLinePalette(action);
+  }, []);
+  const selectLinePreset = useCallback((presetId: string) => {
+    applyLinePaletteAction({ type: "select", presetId });
+  }, [applyLinePaletteAction]);
+  const updateLinePreset = useCallback((presetId: string, patch: FreeDrawingPresetPatch) => {
+    applyLinePaletteAction({ type: "patch", presetId, patch });
+  }, [applyLinePaletteAction]);
+  const addLinePreset = useCallback((): string | null => {
+    const state = linePaletteStateRef.current;
+    const source = state.presets.find((preset) => preset.id === state.activePresetId)
+      ?? state.presets[0];
+    const preset = createFreeDrawingPreset(state.presets, source);
+    if (!preset) return null;
+    applyLinePaletteAction({ type: "add", preset });
+    return preset.id;
+  }, [applyLinePaletteAction]);
+  const removeLinePreset = useCallback((presetId: string) => {
+    applyLinePaletteAction({ type: "delete", presetId });
+  }, [applyLinePaletteAction]);
+  const reorderLinePreset = useCallback((presetId: string, targetIndex: number) => {
+    applyLinePaletteAction({ type: "move", presetId, targetIndex });
+  }, [applyLinePaletteAction]);
+
+  const applyToolStylePaletteUpdate = useCallback((
+    target: ToolStylePaletteTarget,
+    update: (palettes: ToolStylePalettes) => ToolStylePalettes,
+  ) => {
+    const current = toolStylePalettesRef.current;
+    const next = update(current);
+    if (next === current) return;
+    toolStylePalettesRef.current = next;
+    setToolStylePalettes(next);
+    const active = activeToolStylePreset(next, target);
+    setToolStyles((styles) => ({
+      ...styles,
+      [target]: active.style,
+    }));
+  }, []);
+
+  const selectToolPalettePreset = useCallback((
+    target: ToolStylePaletteTarget,
+    presetId: string,
+  ) => {
+    applyToolStylePaletteUpdate(target, (palettes) =>
+      selectToolStylePreset(palettes, target, presetId));
+  }, [applyToolStylePaletteUpdate]);
+
+  const updateToolPalettePreset = useCallback((
+    target: ToolStylePaletteTarget,
+    presetId: string,
+    patch: Readonly<Record<string, unknown>>,
+  ) => {
+    applyToolStylePaletteUpdate(target, (palettes) =>
+      patchToolStylePreset(palettes, target, presetId, patch));
+  }, [applyToolStylePaletteUpdate]);
+
+  const appendToolPalettePreset = useCallback((
+    target: ToolStylePaletteTarget,
+  ): string | null => {
+    const result = addToolStylePreset(toolStylePalettesRef.current, target);
+    if (!result.presetId) return null;
+    applyToolStylePaletteUpdate(target, () => result.palettes);
+    return result.presetId;
+  }, [applyToolStylePaletteUpdate]);
+
+  const removeToolPalettePreset = useCallback((
+    target: ToolStylePaletteTarget,
+    presetId: string,
+  ) => {
+    applyToolStylePaletteUpdate(target, (palettes) =>
+      deleteToolStylePreset(palettes, target, presetId));
+  }, [applyToolStylePaletteUpdate]);
+
+  const reorderToolPalettePreset = useCallback((
+    target: ToolStylePaletteTarget,
+    presetId: string,
+    targetIndex: number,
+  ) => {
+    applyToolStylePaletteUpdate(target, (palettes) =>
+      moveToolStylePreset(palettes, target, presetId, targetIndex));
+  }, [applyToolStylePaletteUpdate]);
 
   const updateStyleColorPalette = useCallback((
     update: (state: StyleColorPaletteState) => StyleColorPaletteState,
@@ -2095,14 +2349,6 @@ export function BoardSurface({
       visible: [...preferences.visible],
     });
   }, []);
-
-  const changeConnectorCurvature = useCallback((value: number) => {
-    if (tool !== "line" && tool !== "arrow") return;
-    const normalized = clampBoardConnectorCurvature(value);
-    setConnectorCurvatures((current) => current[tool] === normalized
-      ? current
-      : { ...current, [tool]: normalized });
-  }, [tool]);
 
   const selectAllObjects = useCallback(() => {
     const selected = [...objects.entries()]
@@ -3029,6 +3275,12 @@ export function BoardSurface({
         }
         undoRef.current.endGesture();
       },
+      onEditLineGeometry: (id, geometry) => {
+        if (!readOnlyRef.current && objects.has(id)) {
+          setLineObjectGeometry(document, id, geometry, localOriginRef.current);
+        }
+        undoRef.current.endGesture();
+      },
       onEditObject: (id) => {
         if (readOnlyRef.current) return;
         const record = objects.get(id);
@@ -3053,6 +3305,7 @@ export function BoardSurface({
       onGesturePreviewChange: (preview) => {
         scheduleLiveAwareness({ gesturePreview: preview });
       },
+      onModifierHintsChange: setModifierHints,
       onContextMenu: openContextMenu,
     }, {
       readOnly: readOnlyRef.current,
@@ -3066,7 +3319,6 @@ export function BoardSurface({
     renderer.setShapeKind(shapeKind);
     renderer.setTheme(theme);
     renderer.setCreationStyle(currentToolStyle);
-    renderer.setConnectorCurvature(currentConnectorCurvature);
     const assetIdByObject = assetIdByObjectRef.current;
     const objectIdsByAsset = objectIdsByAssetRef.current;
     assetIdByObject.clear();
@@ -3217,14 +3469,6 @@ export function BoardSurface({
   useEffect(() => {
     rendererRef.current?.setCreationStyle(currentToolStyle);
   }, [currentToolStyle]);
-
-  useEffect(() => {
-    rendererRef.current?.setConnectorCurvature(currentConnectorCurvature);
-  }, [currentConnectorCurvature]);
-
-  useEffect(() => {
-    persistBoardConnectorCurvature(connectorCurvatures);
-  }, [connectorCurvatures]);
 
   useEffect(() => {
     persistBoardToolbarPreferences(toolbarPreferences);
@@ -3540,6 +3784,12 @@ export function BoardSurface({
         } else {
           changeLayer(event.shiftKey ? "back" : "backward");
         }
+      } else if (
+        (event.code === "Delete" || event.code === "Backspace")
+        && !readOnly
+        && rendererRef.current?.deleteSelectedLinePoint?.()
+      ) {
+        event.preventDefault();
       } else if ((event.code === "Delete" || event.code === "Backspace") && !readOnly && selection.length) {
         event.preventDefault();
         deleteSelection();
@@ -3578,6 +3828,10 @@ export function BoardSurface({
         && event.code === "Enter"
         && selectionRef.current.length === 1
       ) {
+        if (rendererRef.current?.enterLinePointEditing?.()) {
+          event.preventDefault();
+          return;
+        }
         const id = selectionRef.current[0];
         const record = objects.get(id);
         if (objects.has(id)) {
@@ -3600,6 +3854,10 @@ export function BoardSurface({
       } else if (event.code === "Escape") {
         event.preventDefault();
         activeNudgeKeysRef.current.clear();
+        if (rendererRef.current?.exitLinePointEditing?.()) {
+          undo.endGesture();
+          return;
+        }
         rendererRef.current?.cancelInteraction();
         undo.endGesture();
         if (editingRef.current) {
@@ -4024,6 +4282,7 @@ export function BoardSurface({
       <BoardToolbar
         activeTool={tool}
         penLaserActive={penLaserActive}
+        modifierHints={editing === null && contextMenu === null ? modifierHints : []}
         readOnly={readOnly}
         imageAvailable={Boolean(insertImage)}
         preferences={toolbarPreferences}
@@ -4037,26 +4296,74 @@ export function BoardSurface({
           values={styleBarValues}
           mixed={styleBarMixed}
           fontStyleState={styleBarFontStyleState}
-          connectorCurvature={
-            !editingSelectionStyle && (tool === "line" || tool === "arrow")
-              ? {
-                  value: currentConnectorCurvature,
-                  onChange: changeConnectorCurvature,
-                }
-              : undefined
-          }
           shapeKind={tool === "shape" ? {
             value: shapeKind,
             onChange: setShapeKind,
           } : undefined}
-          freeDrawingPalette={tool === "pen" ? {
-            presets: freeDrawingPresets,
+          stylePresetPalette={tool === "pen" ? {
+            kind: "drawing",
+            properties: ["stroke", "strokeWidth", "opacity"],
+            presets: freeDrawingPresets.map((preset) => ({
+              id: preset.id,
+              style: freeDrawingPresetStyle(preset),
+            })),
             activePresetId: activeFreeDrawingPreset.id,
             onSelectPreset: selectFreeDrawingPreset,
-            onChangePreset: updateFreeDrawingPreset,
+            onChangePreset: (presetId, patch) => updateFreeDrawingPreset(
+              presetId,
+              patch as FreeDrawingPresetPatch,
+            ),
             onAddPreset: addFreeDrawingPreset,
             onDeletePreset: removeFreeDrawingPreset,
             onMovePreset: reorderFreeDrawingPreset,
+          } : tool === "line" ? {
+            kind: "line",
+            collapsed: true,
+            properties: ["stroke", "strokeWidth", "opacity"],
+            presets: linePresets.map((preset) => ({
+              id: preset.id,
+              style: freeDrawingPresetStyle(preset),
+            })),
+            activePresetId: activeLinePreset.id,
+            onSelectPreset: selectLinePreset,
+            onChangePreset: (presetId, patch) => updateLinePreset(
+              presetId,
+              patch as FreeDrawingPresetPatch,
+            ),
+            onAddPreset: addLinePreset,
+            onDeletePreset: removeLinePreset,
+            onMovePreset: reorderLinePreset,
+          } : !editingSelectionStyle
+            && currentStylePaletteTarget
+            && currentStylePalette
+            && activeToolPalettePreset ? {
+            kind: "arrow",
+            collapsed: true,
+            properties: boardToolStyleKeys(currentStylePaletteTarget),
+            presets: currentStylePalette.presets,
+            activePresetId: activeToolPalettePreset.id,
+            onSelectPreset: (presetId) => selectToolPalettePreset(
+              currentStylePaletteTarget,
+              presetId,
+            ),
+            onChangePreset: (presetId, patch) => updateToolPalettePreset(
+              currentStylePaletteTarget,
+              presetId,
+              patch,
+            ),
+            onAddPreset: () => appendToolPalettePreset(
+              currentStylePaletteTarget,
+            ),
+            onDeletePreset: (presetId) => removeToolPalettePreset(
+              currentStylePaletteTarget,
+              presetId,
+            ),
+            onMovePreset: (presetId, targetIndex) =>
+              reorderToolPalettePreset(
+                currentStylePaletteTarget,
+                presetId,
+                targetIndex,
+              ),
           } : undefined}
           sharedColorPalette={{
             slots: styleColorPalette.slots,
@@ -4072,6 +4379,9 @@ export function BoardSurface({
               ? selectionStyle.allowTransparentFill
               : tool !== "text"
           }
+          strokeColorLabel={!editingSelectionStyle && tool === "shape"
+            ? "Цвет контура"
+            : "Цвет линии"}
           fillColorLabel={editingSelectionStyle
             ? selectionStyle.fillColorLabel
             : tool === "text" ? "Цвет текста" : "Цвет заливки"}

@@ -10,7 +10,9 @@ import {
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
+  type RefObject,
 } from "react";
+import { createPortal } from "react-dom";
 
 export interface BoardColorPickerAlphaControl {
   readonly value: number;
@@ -341,6 +343,7 @@ interface BoardColorFormatsProps {
   readonly alphaEnabled: boolean;
   readonly alphaBounds: AlphaBounds;
   readonly focusFirstInput: boolean;
+  readonly triggerRef: RefObject<HTMLButtonElement | null>;
   readonly onApply: (color: HsvaColor) => void;
   readonly onClose: () => void;
 }
@@ -351,6 +354,7 @@ function BoardColorFormats({
   alphaEnabled,
   alphaBounds,
   focusFirstInput,
+  triggerRef,
   onApply,
   onClose,
 }: BoardColorFormatsProps) {
@@ -377,6 +381,73 @@ function BoardColorFormats({
   } | null>(null);
 
   useLayoutEffect(() => {
+    const positionPopup = () => {
+      const popup = rootRef.current;
+      const trigger = triggerRef.current;
+      if (!popup || !trigger) return;
+
+      const margin = 8;
+      const gap = 8;
+      const triggerRect = trigger.getBoundingClientRect();
+      const pickerRect = trigger.closest<HTMLElement>(".board-color-picker")
+        ?.getBoundingClientRect() ?? triggerRect;
+      const measuredBoardRect = trigger.closest<HTMLElement>(".board-v2")
+        ?.getBoundingClientRect();
+      const boardRect = measuredBoardRect
+        && measuredBoardRect.width >= 32
+        && measuredBoardRect.height >= 32
+          ? measuredBoardRect
+          : null;
+      const boundaryLeft = Math.max(margin, boardRect?.left ?? margin);
+      const boundaryRight = Math.min(
+        window.innerWidth - margin,
+        boardRect?.right ?? window.innerWidth - margin,
+      );
+      const boundaryTop = Math.max(margin, boardRect?.top ?? margin);
+      const boundaryBottom = Math.min(
+        window.innerHeight - margin,
+        boardRect?.bottom ?? window.innerHeight - margin,
+      );
+      const width = Math.min(286, Math.max(0, boundaryRight - boundaryLeft));
+      popup.style.width = `${Math.floor(width)}px`;
+      popup.style.maxHeight = `${Math.max(
+        0,
+        Math.floor(boundaryBottom - boundaryTop),
+      )}px`;
+
+      const measuredHeight = popup.offsetHeight || popup.scrollHeight;
+      const rightSpace = boundaryRight - pickerRect.right - gap;
+      const leftSpace = pickerRect.left - boundaryLeft - gap;
+      const placeLeft = leftSpace >= width || leftSpace >= rightSpace;
+      const unclampedLeft = placeLeft
+        ? pickerRect.left - gap - width
+        : pickerRect.right + gap;
+      const left = Math.max(
+        boundaryLeft,
+        Math.min(boundaryRight - width, unclampedLeft),
+      );
+      const centeredTop = triggerRect.top
+        + (triggerRect.height - measuredHeight) / 2;
+      const top = Math.max(
+        boundaryTop,
+        Math.min(boundaryBottom - measuredHeight, centeredTop),
+      );
+
+      popup.style.left = `${Math.round(left)}px`;
+      popup.style.top = `${Math.round(top)}px`;
+      popup.dataset.positioned = "true";
+    };
+
+    positionPopup();
+    window.addEventListener("resize", positionPopup);
+    window.addEventListener("scroll", positionPopup, true);
+    return () => {
+      window.removeEventListener("resize", positionPopup);
+      window.removeEventListener("scroll", positionPopup, true);
+    };
+  }, [triggerRef]);
+
+  useLayoutEffect(() => {
     if (focusFirstInput) firstInputRef.current?.focus({ preventScroll: true });
   }, [focusFirstInput]);
 
@@ -389,8 +460,13 @@ function BoardColorFormats({
 
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
-      if (event.target instanceof Node && rootRef.current?.contains(event.target)) {
-        return;
+      if (event.target instanceof Node) {
+        if (
+          rootRef.current?.contains(event.target)
+          || triggerRef.current?.contains(event.target)
+        ) {
+          return;
+        }
       }
       const focused = document.activeElement;
       if (focused instanceof HTMLElement && rootRef.current?.contains(focused)) {
@@ -400,12 +476,12 @@ function BoardColorFormats({
     };
     document.addEventListener("pointerdown", onPointerDown, true);
     return () => document.removeEventListener("pointerdown", onPointerDown, true);
-  }, [onClose]);
+  }, [onClose, triggerRef]);
 
-  const apply = (kind: FormatKind): boolean => {
+  const apply = (kind: FormatKind, source = drafts[kind]): boolean => {
     const parsed = parseFormatDraft(
       kind,
-      drafts[kind],
+      source,
       color,
       alphaEnabled,
       alphaBounds,
@@ -431,6 +507,7 @@ function BoardColorFormats({
       className="board-color-picker__formats"
       role="dialog"
       aria-label="Форматы цвета"
+      data-board-color-formats-popup="true"
       onContextMenu={(event) => event.stopPropagation()}
     >
       {(["rgb", "hsv", "hex"] as const).map((kind) => (
@@ -457,10 +534,17 @@ function BoardColorFormats({
               if (event.key !== "Enter") return;
               event.preventDefault();
               event.stopPropagation();
-              if (dirty[kind] && apply(kind)) event.currentTarget.select();
+              if (
+                (dirty[kind] || event.currentTarget.value !== formatted[kind])
+                && apply(kind, event.currentTarget.value)
+              ) {
+                event.currentTarget.select();
+              }
             }}
-            onBlur={() => {
-              if (dirty[kind]) apply(kind);
+            onBlur={(event) => {
+              if (dirty[kind] || event.currentTarget.value !== formatted[kind]) {
+                apply(kind, event.currentTarget.value);
+              }
             }}
           />
           <button
@@ -1168,6 +1252,14 @@ export function BoardColorPicker({
           aria-expanded={formatsOpen}
           aria-controls={formatsOpen ? formatsId : undefined}
           title="Форматы цвета"
+          onClick={(event) => {
+            event.stopPropagation();
+            if (formatsOpen) {
+              closeFormats();
+            } else {
+              openFormats(false);
+            }
+          }}
           onContextMenu={(event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -1237,17 +1329,18 @@ export function BoardColorPicker({
         </div>
       </div>
 
-      {formatsOpen && (
+      {formatsOpen && createPortal((
         <BoardColorFormats
           id={formatsId}
           color={displayedHsva}
           alphaEnabled={alphaEnabled}
           alphaBounds={alphaBounds}
           focusFirstInput={formatsOpenedByKeyboardRef.current}
+          triggerRef={previewRef}
           onApply={applyFormat}
           onClose={closeFormats}
         />
-      )}
+      ), previewRef.current?.closest(".board-v2") ?? document.body)}
     </div>
   );
 }

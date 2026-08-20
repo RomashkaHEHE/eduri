@@ -165,7 +165,7 @@ describe("OnlineProfileProvider", () => {
     expect(window.localStorage.getItem(ONLINE_PROFILE_STORAGE_KEY)).toBeNull();
   });
 
-  it("gates an unconfigured online view with the full color picker", async () => {
+  it("suggests a profile with a phantom default and allows skipping it", async () => {
     await act(async () => {
       root.render(createElement(
         OnlineProfileProvider,
@@ -187,36 +187,37 @@ describe("OnlineProfileProvider", () => {
     );
     expect(state?.dataset.configured).toBe("false");
     expect(dialog).not.toBeNull();
-    expect(dialog?.querySelector('[aria-label="Закрыть"]')).toBeNull();
-    expect(nameInput?.value).toBe("Рома");
+    expect(dialog?.querySelector('[aria-label="Закрыть"]')).not.toBeNull();
+    expect(nameInput?.value).toBe("");
+    expect(nameInput?.placeholder).toBe("Рома");
     expect(dialog?.querySelector(".board-color-picker")).not.toBeNull();
     expect(dialog?.querySelector('input[aria-label="Оттенок"]')).not.toBeNull();
     expect(dialog?.querySelector('input[type="color"]')).toBeNull();
 
     await act(async () => {
-      document.dispatchEvent(new KeyboardEvent("keydown", {
-        bubbles: true,
-        key: "Escape",
-      }));
       document.body.querySelector<HTMLElement>(".modal-backdrop")
         ?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
     });
-    expect(document.body.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    expect(state?.dataset.configured).toBe("false");
+    expect(state?.dataset.name).toBe("Рома");
+    expect(window.localStorage.getItem(ONLINE_PROFILE_STORAGE_KEY)).toBeNull();
 
     await act(async () => {
-      dialog?.querySelector<HTMLButtonElement>('button[type="submit"]')?.click();
+      container.querySelector<HTMLButtonElement>(".online-profile-button")?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      document.body.querySelector<HTMLButtonElement>(
+        '[role="dialog"] [aria-label="Закрыть"]',
+      )?.click();
     });
 
     expect(document.body.querySelector('[role="dialog"]')).toBeNull();
-    expect(state?.dataset.configured).toBe("true");
+    expect(state?.dataset.configured).toBe("false");
     expect(state?.dataset.name).toBe("Рома");
     expect(state?.dataset.color).toBe(DEFAULT_ONLINE_PROFILE_COLOR);
-    expect(parseOnlineProfileStorage(
-      window.localStorage.getItem(ONLINE_PROFILE_STORAGE_KEY),
-    )).toEqual({
-      displayName: "Рома",
-      color: DEFAULT_ONLINE_PROFILE_COLOR,
-    });
+    expect(window.localStorage.getItem(ONLINE_PROFILE_STORAGE_KEY)).toBeNull();
   });
 
   it("releases the mandatory dialog when the online session ends", async () => {

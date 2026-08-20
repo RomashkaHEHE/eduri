@@ -232,6 +232,14 @@ Pyodide. После изменения любого runtime/static маршру�
 Сертификат `eduri.ru` монтируется read-only из `/etc/letsencrypt`; отдельный
 поддомен не требуется.
 
+Локальный `npm run dev` не использует production Compose, сертификаты или TURN.
+Он загружает закреплённый LiveKit `1.13.4` с проверкой SHA-256 в игнорируемый
+`.cache/livekit/`, запускает `ops/livekit/livekit.dev.yaml` только на loopback и
+использует в development API отдельную локальную пару ключей по умолчанию. Для ручного запуска только
+SFU используйте `npm run dev:call`; совместимый заранее установленный бинарник
+можно указать через `LIVEKIT_DEV_BINARY`. Проверка production TURN/NAT остаётся
+обязательной на staging и не заменяется локальным звонком.
+
 `room.auto_create` обязательно остаётся `false`. App после проверки
 session/capability и membership явно создаёт lesson/guest room через management
 RPC на приватном `LIVEKIT_API_URL`, повторно проверяет авторизацию после RPC и только затем выпускает короткий

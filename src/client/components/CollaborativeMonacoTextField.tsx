@@ -106,9 +106,9 @@ export function CollaborativeMonacoTextField({
     },
     wordWrap: "on" as const,
     multiCursorLimit: CODE_SYNC_LIMITS.maxYTextSelections,
-    fontSize: 11,
-    lineHeight: 16,
-    padding: { top: 6, bottom: 6 },
+    fontSize: 13,
+    lineHeight: 19,
+    padding: { top: 4, bottom: 4 },
     ariaLabel,
   }), [ariaLabel, readOnly]);
 

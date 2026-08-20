@@ -9,7 +9,6 @@ import {
   Palette,
   Plus,
   Square,
-  Spline,
   X,
 } from "lucide-react";
 import {
@@ -31,8 +30,6 @@ import {
   FREE_DRAWING_STROKE_WIDTH_MAX,
   FREE_DRAWING_STROKE_WIDTH_MIN,
   FREE_DRAWING_STROKE_WIDTH_STEP,
-  type FreeDrawingPreset,
-  type FreeDrawingPresetPatch,
 } from "./freeDrawingPresets";
 import { BoardDashControl } from "./BoardDashControl";
 import {
@@ -40,26 +37,29 @@ import {
   type BoardColorPaletteSlot,
 } from "./BoardColorControl";
 import { BoardColorPicker } from "./BoardColorPicker";
+import { BoardStrokeWidthControl } from "./BoardStrokeWidthControl";
 import { DEFAULT_STYLE_COLOR_SLOTS } from "./styleColorPalette";
-import {
-  BOARD_CONNECTOR_CURVATURE_MAX,
-  BOARD_CONNECTOR_CURVATURE_MIN,
-  BOARD_CONNECTOR_CURVATURE_STEP,
-  clampBoardConnectorCurvature,
-} from "./connectorCurvature";
 import type { BoardShapeKind } from "./rendering/types";
 
 export type BoardLayerDirection = "front" | "forward" | "backward" | "back";
 export type BoardFontStyleToken = "bold" | "italic";
 export type BoardToggleState = boolean | "mixed";
 
-export interface BoardFreeDrawingPalette {
-  readonly presets: readonly FreeDrawingPreset[];
+export interface BoardStylePalettePreset {
+  readonly id: string;
+  readonly style: Readonly<Record<string, unknown>>;
+}
+
+export interface BoardStylePresetPalette {
+  readonly kind?: "drawing" | "line" | "arrow";
+  readonly collapsed?: boolean;
+  readonly properties?: readonly string[];
+  readonly presets: readonly BoardStylePalettePreset[];
   readonly activePresetId: string;
   readonly onSelectPreset: (presetId: string) => void;
   readonly onChangePreset: (
     presetId: string,
-    patch: FreeDrawingPresetPatch,
+    patch: Readonly<Record<string, unknown>>,
   ) => void;
   readonly onAddPreset: () => string | null;
   readonly onDeletePreset: (presetId: string) => void;
@@ -83,14 +83,11 @@ export interface BoardStyleBarProps {
   readonly fontStyleState: Readonly<
     Record<BoardFontStyleToken, BoardToggleState>
   >;
-  readonly freeDrawingPalette?: BoardFreeDrawingPalette;
+  readonly stylePresetPalette?: BoardStylePresetPalette;
   readonly sharedColorPalette?: BoardSharedColorPalette;
   readonly allowTransparentFill?: boolean;
+  readonly strokeColorLabel?: string;
   readonly fillColorLabel?: string;
-  readonly connectorCurvature?: {
-    readonly value: number;
-    readonly onChange: (value: number) => void;
-  };
   readonly shapeKind?: {
     readonly value: BoardShapeKind;
     readonly onChange: (value: BoardShapeKind) => void;
@@ -123,6 +120,7 @@ const COLOR_NAMES: Readonly<Record<string, string>> = {
 };
 
 const FONT_FAMILY_SUGGESTIONS = [
+  // Each offered family has Cyrillic coverage; fallbacks preserve it on older OSes.
   { value: "Inter, Arial, sans-serif", label: "Inter" },
   { value: "Georgia, Times New Roman, serif", label: "Georgia" },
   {
@@ -226,6 +224,19 @@ function compactNumber(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
 }
 
+function styleWithFontToken(
+  value: string,
+  token: BoardFontStyleToken,
+  enabled: boolean,
+): string {
+  const tokens = new Set(value === "normal" ? [] : value.split(/\s+/u));
+  if (enabled) tokens.add(token);
+  else tokens.delete(token);
+  const ordered = (["bold", "italic"] as const).filter((entry) =>
+    tokens.has(entry));
+  return ordered.length > 0 ? ordered.join(" ") : "normal";
+}
+
 function stepFreeDrawingStrokeWidth(
   current: number,
   direction: -1 | 1,
@@ -241,16 +252,69 @@ function stepFreeDrawingStrokeWidth(
 }
 
 function freeDrawingPresetLabel(
-  preset: FreeDrawingPreset,
+  preset: BoardStylePalettePreset,
   index: number,
+  noun = "Перо",
 ): string {
-  const color = COLOR_NAMES[preset.stroke] ?? preset.stroke.toUpperCase();
-  return [
-    `Перо ${index + 1}`,
+  const primaryColor = typeof preset.style.stroke === "string"
+    ? preset.style.stroke
+    : typeof preset.style.fill === "string"
+      ? preset.style.fill
+      : "#17212b";
+  const color = COLOR_NAMES[primaryColor] ?? primaryColor.toUpperCase();
+  const parts = [
+    `${noun} ${index + 1}`,
     color,
-    `толщина ${compactNumber(preset.strokeWidth)}`,
-    `непрозрачность ${Math.round(preset.opacity * 100)}%`,
-  ].join(", ");
+  ];
+  if (typeof preset.style.strokeWidth === "number") {
+    parts.push(`толщина ${compactNumber(preset.style.strokeWidth)}`);
+  }
+  if (typeof preset.style.opacity === "number") {
+    parts.push(`непрозрачность ${Math.round(preset.style.opacity * 100)}%`);
+  }
+  return parts.join(", ");
+}
+
+const STYLE_PALETTE_NAMES = Object.freeze({
+  drawing: "Перо",
+  line: "Линия",
+  arrow: "Стрелка",
+} as const);
+
+function palettePreviewStyle(
+  preset: BoardStylePalettePreset,
+): Readonly<{
+  color: string;
+  fill: string;
+  opacity: number;
+  radius: number;
+  hoverDiameter: number;
+  hoverScale: number;
+}> {
+  const stroke = typeof preset.style.stroke === "string"
+    ? preset.style.stroke
+    : null;
+  const fill = typeof preset.style.fill === "string"
+    ? preset.style.fill
+    : null;
+  const width = typeof preset.style.strokeWidth === "number"
+    ? preset.style.strokeWidth
+    : typeof preset.style.fontSize === "number"
+      ? Math.max(2, Math.min(12, preset.style.fontSize / 4))
+      : 2.5;
+  const diameter = Math.min(32, width * 2);
+  const hoverShrinks = diameter + 4 > 32;
+  const hoverDiameter = hoverShrinks ? diameter - 2 : diameter + 4;
+  return {
+    color: stroke ?? fill ?? "#17212b",
+    fill: fill ?? stroke ?? "#17212b",
+    opacity: typeof preset.style.opacity === "number"
+      ? preset.style.opacity
+      : 1,
+    radius: width,
+    hoverDiameter,
+    hoverScale: hoverDiameter / diameter,
+  };
 }
 
 function BoardFontFamilyControl({
@@ -277,10 +341,6 @@ function BoardFontFamilyControl({
   const selectedIndex = FONT_FAMILY_SUGGESTIONS.findIndex(
     (option) => option.value === displayedValue,
   );
-  const triggerLabel = mixed
-    ? "Смешанный"
-    : knownFamily?.label ?? "Выберите шрифт";
-  const previewFont = !mixed ? knownFamily?.value : undefined;
 
   const closeMenu = useCallback((restoreFocus: boolean) => {
     setOpen(false);
@@ -367,7 +427,7 @@ function BoardFontFamilyControl({
         boardRect?.bottom ?? window.innerHeight - margin,
       );
       const width = Math.min(
-        224,
+        168,
         Math.max(0, boundaryRight - boundaryLeft),
       );
       const measuredHeight = listbox.scrollHeight || listbox.offsetHeight;
@@ -422,7 +482,7 @@ function BoardFontFamilyControl({
             : undefined}
           title={mixed
             ? "Шрифт: смешанные значения"
-            : knownFamily?.label ?? "Выберите шрифт из списка"}
+            : knownFamily ? `Шрифт: ${knownFamily.label}` : "Выберите шрифт из списка"}
           onClick={() => {
             if (open) closeMenu(false);
             else openMenu();
@@ -515,48 +575,52 @@ function BoardFontFamilyControl({
         >
           <span
             className="board-font-family-control__current"
-            style={previewFont ? { fontFamily: previewFont } : undefined}
+            style={knownFamily ? { fontFamily: knownFamily.value } : undefined}
           >
-            {triggerLabel}
+            Шрифт
           </span>
           <ChevronDown size={13} aria-hidden="true" />
         </button>
         {open && createPortal((
-          <div
-            ref={listboxRef}
-            id={listboxId}
-            className="board-font-family-menu"
-            role="listbox"
-            aria-label="Выбор шрифта"
-          >
-            {FONT_FAMILY_SUGGESTIONS.map((option, index) => (
-              <button
-                key={option.value}
-                id={`${listboxId}-option-${index}`}
-                type="button"
-                role="option"
-                tabIndex={-1}
-                className={index === activeIndex ? "is-active" : undefined}
-                aria-selected={!mixed && option.value === displayedValue}
-                data-font-family={option.value}
-                onPointerDown={(event) => event.preventDefault()}
-                onPointerMove={() => setActiveIndex(index)}
-                onClick={() => chooseOption(index)}
-              >
-                <span className="board-font-family-menu__check">
-                  {!mixed && option.value === displayedValue && (
-                    <Check size={14} aria-hidden="true" />
-                  )}
-                </span>
-                <span
-                  className="board-font-family-menu__label"
-                  style={{ fontFamily: option.value }}
+          <>
+            <div
+              ref={listboxRef}
+              id={listboxId}
+              className="board-font-family-menu"
+              role="listbox"
+              aria-label="Выбор шрифта"
+            >
+              {FONT_FAMILY_SUGGESTIONS.map((option, index) => (
+                <button
+                  key={option.value}
+                  id={`${listboxId}-option-${index}`}
+                  type="button"
+                  role="option"
+                  tabIndex={-1}
+                  className={index === activeIndex ? "is-active" : undefined}
+                  aria-label={option.label}
+                  aria-selected={!mixed && option.value === displayedValue}
+                  data-font-family={option.value}
+                  onPointerDown={(event) => event.preventDefault()}
+                  onPointerEnter={() => setActiveIndex(index)}
+                  onPointerMove={() => setActiveIndex(index)}
+                  onClick={() => chooseOption(index)}
                 >
-                  {option.label}
-                </span>
-              </button>
-            ))}
-          </div>
+                  <span className="board-font-family-menu__check">
+                    {!mixed && option.value === displayedValue && (
+                      <Check size={14} aria-hidden="true" />
+                    )}
+                  </span>
+                  <span
+                    className="board-font-family-menu__label"
+                    style={{ fontFamily: option.value }}
+                  >
+                    {option.label}
+                  </span>
+                </button>
+              ))}
+            </div>
+          </>
         ), rootRef.current?.closest(".board-v2") ?? document.body)}
       </div>
   );
@@ -567,11 +631,11 @@ export function BoardStyleBar({
   values,
   mixed,
   fontStyleState,
-  freeDrawingPalette,
+  stylePresetPalette: freeDrawingPalette,
   sharedColorPalette,
   allowTransparentFill = true,
+  strokeColorLabel = "Цвет линии",
   fillColorLabel = "Цвет заливки",
-  connectorCurvature,
   shapeKind,
   hideOpacity = false,
   showFillPropertyIcon = true,
@@ -584,6 +648,8 @@ export function BoardStyleBar({
   const stripRef = useRef<HTMLDivElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const paletteToggleRef = useRef<HTMLButtonElement>(null);
+  const paletteTrackRef = useRef<HTMLDivElement>(null);
+  const collapsedMainPresetRef = useRef<HTMLButtonElement>(null);
   const presetButtonsRef = useRef(new Map<string, HTMLButtonElement>());
   const paletteDragRef = useRef<PaletteDragState | null>(null);
   const paletteDragFrameRef = useRef<number | null>(null);
@@ -601,6 +667,7 @@ export function BoardStyleBar({
   } | null>(null);
   const [openPresetId, setOpenPresetId] = useState<string | null>(null);
   const [paletteEditing, setPaletteEditing] = useState(false);
+  const [paletteChooserOpen, setPaletteChooserOpen] = useState(false);
   const [dragPreview, setDragPreview] = useState<PaletteDragPreview | null>(
     null,
   );
@@ -629,12 +696,38 @@ export function BoardStyleBar({
   const openPreset = freeDrawingPalette?.presets.find(
     (preset) => preset.id === openPresetId,
   );
+  const activePalettePreset = freeDrawingPalette?.presets.find(
+    (preset) => preset.id === freeDrawingPalette.activePresetId,
+  );
+  const activePalettePresetIndex = Math.max(
+    0,
+    freeDrawingPalette?.presets.findIndex(
+      (preset) => preset.id === freeDrawingPalette.activePresetId,
+    ) ?? 0,
+  );
   const displayedPresets = freeDrawingPalette?.presets ?? [];
+  const paletteKind = freeDrawingPalette?.kind ?? "drawing";
+  const paletteItemName = STYLE_PALETTE_NAMES[paletteKind];
+  const paletteProperties = new Set(
+    freeDrawingPalette
+      ? freeDrawingPalette.properties
+        ?? ["stroke", "strokeWidth", "opacity"]
+      : [],
+  );
+  const activePalettePreview = activePalettePreset
+    ? palettePreviewStyle(activePalettePreset)
+    : null;
 
   useLayoutEffect(() => {
     freeDrawingPaletteRef.current = freeDrawingPalette;
     if (!freeDrawingPalette) paletteWheelRef.current = null;
   }, [freeDrawingPalette]);
+
+  useEffect(() => {
+    setPaletteChooserOpen(false);
+    setOpenPresetId(null);
+    setPaletteEditing(false);
+  }, [freeDrawingPalette?.kind]);
 
   useEffect(() => {
     const strip = stripRef.current;
@@ -662,6 +755,11 @@ export function BoardStyleBar({
         ".board-stylebar__pen-preset",
       );
       if (!button || !strip.contains(button)) return;
+      const palette = freeDrawingPaletteRef.current;
+      const widthAdjustable = palette
+        && (palette.properties ?? ["stroke", "strokeWidth", "opacity"])
+          .includes("strokeWidth");
+      if (!widthAdjustable) return;
       if (browserPinch) {
         event.preventDefault();
         event.stopPropagation();
@@ -676,7 +774,6 @@ export function BoardStyleBar({
       const presetId = button.closest<HTMLElement>(
         "[data-pen-preset-id]",
       )?.dataset.penPresetId;
-      const palette = freeDrawingPaletteRef.current;
       const preset = palette?.presets.find((entry) => entry.id === presetId);
       if (!palette || !preset) return;
 
@@ -685,13 +782,16 @@ export function BoardStyleBar({
       const previous = paletteWheelRef.current;
       const sameBurst = previous?.presetId === preset.id
         && now - previous.lastEventAt <= PALETTE_WHEEL_IDLE_MS;
+      const renderedWidth = typeof preset.style.strokeWidth === "number"
+        ? preset.style.strokeWidth
+        : FREE_DRAWING_STROKE_WIDTH_MIN;
       const currentWidth = sameBurst
         && (
-          preset.strokeWidth === previous.renderedWidth
-          || preset.strokeWidth === previous.optimisticWidth
+          renderedWidth === previous.renderedWidth
+          || renderedWidth === previous.optimisticWidth
         )
         ? previous.optimisticWidth
-        : preset.strokeWidth;
+        : renderedWidth;
       let residualPx = sameBurst
         && previous.deltaDirection === deltaDirection
         ? previous.residualPx
@@ -719,7 +819,7 @@ export function BoardStyleBar({
         deltaDirection,
         residualPx,
         lastEventAt: now,
-        renderedWidth: preset.strokeWidth,
+        renderedWidth,
         optimisticWidth: nextWidth,
       };
       if (!advances || nextWidth === currentWidth) return;
@@ -857,7 +957,9 @@ export function BoardStyleBar({
       setDraggingPresetId(drag.presetId);
     }
 
-    const strip = stripRef.current;
+    const strip = freeDrawingPaletteRef.current?.collapsed
+      ? paletteTrackRef.current
+      : stripRef.current;
     let shouldContinueEdgeScroll = false;
     if (strip) {
       const stableScrollLeft = Math.max(
@@ -1000,7 +1102,7 @@ export function BoardStyleBar({
     ) {
       freeDrawingPalette.onMovePreset(presetId, targetIndex);
       setPaletteAnnouncement(
-        `Перо перемещено на позицию ${targetIndex + 1}`,
+        `Ячейка перемещена на позицию ${targetIndex + 1}`,
       );
     }
   }, [
@@ -1036,7 +1138,9 @@ export function BoardStyleBar({
         }
       }
       if (drag.touchScrolling) {
-        const strip = stripRef.current;
+        const strip = freeDrawingPaletteRef.current?.collapsed
+          ? paletteTrackRef.current
+          : stripRef.current;
         if (strip) {
           const maximumScroll = Math.max(
             0,
@@ -1143,6 +1247,12 @@ export function BoardStyleBar({
     if (!openPresetId) return;
     const pointerDown = (event: PointerEvent) => {
       const root = rootRef.current;
+      if (
+        event.target instanceof Element
+        && event.target.closest('[data-board-color-formats-popup="true"]')
+      ) {
+        return;
+      }
       if (root && event.target instanceof Node && root.contains(event.target)) {
         return;
       }
@@ -1169,7 +1279,8 @@ export function BoardStyleBar({
       }
       if (openPresetId) {
         setOpenPresetId(null);
-        presetButtonsRef.current.get(openPresetId)?.focus();
+        (presetButtonsRef.current.get(openPresetId)
+          ?? collapsedMainPresetRef.current)?.focus();
         return;
       }
       if (paletteEditing) {
@@ -1263,7 +1374,7 @@ export function BoardStyleBar({
   return (
     <div
       ref={rootRef}
-      className={`board-v2__stylebar${paletteEditing ? " board-v2__stylebar--palette-editing" : ""}${paletteDropCommitGuard ? " board-v2__stylebar--palette-drop-commit" : ""}`}
+      className={`board-v2__stylebar${freeDrawingPalette && !freeDrawingPalette.collapsed ? " board-v2__stylebar--inline-palette" : ""}${paletteEditing ? " board-v2__stylebar--palette-editing" : ""}${openPreset && freeDrawingPalette?.collapsed ? " board-v2__stylebar--floating-preset-open" : ""}${paletteDropCommitGuard ? " board-v2__stylebar--palette-drop-commit" : ""}`}
     >
       <div
         ref={stripRef}
@@ -1299,44 +1410,101 @@ export function BoardStyleBar({
         </div>
       )}
 
-      {available.has("stroke") && freeDrawingPalette && (
+      {freeDrawingPalette?.collapsed && activePalettePreset && activePalettePreview && (
         <div
-          className="board-stylebar__group board-stylebar__colors board-stylebar__free-drawing"
+          className="board-stylebar__group board-stylebar__colors board-stylebar__line-current"
+          data-palette-kind={paletteKind}
           role="group"
-          aria-label="Параметры рисования"
+          aria-label={`Текущее оформление: ${paletteItemName.toLowerCase()}`}
         >
           <button
-            ref={paletteToggleRef}
+            ref={collapsedMainPresetRef}
             type="button"
-            className="board-stylebar__palette-toggle"
-            aria-label={
-              paletteEditing
-                ? "Завершить настройку палитры"
-                : "Настроить палитру рисования"
-            }
-            title={
-              paletteEditing
-                ? "Завершить настройку палитры"
-                : "Настроить палитру"
-            }
-            aria-pressed={paletteEditing}
+            className={`board-stylebar__swatch board-stylebar__pen-preset${activePalettePreview.color === "#17212b" ? " is-adaptive-ink" : ""}`}
+            style={{
+              "--board-swatch": activePalettePreview.color,
+              "--board-preset-fill": activePalettePreview.fill,
+              "--board-pen-radius": `${activePalettePreview.radius}px`,
+              "--board-pen-hover-diameter": `${activePalettePreview.hoverDiameter}px`,
+              "--board-pen-hover-scale": String(activePalettePreview.hoverScale),
+              "--board-swatch-opacity": String(activePalettePreview.opacity),
+            } as CSSProperties}
+            aria-label={freeDrawingPresetLabel(
+              activePalettePreset,
+              activePalettePresetIndex,
+              paletteItemName,
+            )}
+            aria-haspopup="dialog"
+            aria-expanded={paletteChooserOpen || paletteEditing}
             onClick={() => {
-              cancelPaletteDropCommitGuard();
-              cancelPaletteDrag();
+              if (paletteEditing) return;
               setOpenPresetId(null);
-              setPaletteEditing((current) => !current);
-              setPaletteAnnouncement("");
+              setPaletteChooserOpen((current) => !current);
             }}
           >
-            <Palette size={16} aria-hidden="true" />
+            <span className="board-stylebar__pen-well" aria-hidden="true">
+              <span className="board-stylebar__pen-dot" />
+            </span>
+          </button>
+        </div>
+      )}
+
+      {freeDrawingPalette && (
+        (
+          !freeDrawingPalette.collapsed
+          || paletteChooserOpen
+          || paletteEditing
+        ) &&
+        <div
+          className={`board-stylebar__free-drawing${freeDrawingPalette.collapsed ? " is-floating" : ""}${paletteEditing ? " is-palette-editing" : ""}`}
+          data-palette-kind={paletteKind}
+        >
+          <div
+            ref={paletteTrackRef}
+            className="board-stylebar__group board-stylebar__colors board-stylebar__palette-track"
+            role="group"
+            aria-label={`Палитра: ${paletteItemName.toLowerCase()}`}
+          >
+          <button
+              ref={paletteToggleRef}
+              type="button"
+              className="board-stylebar__palette-toggle"
+              aria-label={
+                paletteEditing
+                  ? "Завершить настройку палитры"
+                  : freeDrawingPalette.kind === "line"
+                    ? "Настроить палитру линий"
+                    : freeDrawingPalette.kind === "drawing"
+                      ? "Настроить палитру рисования"
+                      : `Настроить палитру: ${paletteItemName.toLowerCase()}`
+              }
+              title={
+                paletteEditing
+                  ? "Завершить настройку палитры"
+                  : "Настроить палитру"
+              }
+              aria-pressed={paletteEditing}
+              onClick={() => {
+                cancelPaletteDropCommitGuard();
+                cancelPaletteDrag();
+                setOpenPresetId(null);
+                if (freeDrawingPalette.collapsed) {
+                  setPaletteChooserOpen(true);
+                }
+                setPaletteEditing((current) => !current);
+                setPaletteAnnouncement("");
+              }}
+            >
+              <Palette size={16} aria-hidden="true" />
           </button>
 
           {displayedPresets.map((preset, index) => {
             const selected =
               freeDrawingPalette.activePresetId === preset.id;
             const expanded = openPresetId === preset.id;
-            const adaptiveInk = preset.stroke === "#17212b";
-            const label = freeDrawingPresetLabel(preset, index);
+            const preview = palettePreviewStyle(preset);
+            const adaptiveInk = preview.color === "#17212b";
+            const label = freeDrawingPresetLabel(preset, index, paletteItemName);
             const dragging = draggingPresetId === preset.id;
             const dragOffset = dragPreview?.offsets[preset.id];
             return (
@@ -1361,9 +1529,12 @@ export function BoardStyleBar({
                   type="button"
                   className={`board-stylebar__swatch board-stylebar__pen-preset${adaptiveInk ? " is-adaptive-ink" : ""}`}
                   style={{
-                    "--board-swatch": preset.stroke,
-                    "--board-pen-radius": `${preset.strokeWidth}px`,
-                    "--board-swatch-opacity": String(preset.opacity),
+                    "--board-swatch": preview.color,
+                    "--board-preset-fill": preview.fill,
+                    "--board-pen-radius": `${preview.radius}px`,
+                    "--board-pen-hover-diameter": `${preview.hoverDiameter}px`,
+                    "--board-pen-hover-scale": String(preview.hoverScale),
+                    "--board-swatch-opacity": String(preview.opacity),
                   } as CSSProperties}
                   aria-label={label}
                   title={label}
@@ -1432,7 +1603,9 @@ export function BoardStyleBar({
                         ? center
                         : sourceCenter + (index - sourceIndex) * measuredStep);
                     const pointerType = event.pointerType || "mouse";
-                    const strip = stripRef.current;
+                    const strip = freeDrawingPalette.collapsed
+                      ? paletteTrackRef.current
+                      : stripRef.current;
                     paletteDragRef.current = {
                       pointerId: event.pointerId,
                       presetId: preset.id,
@@ -1538,7 +1711,7 @@ export function BoardStyleBar({
                       targetIndex,
                     );
                     setPaletteAnnouncement(
-                      `Перо перемещено на позицию ${targetIndex + 1}`,
+                      `Ячейка перемещена на позицию ${targetIndex + 1}`,
                     );
                   }}
                   onBlur={(event) => {
@@ -1572,7 +1745,7 @@ export function BoardStyleBar({
                   <button
                     type="button"
                     className="board-stylebar__pen-delete"
-                    aria-label={`Удалить перо ${index + 1}`}
+                    aria-label={`Удалить: ${paletteItemName.toLowerCase()} ${index + 1}`}
                     title="Удалить"
                     disabled={
                       freeDrawingPalette.presets.length
@@ -1594,7 +1767,7 @@ export function BoardStyleBar({
                       setOpenPresetId((current) =>
                         current === preset.id ? null : current);
                       freeDrawingPalette.onDeletePreset(preset.id);
-                      setPaletteAnnouncement(`Перо ${index + 1} удалено`);
+                      setPaletteAnnouncement(`Ячейка ${index + 1} удалена`);
                       window.requestAnimationFrame(() => {
                         if (nextFocusId) {
                           presetButtonsRef.current.get(nextFocusId)?.focus();
@@ -1614,12 +1787,14 @@ export function BoardStyleBar({
           <span className="sr-only" aria-live="polite">
             {paletteAnnouncement}
           </span>
+          </div>
         </div>
       )}
 
-      {available.has("stroke") && !freeDrawingPalette && (
+      {available.has("stroke") && !paletteProperties.has("stroke") && (
         <BoardColorControl
           property="stroke"
+          label={strokeColorLabel}
           current={typeof values.stroke === "string" ? values.stroke : undefined}
           mixed={mixed.has("stroke")}
           allowTransparent={false}
@@ -1641,7 +1816,7 @@ export function BoardStyleBar({
         />
       )}
 
-      {available.has("fill") && (
+      {available.has("fill") && !paletteProperties.has("fill") && (
         <BoardColorControl
           property="fill"
           label={fillColorLabel}
@@ -1667,60 +1842,22 @@ export function BoardStyleBar({
         />
       )}
 
-      {available.has("strokeWidth") && !freeDrawingPalette && (
-        <div className={`board-stylebar__group board-stylebar__range${mixed.has("strokeWidth") ? " is-mixed" : ""}`}>
-          <input
-            type="range"
-            min={GENERIC_STROKE_WIDTH_MIN}
-            max={GENERIC_STROKE_WIDTH_MAX}
-            step={GENERIC_STROKE_WIDTH_STEP}
+      {available.has("strokeWidth") && !paletteProperties.has("strokeWidth") && (
+        <div className="board-stylebar__group board-stylebar__stroke-width-group">
+          <BoardStrokeWidthControl
             value={strokeWidth}
-            aria-label="Толщина линии"
-            aria-valuetext={
-              mixed.has("strokeWidth")
-                ? `Смешанная, ${compactNumber(strokeWidth)}`
-                : compactNumber(strokeWidth)
-            }
-            title={mixed.has("strokeWidth")
-              ? "Толщина: смешанные значения"
-              : `Толщина ${compactNumber(strokeWidth)}`}
-            onPointerDown={onContinuousChangeStart}
-            onPointerUp={onContinuousChangeEnd}
-            onPointerCancel={onContinuousChangeEnd}
-            onFocus={onContinuousChangeStart}
-            onBlur={onContinuousChangeEnd}
-            onChange={(event) =>
-              onStyleChange("strokeWidth", Number(event.currentTarget.value))}
-          />
-          <input
-            className="board-stylebar__exact-number"
-            type="number"
             min={GENERIC_STROKE_WIDTH_MIN}
             max={GENERIC_STROKE_WIDTH_MAX}
             step={GENERIC_STROKE_WIDTH_STEP}
-            value={mixed.has("strokeWidth") ? "" : strokeWidth}
-            placeholder="—"
-            aria-label="Точная толщина линии"
-            title="Точная толщина линии"
-            onFocus={onContinuousChangeStart}
-            onBlur={onContinuousChangeEnd}
-            onChange={(event) => {
-              const next = Number(event.currentTarget.value);
-              if (Number.isFinite(next) && event.currentTarget.value !== "") {
-                onStyleChange(
-                  "strokeWidth",
-                  Math.max(
-                    GENERIC_STROKE_WIDTH_MIN,
-                    Math.min(GENERIC_STROKE_WIDTH_MAX, next),
-                  ),
-                );
-              }
-            }}
+            mixed={mixed.has("strokeWidth")}
+            onChange={(value) => onStyleChange("strokeWidth", value)}
+            onContinuousChangeStart={onContinuousChangeStart}
+            onContinuousChangeEnd={onContinuousChangeEnd}
           />
         </div>
       )}
 
-      {available.has("dash") && (
+      {available.has("dash") && !paletteProperties.has("dash") && (
         <BoardDashControl
           value={values.dash ?? []}
           mixed={mixed.has("dash")}
@@ -1728,63 +1865,7 @@ export function BoardStyleBar({
         />
       )}
 
-      {connectorCurvature && (
-        <div className="board-stylebar__group board-stylebar__range board-stylebar__curvature">
-          <button
-            type="button"
-            className="board-stylebar__curvature-reset"
-            aria-label="Сделать линию прямой"
-            title="Сделать линию прямой"
-            disabled={connectorCurvature.value === 0}
-            onClick={() => connectorCurvature.onChange(0)}
-          >
-            <Spline size={15} strokeWidth={1.8} />
-          </button>
-          <input
-            type="range"
-            min={BOARD_CONNECTOR_CURVATURE_MIN}
-            max={BOARD_CONNECTOR_CURVATURE_MAX}
-            step={BOARD_CONNECTOR_CURVATURE_STEP}
-            value={connectorCurvature.value}
-            aria-label="Кривизна линии"
-            aria-valuetext={connectorCurvature.value === 0
-              ? "Прямая"
-              : `${connectorCurvature.value > 0 ? "Вправо" : "Влево"} ${Math.round(Math.abs(connectorCurvature.value) * 100)}%`}
-            title="Кривизна линии"
-            onPointerDown={onContinuousChangeStart}
-            onPointerUp={onContinuousChangeEnd}
-            onPointerCancel={onContinuousChangeEnd}
-            onFocus={onContinuousChangeStart}
-            onBlur={onContinuousChangeEnd}
-            onChange={(event) => connectorCurvature.onChange(
-              clampBoardConnectorCurvature(Number(event.currentTarget.value)),
-            )}
-          />
-          <label className="board-stylebar__percent-input">
-            <input
-              className="board-stylebar__exact-number"
-              type="number"
-              min={BOARD_CONNECTOR_CURVATURE_MIN * 100}
-              max={BOARD_CONNECTOR_CURVATURE_MAX * 100}
-              step={BOARD_CONNECTOR_CURVATURE_STEP * 100}
-              value={Math.round(connectorCurvature.value * 100)}
-              aria-label="Точная кривизна в процентах"
-              title="Точная кривизна"
-              onFocus={onContinuousChangeStart}
-              onBlur={onContinuousChangeEnd}
-              onChange={(event) => {
-                if (event.currentTarget.value === "") return;
-                connectorCurvature.onChange(clampBoardConnectorCurvature(
-                  Number(event.currentTarget.value) / 100,
-                ));
-              }}
-            />
-            <span aria-hidden="true">%</span>
-          </label>
-        </div>
-      )}
-
-      {available.has("opacity") && !freeDrawingPalette && !hideOpacity && (
+      {available.has("opacity") && !paletteProperties.has("opacity") && !hideOpacity && (
         <div className={`board-stylebar__group board-stylebar__range${mixed.has("opacity") ? " is-mixed" : ""}`}>
           <input
             type="range"
@@ -1834,7 +1915,7 @@ export function BoardStyleBar({
         </div>
       )}
 
-      {available.has("fontSize") && (
+      {available.has("fontSize") && !paletteProperties.has("fontSize") && (
         <input
           ref={fontSizeInputRef}
           className="board-stylebar__font-size"
@@ -1874,7 +1955,7 @@ export function BoardStyleBar({
           }}
         />
       )}
-      {available.has("fontSize") && (
+      {available.has("fontSize") && !paletteProperties.has("fontSize") && (
         <datalist id={fontSizeSuggestionsId}>
           {FONT_SIZE_SUGGESTIONS.map((size) => (
             <option key={size} value={size} />
@@ -1882,7 +1963,7 @@ export function BoardStyleBar({
         </datalist>
       )}
 
-      {available.has("fontFamily") && (
+      {available.has("fontFamily") && !paletteProperties.has("fontFamily") && (
         <BoardFontFamilyControl
           value={values.fontFamily}
           mixed={mixed.has("fontFamily")}
@@ -1890,7 +1971,7 @@ export function BoardStyleBar({
         />
       )}
 
-      {available.has("fontStyle") && (
+      {available.has("fontStyle") && !paletteProperties.has("fontStyle") && (
         <div className="board-stylebar__group board-stylebar__segments" role="group" aria-label="Начертание">
           <button
             type="button"
@@ -1920,8 +2001,8 @@ export function BoardStyleBar({
         <button
           type="button"
           className="board-stylebar__pen-add"
-          aria-label="Добавить перо"
-          title="Добавить перо"
+          aria-label={`Добавить: ${paletteItemName.toLowerCase()}`}
+          title={`Добавить: ${paletteItemName.toLowerCase()}`}
           disabled={
             freeDrawingPalette.presets.length
             >= FREE_DRAWING_PRESET_MAX_COUNT
@@ -1931,7 +2012,7 @@ export function BoardStyleBar({
             if (!presetId) return;
             setOpenPresetId(presetId);
             setPaletteAnnouncement(
-              `Добавлено перо ${freeDrawingPalette.presets.length + 1}`,
+              `Добавлена ячейка ${freeDrawingPalette.presets.length + 1}`,
             );
           }}
         >
@@ -1945,60 +2026,184 @@ export function BoardStyleBar({
           id={popupId}
           className="board-stylebar__pen-popover"
           role="dialog"
-          aria-label="Настройка пера"
+          aria-label={`Настройка: ${paletteItemName.toLowerCase()}`}
         >
-          <header>
-            <strong>Перо</strong>
-            <button
-              type="button"
-              aria-label="Закрыть настройки пера"
-              title="Закрыть"
-              onClick={() => {
-                setOpenPresetId(null);
-                presetButtonsRef.current.get(openPreset.id)?.focus();
-              }}
-            >
-              <X size={15} />
-            </button>
-          </header>
-
-          <BoardColorPicker
-            value={openPreset.stroke}
-            label="Цвет пера"
-            onPreview={(color) => freeDrawingPalette.onChangePreset(
-              openPreset.id,
-              { stroke: color },
-            )}
-            alpha={{
-              value: openPreset.opacity,
-              min: FREE_DRAWING_OPACITY_MIN,
-              max: FREE_DRAWING_OPACITY_MAX,
-              step: FREE_DRAWING_OPACITY_STEP,
-              onPreview: (opacity: number) =>
-                freeDrawingPalette.onChangePreset(
-                  openPreset.id,
-                  { opacity },
-                ),
-            }}
-          />
-
-          <label>
-            <span>Толщина</span>
-            <input
-              type="range"
-              min={FREE_DRAWING_STROKE_WIDTH_MIN}
-              max={FREE_DRAWING_STROKE_WIDTH_MAX}
-              step={FREE_DRAWING_STROKE_WIDTH_STEP}
-              value={openPreset.strokeWidth}
-              aria-label="Толщина линии рисования"
-              title={`Толщина ${compactNumber(openPreset.strokeWidth)}`}
-              onChange={(event) =>
-                freeDrawingPalette.onChangePreset(openPreset.id, {
-                  strokeWidth: Number(event.currentTarget.value),
-                })}
+          {paletteProperties.has("stroke")
+            && typeof openPreset.style.stroke === "string" && (
+            <BoardColorPicker
+              value={openPreset.style.stroke}
+              label={`Цвет линии: ${paletteItemName.toLowerCase()}`}
+              onPreview={(color) => freeDrawingPalette.onChangePreset(
+                openPreset.id,
+                { stroke: color },
+              )}
+              alpha={paletteProperties.has("opacity") ? {
+                value: typeof openPreset.style.opacity === "number"
+                  ? openPreset.style.opacity
+                  : 1,
+                min: FREE_DRAWING_OPACITY_MIN,
+                max: FREE_DRAWING_OPACITY_MAX,
+                step: FREE_DRAWING_OPACITY_STEP,
+                onPreview: (opacity: number) =>
+                  freeDrawingPalette.onChangePreset(openPreset.id, { opacity }),
+              } : undefined}
             />
-            <output>{compactNumber(openPreset.strokeWidth)} px</output>
-          </label>
+          )}
+
+          {paletteProperties.has("fill")
+            && typeof openPreset.style.fill === "string" && (
+            <>
+              <BoardColorPicker
+                value={openPreset.style.fill}
+                label="Цвет заливки"
+                onPreview={(fill) => freeDrawingPalette.onChangePreset(
+                  openPreset.id,
+                  { fill },
+                )}
+                alpha={
+                  paletteProperties.has("opacity")
+                  && !paletteProperties.has("stroke")
+                    ? {
+                        value: typeof openPreset.style.opacity === "number"
+                          ? openPreset.style.opacity
+                          : 1,
+                        min: FREE_DRAWING_OPACITY_MIN,
+                        max: FREE_DRAWING_OPACITY_MAX,
+                        step: FREE_DRAWING_OPACITY_STEP,
+                        onPreview: (opacity: number) =>
+                          freeDrawingPalette.onChangePreset(
+                            openPreset.id,
+                            { opacity },
+                          ),
+                      }
+                    : undefined
+                }
+              />
+            </>
+          )}
+
+          {paletteProperties.has("strokeWidth")
+            && typeof openPreset.style.strokeWidth === "number" && (
+            <div className="board-stylebar__pen-control-row">
+              <span>Толщина</span>
+              <BoardStrokeWidthControl
+                className="board-stroke-width--popover"
+                min={FREE_DRAWING_STROKE_WIDTH_MIN}
+                max={paletteKind === "drawing" || paletteKind === "line"
+                  ? FREE_DRAWING_STROKE_WIDTH_MAX
+                  : GENERIC_STROKE_WIDTH_MAX}
+                step={FREE_DRAWING_STROKE_WIDTH_STEP}
+                value={openPreset.style.strokeWidth}
+                label={paletteKind === "drawing"
+                  ? "Толщина линии рисования"
+                  : paletteKind === "line"
+                    ? "Толщина: линия"
+                    : `Толщина: ${paletteItemName.toLowerCase()}`}
+                onChange={(strokeWidth) => freeDrawingPalette.onChangePreset(
+                  openPreset.id,
+                  { strokeWidth },
+                )}
+              />
+            </div>
+          )}
+
+          {paletteProperties.has("dash") && (
+            <BoardDashControl
+              value={openPreset.style.dash}
+              mixed={false}
+              onChange={(dash) => freeDrawingPalette.onChangePreset(
+                openPreset.id,
+                { dash },
+              )}
+            />
+          )}
+
+          {paletteProperties.has("fontSize")
+            && typeof openPreset.style.fontSize === "number" && (
+            <label>
+              <span>Размер</span>
+              <input
+                type="number"
+                list={fontSizeSuggestionsId}
+                min={FONT_SIZE_MIN}
+                max={FONT_SIZE_MAX}
+                step={FONT_SIZE_STEP}
+                value={openPreset.style.fontSize}
+                aria-label="Размер текста"
+                onChange={(event) => freeDrawingPalette.onChangePreset(
+                  openPreset.id,
+                  {
+                    fontSize: Math.max(
+                      FONT_SIZE_MIN,
+                      Math.min(FONT_SIZE_MAX, Number(event.currentTarget.value)),
+                    ),
+                  },
+                )}
+                onWheel={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  const direction = event.deltaY < 0 ? 1 : -1;
+                  const step = event.shiftKey ? 5 : FONT_SIZE_STEP;
+                  freeDrawingPalette.onChangePreset(openPreset.id, {
+                    fontSize: Math.max(FONT_SIZE_MIN, Math.min(
+                      FONT_SIZE_MAX,
+                      (openPreset.style.fontSize as number) + direction * step,
+                    )),
+                  });
+                }}
+              />
+              <output>{compactNumber(openPreset.style.fontSize)} px</output>
+              <datalist id={fontSizeSuggestionsId}>
+                {FONT_SIZE_SUGGESTIONS.map((size) => (
+                  <option key={size} value={size} />
+                ))}
+              </datalist>
+            </label>
+          )}
+
+          {paletteProperties.has("fontFamily")
+            && typeof openPreset.style.fontFamily === "string" && (
+            <BoardFontFamilyControl
+              value={openPreset.style.fontFamily}
+              mixed={false}
+              onCommit={(fontFamily) => freeDrawingPalette.onChangePreset(
+                openPreset.id,
+                { fontFamily },
+              )}
+            />
+          )}
+
+          {paletteProperties.has("fontStyle") && (
+            <div
+              className="board-stylebar__group board-stylebar__segments"
+              role="group"
+              aria-label="Начертание"
+            >
+              {(["bold", "italic"] as const).map((token) => {
+                const active = typeof openPreset.style.fontStyle === "string"
+                  && openPreset.style.fontStyle.split(/\s+/u).includes(token);
+                const Icon = token === "bold" ? Bold : Italic;
+                return (
+                  <button
+                    key={token}
+                    type="button"
+                    aria-label={token === "bold" ? "Полужирный" : "Курсив"}
+                    aria-pressed={active}
+                    onClick={() => {
+                      const current = typeof openPreset.style.fontStyle === "string"
+                        ? openPreset.style.fontStyle
+                        : "normal";
+                      freeDrawingPalette.onChangePreset(openPreset.id, {
+                        fontStyle: styleWithFontToken(current, token, !active),
+                      });
+                    }}
+                  >
+                    <Icon size={15} />
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
         </div>
       )}

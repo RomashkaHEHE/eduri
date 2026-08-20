@@ -83,15 +83,16 @@ strict `eduri-online-profile-v1` envelope. It contains exactly a normalized,
 non-empty single-line `displayName` (at most 60 Unicode characters and 240
 UTF-8 bytes, without control or bidi-formatting characters) and a canonical
 lowercase six-digit `#rrggbb` color. The first guest-room or lesson entry with
-no valid profile is blocked by a non-dismissible profile modal before the Code,
-Board, or Call provider mounts. The active online header exposes the profile
+no valid profile is offered a dismissible profile suggestion. The active online
+session uses the normalized default until the person saves a profile; the Code,
+Board, and Call providers remain available. The active online header exposes the profile
 button immediately before Theme; solo `/code` and `/board` do not expose it.
 The modal uses the complete in-app Board color picker. Strict parsing rejects
 malformed, noncanonical, wrong-version, and extra-field storage records;
 storage/page-visibility reconciliation shares valid edits between tabs and
-closes an open stale editor. External key deletion returns an active online
-route to its mandatory gate and unmounts the collaboration providers until a
-new valid profile is saved, while blocked storage retains an in-memory fallback.
+closes an open stale editor. External key deletion opens the suggestion again
+while the active collaboration providers continue with the in-memory default,
+while blocked storage retains an in-memory fallback.
 
 Guest and lesson Code socket authentication carries the profile as a bounded
 credential field. The server validates and normalizes it, then supplies the
@@ -99,7 +100,8 @@ resulting display name/color authoritatively to editor/test awareness and the
 shared terminal participant; awareness cannot override identity. The profile
 field remains optional at wire ingress for older-client compatibility, where
 the existing generated guest or authenticated-account identity is used, but
-the profile-gated current web client always sends it. Profile values never
+the current web client sends its saved profile or normalized session default.
+Profile values never
 change a participant ID, account, role, lesson membership, resource capability,
 or edit permission.
 
@@ -200,10 +202,28 @@ and commit in one local-origin Yjs transaction, producing one local Undo item
 with no partial mutation on failure. The required `main.py` entry and every
 ancestor folder containing it make the complete delete selection protected.
 Create, upload, rename, duplicate, and delete remain available from the
-pointer/keyboard context menu, and the Explorer header also exposes delete for
-the current deletable selection. There is no destination selector in the
-editor toolbar. The tests editor is unmounted and consumes no layout space
-until its toolbar toggle is opened.
+pointer/keyboard context menu. The Explorer header contains only its title,
+with no ellipsis or dedicated delete action. There is no destination selector
+in the editor toolbar. A narrow VS Code-style activity bar sits to the left of
+the resizable sidebar and selects either the Explorer page or the Tests page.
+Both pages use the same persisted sidebar width (or the same sidebar height in
+compact layout), so opening tests never takes space from the terminal. The
+Explorer stays mounted while hidden to preserve its navigation state; the test
+editors are mounted only while the Tests page is active. The Tests activity is
+disabled unless the active entry is a Python text file.
+
+Editor language and Python capability derive from the current normalized file
+name, never from stable entry identity or the file's creation history. A
+case-insensitive `.py` text file uses Monaco's Python language and exposes the
+Tests activity and idle `F9` action. Renaming that same entry to `.txt`
+immediately changes its existing Monaco model to `plaintext`, returns an open
+Tests page to Explorer, disables the Tests activity, removes idle Run, and
+makes workspace-scoped F9 a no-op without remounting the editor or changing the
+stored text. Known non-Python extensions
+such as `.md`, `.json`, `.js`, and `.ts` select their matching Monaco language
+but never gain Python Run/Test capability. Renaming back to `.py` restores the
+file's previously attached tests because those tests remain bound to stable
+entry ID.
 
 ### Server durability and bounded compaction
 
@@ -647,7 +667,7 @@ and sandbox immediately.
   survive remote edits within the documented 32-selection awareness bound;
   malformed or oversized presence is rejected while terminal input/output/run
   lifecycle remains bounded, server-ordered, and ephemeral;
-- strict profile storage/auth validation, mandatory first-online gating,
+- strict profile storage/auth validation, dismissible first-online suggestion,
   server-authoritative editor/terminal identity, and live profile refresh
   without a socket reconnect, terminal-host interruption, Monaco remount, or
   replacement of the Y.Doc, IndexedDB log, or outbox, including ordered rapid

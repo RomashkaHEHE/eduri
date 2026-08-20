@@ -3,6 +3,7 @@ import type { AtomicTransform } from "./schema.js";
 export const MAX_BOARD_LINE_COORDINATE = 0x7fff_ffff / 64;
 export const DEFAULT_BOARD_LINE_SAMPLE_ERROR = 0.25;
 export const MAX_BOARD_LINE_SAMPLE_SEGMENTS = 256;
+export const MAX_BOARD_LINE_POINTS = 128;
 
 export type BoardLinePoint = readonly [x: number, y: number];
 
@@ -10,6 +11,8 @@ export interface BoardLineGeometry {
   readonly start: BoardLinePoint;
   readonly end: BoardLinePoint;
   readonly control?: BoardLinePoint;
+  /** Ordered editable anchors. Absent on legacy straight/quadratic lines. */
+  readonly points?: readonly BoardLinePoint[];
 }
 
 export interface BoardLineObjectGeometry {
@@ -47,6 +50,21 @@ export function parseBoardLineGeometry(
     return null;
   }
   const candidate = props as Readonly<Record<string, unknown>>;
+  if (candidate.points !== undefined) {
+    if (
+      !Array.isArray(candidate.points)
+      || candidate.points.length < 2
+      || candidate.points.length > MAX_BOARD_LINE_POINTS
+    ) return null;
+    const points = candidate.points.map(finiteBoundedPoint);
+    if (points.some((point) => point === null)) return null;
+    const validPoints = points as BoardLinePoint[];
+    return {
+      start: validPoints[0],
+      end: validPoints[validPoints.length - 1],
+      points: validPoints,
+    };
+  }
   const start = finiteBoundedPoint(candidate.start);
   const end = finiteBoundedPoint(candidate.end);
   if (!start || !end) return null;
@@ -54,6 +72,68 @@ export function parseBoardLineGeometry(
   if (candidate.control === undefined) return { start, end };
   const control = finiteBoundedPoint(candidate.control);
   return control ? { start, end, control } : null;
+}
+
+export function createBoardPointLineObjectGeometry(
+  points: readonly BoardLinePoint[],
+  angle = 0,
+): BoardLineObjectGeometry {
+  if (points.length < 2 || points.length > MAX_BOARD_LINE_POINTS) {
+    throw new RangeError(`Line must contain between 2 and ${MAX_BOARD_LINE_POINTS} points`);
+  }
+  if (!Number.isFinite(angle)) throw new RangeError("angle must be finite");
+  points.forEach((point, index) => assertBoardLinePoint(point, `points[${index}]`));
+
+  let minX = points[0][0];
+  let minY = points[0][1];
+  let maxX = minX;
+  let maxY = minY;
+  for (let index = 1; index < points.length; index += 1) {
+    minX = Math.min(minX, points[index][0]);
+    minY = Math.min(minY, points[index][1]);
+    maxX = Math.max(maxX, points[index][0]);
+    maxY = Math.max(maxY, points[index][1]);
+  }
+  if (
+    maxX - minX > MAX_BOARD_LINE_COORDINATE
+    || maxY - minY > MAX_BOARD_LINE_COORDINATE
+  ) throw new RangeError("Line geometry exceeds the supported board coordinate range");
+
+  return {
+    transform: Object.freeze([
+      minX,
+      minY,
+      Math.max(1, maxX - minX),
+      Math.max(1, maxY - minY),
+      angle,
+    ]) as AtomicTransform,
+    props: Object.freeze({
+      points: points.map(([x, y]) => [x - minX, y - minY] as BoardLinePoint),
+    }),
+  };
+}
+
+/** Cubic Catmull-Rom path which passes through every editable anchor. */
+export function boardPointLineCubicPoints(
+  points: readonly BoardLinePoint[],
+): readonly number[] | null {
+  if (points.length < 3) return null;
+  const path: number[] = [points[0][0], points[0][1]];
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const previous = points[Math.max(0, index - 1)];
+    const start = points[index];
+    const end = points[index + 1];
+    const next = points[Math.min(points.length - 1, index + 2)];
+    path.push(
+      start[0] + (end[0] - previous[0]) / 6,
+      start[1] + (end[1] - previous[1]) / 6,
+      end[0] - (next[0] - start[0]) / 6,
+      end[1] - (next[1] - start[1]) / 6,
+      end[0],
+      end[1],
+    );
+  }
+  return path;
 }
 
 function assertBoardLinePoint(value: BoardLinePoint, label: string): void {
@@ -152,6 +232,20 @@ function quadraticCoordinate(
 export function boardLineBounds(
   geometry: BoardLineGeometry,
 ): BoardLineBounds {
+  if (geometry.points) {
+    const sampled = sampleBoardLineGeometry(geometry);
+    let minX = sampled[0][0];
+    let minY = sampled[0][1];
+    let maxX = minX;
+    let maxY = minY;
+    for (const point of sampled.slice(1)) {
+      minX = Math.min(minX, point[0]);
+      minY = Math.min(minY, point[1]);
+      maxX = Math.max(maxX, point[0]);
+      maxY = Math.max(maxY, point[1]);
+    }
+    return { minX, minY, maxX, maxY };
+  }
   const { start, control, end } = geometry;
   let minX = Math.min(start[0], end[0]);
   let minY = Math.min(start[1], end[1]);
@@ -185,6 +279,40 @@ export function sampleBoardLineGeometry(
   maximumError = DEFAULT_BOARD_LINE_SAMPLE_ERROR,
   maximumSegments = MAX_BOARD_LINE_SAMPLE_SEGMENTS,
 ): readonly BoardLinePoint[] {
+  if (geometry.points) {
+    const points = geometry.points;
+    if (points.length === 2) return points;
+    const cubic = boardPointLineCubicPoints(points);
+    if (!cubic) return points;
+    const segmentBudget = Math.max(1, Math.min(
+      MAX_BOARD_LINE_SAMPLE_SEGMENTS,
+      Number.isFinite(maximumSegments) ? Math.floor(maximumSegments) : MAX_BOARD_LINE_SAMPLE_SEGMENTS,
+    ));
+    const samplesPerSegment = Math.max(2, Math.floor(segmentBudget / (points.length - 1)));
+    const sampled: BoardLinePoint[] = [points[0]];
+    for (let segment = 0; segment < points.length - 1; segment += 1) {
+      const offset = segment * 6;
+      const start: BoardLinePoint = [cubic[offset], cubic[offset + 1]];
+      const first: BoardLinePoint = [cubic[offset + 2], cubic[offset + 3]];
+      const second: BoardLinePoint = [cubic[offset + 4], cubic[offset + 5]];
+      const end: BoardLinePoint = [cubic[offset + 6], cubic[offset + 7]];
+      for (let step = 1; step <= samplesPerSegment; step += 1) {
+        const progress = step / samplesPerSegment;
+        const remaining = 1 - progress;
+        sampled.push([
+          remaining ** 3 * start[0]
+            + 3 * remaining ** 2 * progress * first[0]
+            + 3 * remaining * progress ** 2 * second[0]
+            + progress ** 3 * end[0],
+          remaining ** 3 * start[1]
+            + 3 * remaining ** 2 * progress * first[1]
+            + 3 * remaining * progress ** 2 * second[1]
+            + progress ** 3 * end[1],
+        ]);
+      }
+    }
+    return sampled;
+  }
   const { start, control, end } = geometry;
   if (!control) return [start, end];
 

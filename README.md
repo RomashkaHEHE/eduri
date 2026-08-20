@@ -41,9 +41,20 @@ Open `http://127.0.0.1:5173`. The development-only bootstrap credentials are
 `admin` / `change-me-admin`. Production refuses to start with the development
 lookup key or a short/missing administrator password.
 
-`npm run dev` starts both Express/Socket.IO on `127.0.0.1:3020` and Vite on
-`127.0.0.1:5173`. Use that command when testing guest sessions: running Vite
-alone renders the local workspace, but cannot create or synchronize a session.
+`npm run dev` starts Express/Socket.IO on `127.0.0.1:3020`, Vite on
+`127.0.0.1:5173`, and an isolated LiveKit development server on
+`127.0.0.1:7880`. On its first run the project downloads the pinned LiveKit
+`1.13.4` binary for the current platform, verifies its release SHA-256, and
+stores it under the ignored `.cache/livekit/` directory. Use that command when
+testing guest sessions and calls: running Vite alone renders the local
+workspace, but cannot create or synchronize a session. Set
+`LIVEKIT_DEV_BINARY` to use an already installed compatible binary on a
+platform without a bundled release. In development the API uses this loopback
+LiveKit configuration by default, so an already running `tsx watch` API also
+picks it up after a source reload.
+When the default ports are occupied, set `PORT` and `APP_ORIGIN` for Express
+and use matching `EDURI_DEV_API_PORT` and `EDURI_DEV_WEB_PORT` values for the
+Vite proxy and browser server.
 Development also uses a non-production room-creation limit so repeated local
 promotion checks do not exhaust the public-service throttle.
 

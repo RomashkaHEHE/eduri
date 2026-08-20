@@ -491,11 +491,9 @@ describe("CodeExplorer group commands", () => {
     });
     expect(handlers.onDuplicate).toHaveBeenCalledWith(entry("nested-py"));
 
-    const rootMenu = container!.querySelector<HTMLButtonElement>(
-      'button[aria-label="Меню проводника"]',
-    );
+    const tree = container!.querySelector<HTMLElement>('[role="tree"]');
     await act(async () => {
-      rootMenu?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      contextMenu(tree!);
       await Promise.resolve();
     });
     await act(async () => {
@@ -625,33 +623,18 @@ describe("CodeExplorer group commands", () => {
     expect(handlers.onMove).not.toHaveBeenCalled();
   });
 
-  it("uses the header delete action for the complete selection", async () => {
+  it("keeps the Explorer header free of menu and delete buttons", async () => {
     const handlers = callbacks();
     await renderExplorer(handlers, { activeId: "nested-py" });
-    await clickEntry("notes.txt", { ctrlKey: true });
-    const deleteButton = container!.querySelector<HTMLButtonElement>(
-      ".code-explorer__delete",
-    );
-    expect(deleteButton?.disabled).toBe(false);
-
-    await act(async () => {
-      deleteButton?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-      await Promise.resolve();
-    });
-    expect(handlers.onDelete).toHaveBeenCalledWith([
-      entry("nested-py"),
-      entry("notes-txt"),
-    ]);
+    const header = container!.querySelector(".code-explorer__head");
+    expect(header?.textContent?.trim()).toBe("Проводник");
+    expect(header?.querySelector("button")).toBeNull();
   });
 
-  it("blocks every delete surface when the group includes main.py", async () => {
+  it("blocks keyboard and context-menu deletion when the group includes main.py", async () => {
     const handlers = callbacks();
     await renderExplorer(handlers, { activeId: "main-py" });
     await clickEntry("notes.txt", { ctrlKey: true });
-    const deleteButton = container!.querySelector<HTMLButtonElement>(
-      ".code-explorer__delete",
-    );
-    expect(deleteButton?.disabled).toBe(true);
 
     await pressEntry("notes.txt", "Delete");
     await act(async () => {
@@ -662,7 +645,7 @@ describe("CodeExplorer group commands", () => {
     expect(handlers.onDelete).not.toHaveBeenCalled();
   });
 
-  it("protects an ancestor folder containing main.py from every delete surface", async () => {
+  it("protects an ancestor folder containing main.py from deletion", async () => {
     const handlers = callbacks();
     const nestedMainEntries = entries.map((candidate) => candidate.id === "main-py"
       ? { ...candidate, parentId: "src-folder" }
@@ -671,11 +654,6 @@ describe("CodeExplorer group commands", () => {
       activeId: "src-folder",
       entries: nestedMainEntries,
     });
-    const deleteButton = container!.querySelector<HTMLButtonElement>(
-      ".code-explorer__delete",
-    );
-    expect(deleteButton?.disabled).toBe(true);
-
     await pressEntry("src", "Delete");
     await act(async () => {
       contextMenu(rowNamed("src"));

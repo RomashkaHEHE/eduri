@@ -291,6 +291,12 @@ interface RendererInternals {
     readonly releaseRequested: boolean;
   } | null;
   readonly presenceAnimationFrame: number | null;
+  readonly linePointEditor: {
+    readonly group: Konva.Group;
+    readonly path: Konva.Line;
+    readonly points: readonly (readonly [number, number])[];
+    readonly selectedIndex: number | null;
+  } | null;
   readonly activeMousePointerId: number | null;
   readonly pressedPointerIds: ReadonlySet<number>;
   readonly activeGesture: {
@@ -313,6 +319,7 @@ interface RendererInternals {
     readonly style?: Readonly<Record<string, unknown>>;
     readonly strokeOffset?: BoardPoint;
     readonly straightPointActive?: boolean;
+    readonly strokeMoveArmed?: boolean;
     readonly strokeMoveActive?: boolean;
     readonly end?: BoardPoint;
     readonly offset?: BoardPoint;
@@ -341,10 +348,12 @@ function callbackSpies(): BoardRendererCallbacks {
     onTransformStart: vi.fn(),
     onTransformCancel: vi.fn(),
     onTransformObjects: vi.fn(),
+    onEditLineGeometry: vi.fn(),
     onEditObject: vi.fn(),
     onLaserChange: vi.fn(),
     onPenLaserModeChange: vi.fn(),
     onGesturePreviewChange: vi.fn(),
+    onModifierHintsChange: vi.fn(),
   };
 }
 
@@ -806,6 +815,8 @@ describe("Konva board object compatibility", () => {
       style: { fontSize: Number.MAX_VALUE },
     }), undefined, () => undefined);
     expect((code.getChildren()[2] as Konva.Text).fontSize()).toBe(256);
+    expect((code.getChildren()[0] as Konva.Rect).getAttrs())
+      .not.toHaveProperty("shadowColor");
 
     const latex = renderObjectNode(snapshot({
       kind: BUILTIN_OBJECT_KINDS.latex,
@@ -1590,6 +1601,9 @@ describe("Konva local multi-selection chrome", () => {
 
     try {
       expect(callbacks.onTransformStart).toHaveBeenCalledOnce();
+      expect(callbacks.onModifierHintsChange).toHaveBeenLastCalledWith([
+        "rotation-snap",
+      ]);
 
       rotation.moveTo(31, false);
       expect(target.rotation()).toBeCloseTo(31, 1);
@@ -1612,6 +1626,11 @@ describe("Konva local multi-selection chrome", () => {
       expect(committed?.[3]).toBeCloseTo(80, 8);
       expect(committed?.[4]).toBeCloseTo(Math.PI / 2, 8);
       expect(internals.transformer.rotationSnaps()).toEqual([]);
+      expect(callbacks.onModifierHintsChange).toHaveBeenLastCalledWith([
+        "select-add",
+        "select-area",
+        "select-lasso",
+      ]);
     } finally {
       rotation.end();
       renderer.destroy();
@@ -1684,8 +1703,8 @@ describe("Konva local multi-selection chrome", () => {
 });
 
 describe("Konva board view controls", () => {
-  it("keeps the background painted while the grid is hidden and defaults the grid to visible", () => {
-    const visible = rendererHarness();
+  it("keeps the background painted while the grid is hidden and defaults the grid to hidden", () => {
+    const visible = rendererHarness({ gridVisible: true });
     const visiblePaint = renderGrid(visible.internals);
     expect(visiblePaint.fillRect).toHaveBeenCalledOnce();
     expect(visiblePaint.stroke).toHaveBeenCalled();
@@ -1698,7 +1717,7 @@ describe("Konva board view controls", () => {
     expect(renderGrid(visible.internals).stroke).toHaveBeenCalled();
     visible.renderer.destroy();
 
-    const initiallyHidden = rendererHarness({ gridVisible: false });
+    const initiallyHidden = rendererHarness();
     const initiallyHiddenPaint = renderGrid(initiallyHidden.internals);
     expect(initiallyHiddenPaint.fillRect).toHaveBeenCalledOnce();
     expect(initiallyHiddenPaint.stroke).not.toHaveBeenCalled();
@@ -1898,10 +1917,9 @@ describe("Konva pointer gesture input", () => {
     renderer.destroy();
   });
 
-  it("creates a curved connector with canonical control geometry and live preview", () => {
+  it("creates a straight three-anchor line", () => {
     const { callbacks, renderer, internals } = rendererHarness();
     renderer.setTool("line");
-    renderer.setConnectorCurvature(0.5);
     internals.onPointerDown(konvaPointerEvent(
       internals,
       "pointerdown",
@@ -1918,7 +1936,7 @@ describe("Konva pointer gesture input", () => {
         kind: "line",
         points: [
           { x: 100, y: 100 },
-          { x: 200, y: 175 },
+          { x: 200, y: 100 },
           { x: 300, y: 100 },
         ],
       }),
@@ -1932,13 +1950,117 @@ describe("Konva pointer gesture input", () => {
     const draft = vi.mocked(callbacks.onCreateObject).mock.calls[0]?.[0];
     expect(draft).toMatchObject({
       kind: BUILTIN_OBJECT_KINDS.line,
-      transform: [100, 100, 200, 75, 0],
+      transform: [100, 100, 200, 1, 0],
       props: {
-        start: [0, 0],
-        control: [100, 75],
-        end: [200, 0],
+        points: [[0, 0], [100, 0], [200, 0]],
       },
     });
+    renderer.destroy();
+  });
+
+  it("creates and point-edits Arrow with the same three-anchor geometry", () => {
+    const { callbacks, renderer, internals } = rendererHarness();
+    renderer.setTool("arrow");
+    internals.onPointerDown(konvaPointerEvent(
+      internals,
+      "pointerdown",
+      pointerEvent(310, 40, 60, { type: "pointerdown" }),
+    ));
+    internals.onPointerMove(konvaPointerEvent(
+      internals,
+      "pointermove",
+      pointerEvent(310, 240, 100),
+    ));
+    internals.onPointerUp(konvaPointerEvent(
+      internals,
+      "pointerup",
+      pointerEvent(310, 240, 100, { buttons: 0, type: "pointerup" }),
+    ));
+
+    expect(vi.mocked(callbacks.onCreateObject).mock.calls[0]?.[0]).toMatchObject({
+      kind: BUILTIN_OBJECT_KINDS.arrow,
+      props: { points: [[0, 0], [100, 20], [200, 40]] },
+    });
+
+    renderer.setObjects([snapshot({
+      id: "editable-arrow",
+      kind: BUILTIN_OBJECT_KINDS.arrow,
+      transform: [40, 60, 200, 40, 0],
+      props: { points: [[0, 0], [100, 20], [200, 40]] },
+      style: { stroke: "#2563eb", strokeWidth: 3 },
+    })]);
+    renderer.setTool("select");
+    renderer.setSelection(["editable-arrow"]);
+    expect(renderer.enterLinePointEditing()).toBe(true);
+    expect(internals.linePointEditor?.path).toBeInstanceOf(Konva.Arrow);
+    expect(internals.linePointEditor?.points).toHaveLength(3);
+    renderer.destroy();
+  });
+
+  it("enters point editing and deletes only the selected line anchor", () => {
+    const { callbacks, renderer, internals } = rendererHarness();
+    renderer.setObjects([snapshot({
+      id: "editable-line",
+      kind: BUILTIN_OBJECT_KINDS.line,
+      transform: [20, 30, 200, 80, 0],
+      props: { points: [[0, 40], [100, 0], [200, 40]] },
+      style: { stroke: "#2563eb", strokeWidth: 3, opacity: 0.7 },
+    })]);
+    renderer.setTool("select");
+    renderer.setSelection(["editable-line"]);
+
+    expect(renderer.enterLinePointEditing()).toBe(true);
+    expect(internals.linePointEditor?.points).toHaveLength(3);
+    expect(internals.transformer.nodes()).toHaveLength(0);
+    expect(renderer.deleteSelectedLinePoint()).toBe(true);
+    expect(callbacks.onEditLineGeometry).not.toHaveBeenCalled();
+
+    const middleAnchor = internals.linePointEditor?.group.getChildren()[2];
+    middleAnchor?.fire("pointerdown", {}, false);
+    expect(renderer.deleteSelectedLinePoint()).toBe(true);
+    expect(callbacks.onEditLineGeometry).toHaveBeenCalledWith(
+      "editable-line",
+      expect.objectContaining({
+        props: { points: expect.any(Array) },
+      }),
+    );
+    const geometry = vi.mocked(callbacks.onEditLineGeometry!).mock.calls[0]?.[1];
+    expect(geometry?.props.points).toHaveLength(2);
+    expect(renderer.exitLinePointEditing()).toBe(true);
+    renderer.destroy();
+  });
+
+  it("previews anchor curvature and materializes a dragged segment midpoint", () => {
+    const { callbacks, renderer, internals } = rendererHarness();
+    renderer.setObjects([snapshot({
+      id: "curve-line",
+      kind: BUILTIN_OBJECT_KINDS.line,
+      transform: [20, 30, 200, 80, 0],
+      props: { points: [[0, 40], [100, 0], [200, 40]] },
+    })]);
+    renderer.setTool("select");
+    renderer.setSelection(["curve-line"]);
+    renderer.enterLinePointEditing();
+
+    const middleAnchor = internals.linePointEditor!.group.getChildren()[2] as Konva.Circle;
+    const previousPath = [...internals.linePointEditor!.path.points()];
+    middleAnchor.fire("pointerdown", {}, false);
+    middleAnchor.fire("dragstart", {}, false);
+    middleAnchor.position({ x: 100, y: 55 });
+    middleAnchor.fire("dragmove", {}, false);
+    expect(internals.linePointEditor!.path.points()).not.toEqual(previousPath);
+    middleAnchor.fire("dragend", {}, false);
+    expect(callbacks.onEditLineGeometry).toHaveBeenCalledTimes(1);
+
+    vi.mocked(callbacks.onEditLineGeometry!).mockClear();
+    const insertionHandle = internals.linePointEditor!.group.getChildren()[4] as Konva.Circle;
+    insertionHandle.fire("pointerdown", {}, false);
+    insertionHandle.fire("dragstart", {}, false);
+    insertionHandle.y(insertionHandle.y() - 12);
+    insertionHandle.fire("dragmove", {}, false);
+    insertionHandle.fire("dragend", {}, false);
+    const geometry = vi.mocked(callbacks.onEditLineGeometry!).mock.calls[0]?.[1];
+    expect(geometry?.props.points).toHaveLength(4);
     renderer.destroy();
   });
 
@@ -2095,12 +2217,19 @@ describe("Konva pointer gesture input", () => {
   it("uses the current pointer sample when synthetic input exposes an empty coalesced list", () => {
     const { callbacks, renderer, internals } = rendererHarness();
     renderer.setTool("pen");
+    expect(callbacks.onModifierHintsChange).toHaveBeenLastCalledWith([
+      "pen-laser",
+    ]);
 
     internals.onPointerDown(konvaPointerEvent(
       internals,
       "pointerdown",
       pointerEvent(101, 10, 10, { type: "pointerdown" }),
     ));
+    expect(callbacks.onModifierHintsChange).toHaveBeenLastCalledWith([
+      "pen-move",
+      "pen-straight",
+    ]);
     internals.onPointerMove(konvaPointerEvent(
       internals,
       "pointermove",
@@ -2118,6 +2247,53 @@ describe("Konva pointer gesture input", () => {
     expect((internals.activeGesture?.preview as Konva.Line).points())
       .toEqual([10, 10, 80, 60]);
     expect(callbacks.onCreateObject).not.toHaveBeenCalled();
+    renderer.destroy();
+  });
+
+  it("reports contextual modifier hints for selection and erasing gestures", () => {
+    const { callbacks, renderer, internals } = rendererHarness();
+    expect(callbacks.onModifierHintsChange).toHaveBeenLastCalledWith([
+      "select-add",
+      "select-area",
+      "select-lasso",
+    ]);
+
+    internals.onPointerDown(konvaPointerEvent(
+      internals,
+      "pointerdown",
+      pointerEvent(194, 10, 10, { type: "pointerdown" }),
+    ));
+    expect(callbacks.onModifierHintsChange).toHaveBeenLastCalledWith([
+      "marquee-intersection",
+      "selection-area-move",
+    ]);
+    internals.onPointerUp(konvaPointerEvent(
+      internals,
+      "pointerup",
+      pointerEvent(194, 20, 20, { buttons: 0, type: "pointerup" }),
+    ));
+    expect(callbacks.onModifierHintsChange).toHaveBeenLastCalledWith([
+      "select-add",
+      "select-area",
+      "select-lasso",
+    ]);
+
+    renderer.setTool("eraser");
+    expect(callbacks.onModifierHintsChange).toHaveBeenLastCalledWith([]);
+    internals.onPointerDown(konvaPointerEvent(
+      internals,
+      "pointerdown",
+      pointerEvent(195, 15, 15, { type: "pointerdown" }),
+    ));
+    expect(callbacks.onModifierHintsChange).toHaveBeenLastCalledWith([
+      "eraser-restore",
+    ]);
+    internals.onPointerUp(konvaPointerEvent(
+      internals,
+      "pointerup",
+      pointerEvent(195, 15, 15, { buttons: 0, type: "pointerup" }),
+    ));
+    expect(callbacks.onModifierHintsChange).toHaveBeenLastCalledWith([]);
     renderer.destroy();
   });
 
@@ -2145,6 +2321,7 @@ describe("Konva pointer gesture input", () => {
     ));
 
     expect(internals.activeGesture?.kind).toBe("laser");
+    expect(callbacks.onModifierHintsChange).toHaveBeenLastCalledWith([]);
     expect(vi.mocked(callbacks.onLaserChange).mock.calls.at(-1)?.[0])
       .toMatchObject({
         strokes: [{
@@ -2175,7 +2352,7 @@ describe("Konva pointer gesture input", () => {
     renderer.destroy();
   });
 
-  it("keeps pre-held Ctrl on the unfinished-stroke movement path", () => {
+  it("draws through pre-held Ctrl and moves only after release and re-press", () => {
     const { callbacks, renderer, internals, root } = rendererHarness();
     renderer.setTool("pen");
     root.focus();
@@ -2199,27 +2376,57 @@ describe("Konva pointer gesture input", () => {
     ));
 
     expect(internals.activeGesture?.kind).toBe("drawing");
-    expect(internals.activeGesture?.strokeMoveActive).toBe(true);
-    expect(internals.activeGesture?.strokeOffset).toEqual({ x: 25, y: 15 });
+    expect(internals.activeGesture?.strokeMoveArmed).toBe(false);
+    expect(internals.activeGesture?.strokeMoveActive).toBe(false);
+    expect(internals.activeGesture?.strokeOffset).toEqual({ x: 0, y: 0 });
+    expect(internals.activeGesture?.points).toEqual([
+      { x: 10, y: 10, pressure: 0.5 },
+      { x: 35, y: 25, pressure: 0.5 },
+    ]);
+    expect(renderer.element.style.cursor).toBe("crosshair");
     expect(callbacks.onLaserChange).not.toHaveBeenCalled();
+    expect(callbacks.onModifierHintsChange).toHaveBeenLastCalledWith([
+      "pen-straight",
+    ]);
 
     window.dispatchEvent(new KeyboardEvent("keyup", { key: "Control" }));
+    expect(internals.activeGesture?.strokeMoveArmed).toBe(true);
+    expect(callbacks.onModifierHintsChange).toHaveBeenLastCalledWith([
+      "pen-move",
+      "pen-straight",
+    ]);
+    window.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Control",
+      ctrlKey: true,
+    }));
+    expect(internals.activeGesture?.strokeMoveActive).toBe(true);
+    expect(renderer.element.style.cursor).toBe("grabbing");
     internals.onPointerMove(konvaPointerEvent(
       internals,
       "pointermove",
-      pointerEvent(192, 60, 40),
+      pointerEvent(192, 60, 40, { ctrlKey: true }),
     ));
+    expect(internals.activeGesture?.strokeOffset).toEqual({ x: 25, y: 15 });
+    expect(internals.activeGesture?.points).toEqual([
+      { x: 10, y: 10, pressure: 0.5 },
+      { x: 35, y: 25, pressure: 0.5 },
+    ]);
     internals.onPointerUp(konvaPointerEvent(
       internals,
       "pointerup",
-      pointerEvent(192, 70, 45, {
+      pointerEvent(192, 60, 40, {
         buttons: 0,
+        ctrlKey: true,
         type: "pointerup",
       }),
     ));
 
     expect(callbacks.onCreateObject).toHaveBeenCalledOnce();
     expect(callbacks.onLaserChange).not.toHaveBeenCalled();
+    expect(callbacks.onModifierHintsChange).toHaveBeenLastCalledWith([
+      "pen-laser",
+    ]);
+    window.dispatchEvent(new KeyboardEvent("keyup", { key: "Control" }));
     renderer.destroy();
   });
 
@@ -4653,7 +4860,7 @@ describe("Konva pointer gesture input", () => {
     }
   });
 
-  it("previews additive lasso intersections locally and restores base chrome on cancel", () => {
+  it("highlights additive lasso candidates before pointer-up and restores base chrome on cancel", () => {
     const frames = animationFrameController();
     const { callbacks, renderer, internals } = rendererHarness();
     try {
@@ -4703,6 +4910,12 @@ describe("Konva pointer gesture input", () => {
         .toEqual(["base", "inside", "touching"]);
       expect(new Set(internals.selectionObjectOutlines.keys()))
         .toEqual(new Set(["base", "inside", "touching"]));
+      for (const outline of internals.selectionObjectOutlines.values()) {
+        expect(outline.fill()).toBe("rgba(49,94,251,0.11)");
+        expect(outline.stroke()).toBe("#315efb");
+        expect(outline.strokeWidth()).toBe(1.5);
+        expect(outline.opacity()).toBe(1);
+      }
       expect(renderer.selection).toEqual(["base"]);
       expect(callbacks.onSelectionChange).not.toHaveBeenCalled();
 

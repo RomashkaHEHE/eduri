@@ -1,4 +1,8 @@
-import type { AtomicTransform, BoardObjectKind } from "../../../board/core";
+import type {
+  AtomicTransform,
+  BoardLineObjectGeometry,
+  BoardObjectKind,
+} from "../../../board/core";
 
 export type BoardShapeKind =
   | "rectangle"
@@ -21,6 +25,20 @@ export type BoardTool =
   | "image";
 
 export type BoardPlacementTool = "code" | "latex" | "image";
+
+export type BoardModifierHintAction =
+  | "select-add"
+  | "select-area"
+  | "select-lasso"
+  | "marquee-intersection"
+  | "selection-area-move"
+  | "pen-laser"
+  | "pen-move"
+  | "pen-straight"
+  | "eraser-restore"
+  | "rotation-snap"
+  | "line-edit-points"
+  | "line-delete-point";
 
 export interface BoardPoint {
   readonly x: number;
@@ -273,6 +291,7 @@ export interface BoardRendererCallbacks {
   onTransformStart(): void;
   onTransformCancel(): void;
   onTransformObjects(transforms: ReadonlyMap<string, AtomicTransform>): void;
+  onEditLineGeometry?(id: string, geometry: BoardLineObjectGeometry): void;
   onEditObject(id: string): void;
   onLaserChange(
     preview: BoardLaserPreview | null,
@@ -280,6 +299,7 @@ export interface BoardRendererCallbacks {
   ): void;
   onPenLaserModeChange?(active: boolean): void;
   onGesturePreviewChange?(preview: BoardGesturePreview | null): void;
+  onModifierHintsChange?(actions: readonly BoardModifierHintAction[]): void;
 }
 
 export interface BoardRenderer {
@@ -289,7 +309,6 @@ export interface BoardRenderer {
   setTool(tool: BoardTool): void;
   setShapeKind(kind: BoardShapeKind): void;
   setCreationStyle(style: Readonly<Record<string, unknown>>): void;
-  setConnectorCurvature(curvature: number): void;
   setReadOnly(readOnly: boolean): void;
   setObjects(objects: readonly BoardObjectSnapshot[]): void;
   setObject(object: BoardObjectSnapshot): void;
@@ -297,6 +316,9 @@ export interface BoardRenderer {
   setPresence(presence: readonly BoardPresence[]): void;
   setSelection(ids: readonly string[]): void;
   setInlineEditingObject(id: string | null): void;
+  enterLinePointEditing?(): boolean;
+  deleteSelectedLinePoint?(): boolean;
+  exitLinePointEditing?(): boolean;
   setTheme(theme: BoardTheme): void;
   setGridVisible(visible: boolean): void;
   setCamera(camera: BoardCamera): void;

@@ -160,7 +160,7 @@ afterEach(async () => {
 });
 
 describe("GuestRoomPage", () => {
-  it("requires a profile before mounting room collaboration", async () => {
+  it("suggests a profile but mounts room collaboration with the guest default", async () => {
     window.localStorage.clear();
     resetOnlineProfileMemoryForTests();
     mocks.get.mockResolvedValue(room(["board", "call"]));
@@ -170,13 +170,20 @@ describe("GuestRoomPage", () => {
 
     expect(document.body.querySelector('[role="dialog"]')).not.toBeNull();
     expect(document.body.textContent).toContain("Display Name");
-    expect(mocks.boardProps).toBeUndefined();
-    expect(mocks.callMounts).toBe(0);
-    expect(document.body.querySelector(".modal__header .icon-button")).toBeNull();
+    const displayName = document.body.querySelector<HTMLInputElement>(
+      '[role="dialog"] input[autocomplete="nickname"]',
+    );
+    expect(displayName?.value).toBe("");
+    expect(displayName?.placeholder).toBe("Гость");
+    expect(mocks.boardProps).toMatchObject({
+      profile: { displayName: "Гость", color: "#2563eb" },
+    });
+    expect(mocks.callMounts).toBe(1);
+    expect(document.body.querySelector(".modal__header .icon-button")).not.toBeNull();
 
     await act(async () => {
       document.body.querySelector<HTMLButtonElement>(
-        '[role="dialog"] button[type="submit"]',
+        '[role="dialog"] [aria-label="Закрыть"]',
       )?.click();
       await Promise.resolve();
     });
@@ -231,6 +238,56 @@ describe("GuestRoomPage", () => {
 
     await act(async () => vi.advanceTimersByTime(1_500));
     expect(button?.textContent).toBe("Ссылка");
+  });
+
+  it("asks for confirmation before leaving an active room", async () => {
+    mocks.get.mockResolvedValue(room(["board", "call"]));
+    await renderPage();
+
+    const backButton = container?.querySelector<HTMLButtonElement>(
+      ".public-workspace__back",
+    );
+    await act(async () => {
+      backButton?.click();
+      await Promise.resolve();
+    });
+
+    const dialog = document.body.querySelector('[role="dialog"]');
+    expect(dialog?.textContent).toContain("Покинуть комнату?");
+    expect(dialog?.textContent).toContain("Звонок будет отключён.");
+    expect(mocks.navigate).not.toHaveBeenCalled();
+
+    const leaveButton = Array.from(
+      dialog?.querySelectorAll<HTMLButtonElement>("button") ?? [],
+    ).find((button) => button.textContent === "Покинуть комнату");
+    await act(async () => {
+      leaveButton?.click();
+      await Promise.resolve();
+    });
+
+    expect(mocks.navigate).toHaveBeenCalledWith("/");
+  });
+
+  it("keeps the user in the room when leaving is cancelled", async () => {
+    mocks.get.mockResolvedValue(room(["board"]));
+    await renderPage();
+
+    await act(async () => {
+      container?.querySelector<HTMLButtonElement>(".public-workspace__back")?.click();
+      await Promise.resolve();
+    });
+    const dialog = document.body.querySelector('[role="dialog"]');
+    const stayButton = Array.from(
+      dialog?.querySelectorAll<HTMLButtonElement>("button") ?? [],
+    ).find((button) => button.textContent === "Остаться");
+
+    await act(async () => {
+      stayButton?.click();
+      await Promise.resolve();
+    });
+
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    expect(mocks.navigate).not.toHaveBeenCalled();
   });
 
   it("keeps the same call mounted while Board and Code switch", async () => {

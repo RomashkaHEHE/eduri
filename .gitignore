@@ -2,6 +2,7 @@ node_modules/
 __pycache__/
 *.py[cod]
 .npm-cache/
+.cache/livekit/
 dist/
 dist-server/
 public/vendor/

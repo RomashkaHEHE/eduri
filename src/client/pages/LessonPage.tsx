@@ -116,7 +116,7 @@ function LessonPageContent() {
       };
     }
   }, [lessonId, user?.id, user?.role]);
-  const { profile, configured } = useOnlineProfile({
+  const { profile } = useOnlineProfile({
     defaultDisplayName: user?.displayName ?? "",
     required: Boolean(resource.data && user),
   });
@@ -304,7 +304,7 @@ function LessonPageContent() {
       <section className="lesson-workspace">
         {actionError && <div className="lesson-toast"><Notice type="error">{actionError}</Notice><IconButton label="Закрыть" onClick={() => setActionError(null)}><X size={16} /></IconButton></div>}
         <div className={`workspace-pane ${mode === "board" ? "is-visible" : ""}`} aria-hidden={mode !== "board"}>
-          {configured && profile && <LessonBoard
+          {profile && <LessonBoard
             lessonId={lesson.id}
             userId={user.id}
             lesson={lesson}
@@ -313,7 +313,7 @@ function LessonPageContent() {
           />}
         </div>
         <div className={`workspace-pane code-workspace ${mode === "code" ? "is-visible" : ""}`} aria-hidden={mode !== "code"}>
-          {configured && profile && codeActivated && (
+          {profile && codeActivated && (
             <Suspense fallback={<div className="lesson-runtime-loading"><LoadingBlock label="Загружаем редактор кода" /></div>}>
               <LessonCodeWorkspace
                 lessonId={lesson.id}
@@ -331,7 +331,7 @@ function LessonPageContent() {
       </section>
 
       <aside className={`lesson-dock ${dockOpen ? "lesson-dock--open" : ""}`}>
-        {configured && profile && (
+        {profile && (
           <LessonCall
             lessonId={lesson.id}
             status={lesson.status}

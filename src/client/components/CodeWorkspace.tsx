@@ -2,6 +2,7 @@ import Editor, { type OnMount } from "@monaco-editor/react";
 import {
   FileDigit,
   FilePlus2,
+  Files,
   FolderPlus,
   Play,
   Plus,
@@ -162,11 +163,58 @@ interface CodeWorkspaceProps {
 type MonacoEditorInstance = Parameters<OnMount>[0];
 type MonacoApi = Parameters<OnMount>[1];
 
+const CODE_EDITOR_LANGUAGE_BY_EXTENSION: Readonly<Record<string, string>> = {
+  c: "c",
+  cc: "cpp",
+  cpp: "cpp",
+  cs: "csharp",
+  css: "css",
+  go: "go",
+  h: "c",
+  hpp: "cpp",
+  htm: "html",
+  html: "html",
+  java: "java",
+  js: "javascript",
+  json: "json",
+  jsx: "javascript",
+  kt: "kotlin",
+  less: "less",
+  md: "markdown",
+  markdown: "markdown",
+  php: "php",
+  py: "python",
+  rb: "ruby",
+  rs: "rust",
+  scss: "scss",
+  sh: "shell",
+  sql: "sql",
+  ts: "typescript",
+  tsx: "typescript",
+  xml: "xml",
+  yaml: "yaml",
+  yml: "yaml",
+};
+
+export function codeWorkspaceLanguageForFileName(fileName: string): string {
+  const normalized = fileName.trim().toLocaleLowerCase("en-US");
+  if (normalized === "dockerfile") return "dockerfile";
+  const extension = normalized.includes(".")
+    ? normalized.slice(normalized.lastIndexOf(".") + 1)
+    : "";
+  return CODE_EDITOR_LANGUAGE_BY_EXTENSION[extension] ?? "plaintext";
+}
+
+function isPythonFileName(fileName: string): boolean {
+  return codeWorkspaceLanguageForFileName(fileName) === "python";
+}
+
 const MAX_UPLOAD_BYTES = 32 * 1024 * 1024;
 // Keep sustained tiny-write traffic below the shared transport's ingress budget
 // even while two idempotent retries are awaiting delayed acknowledgements.
 const HOST_OUTPUT_FLUSH_DELAY_MS = 80;
 const CODE_LAYOUT_DIVIDER_SIZE = 8;
+const CODE_ACTIVITY_BAR_WIDTH = 46;
 const CODE_LAYOUT_COMPACT_WIDTH = 620;
 const CODE_LAYOUT_STACK_TESTS_WIDTH = 700;
 const CODE_LAYOUT_STACKED_TESTS_MIN_HEIGHT = 190;
@@ -178,6 +226,7 @@ const CODE_LAYOUT_STACKED_CONSOLE_MIN_HEIGHT =
 
 type CodeWorkspaceSplit = "explorer" | "console" | "tests";
 type CodeWorkspaceSplitOrientation = "horizontal" | "vertical";
+type CodeWorkspaceSidebarPage = "explorer" | "tests";
 
 interface ResolvedCodeWorkspaceLayout {
   readonly layout: CodeWorkspaceLayout;
@@ -230,7 +279,7 @@ function resolveCodeWorkspaceLayout(
     + (testsOpen ? CODE_LAYOUT_STACKED_CONSOLE_MIN_HEIGHT : 180);
   const explorerWidth = clampExplorerWidth(
     requested.explorerWidth,
-    workspaceWidth,
+    Math.max(0, workspaceWidth - CODE_ACTIVITY_BAR_WIDTH),
   );
   const explorerHeight = clampExplorerHeight(
     requested.explorerHeight,
@@ -300,7 +349,10 @@ function consoleWidthAtExplorerSplit(
     ? workspaceWidth
     : Math.max(
         0,
-        workspaceWidth - explorerWidth - CODE_LAYOUT_DIVIDER_SIZE,
+        workspaceWidth
+          - CODE_ACTIVITY_BAR_WIDTH
+          - explorerWidth
+          - CODE_LAYOUT_DIVIDER_SIZE,
       );
 }
 
@@ -336,10 +388,13 @@ function codeWorkspaceSplitDescriptor(
     return {
       orientation: "vertical",
       value: layout.explorerWidth,
-      minimum: clampExplorerWidth(0, resolved.workspaceWidth),
+      minimum: clampExplorerWidth(
+        0,
+        Math.max(0, resolved.workspaceWidth - CODE_ACTIVITY_BAR_WIDTH),
+      ),
       maximum: clampExplorerWidth(
         Number.MAX_SAFE_INTEGER,
-        resolved.workspaceWidth,
+        Math.max(0, resolved.workspaceWidth - CODE_ACTIVITY_BAR_WIDTH),
       ),
       defaultValue: DEFAULT_CODE_WORKSPACE_LAYOUT.explorerWidth,
       decreaseKey: "ArrowLeft",
@@ -573,9 +628,21 @@ export function CodeWorkspace({
     = useState(0);
   const [terminalSubmitRejectionRevision, setTerminalSubmitRejectionRevision]
     = useState(0);
-  const [testsOpen, setTestsOpen] = useState(false);
+  const [sidebarPage, setSidebarPage] = useState<CodeWorkspaceSidebarPage>(
+    "explorer",
+  );
   const [testState, setTestState] = useState<"idle" | "passed" | "failed">("idle");
   const [error, setError] = useState<string | null>(null);
+  const active = entries.find((entry) => entry.id === activeId) ?? null;
+  const activeSupportsTests = Boolean(
+    active?.kind === "file"
+    && active.contentKind === "text"
+    && isPythonFileName(active.name),
+  );
+  const activeEditorLanguage = active?.kind === "file"
+    ? codeWorkspaceLanguageForFileName(active.name)
+    : "plaintext";
+  const testsPanelOpen = sidebarPage === "tests" && activeSupportsTests;
   const [initialWorkspaceLayout] = useState(loadCodeWorkspaceLayout);
   const [resolvedWorkspaceLayout, setResolvedWorkspaceLayout] = useState<
     ResolvedCodeWorkspaceLayout
@@ -625,11 +692,9 @@ export function CodeWorkspace({
   const workspaceRootRef = useRef<HTMLDivElement | null>(null);
   const explorerSeparatorRef = useRef<HTMLDivElement | null>(null);
   const consoleSeparatorRef = useRef<HTMLDivElement | null>(null);
-  const testsSeparatorRef = useRef<HTMLDivElement | null>(null);
   const storedWorkspaceLayoutRef = useRef(initialWorkspaceLayout);
   const resolvedWorkspaceLayoutRef = useRef(resolvedWorkspaceLayout);
   const activeWorkspaceResizeRef = useRef<ActiveCodeWorkspaceResize | null>(null);
-  const testsOpenRef = useRef(testsOpen);
   const mountedRef = useRef(false);
   const sessionRef = useRef<CodeWorkspaceSessionHandle | null>(null);
   const activeIdRef = useRef<string | null>(null);
@@ -666,7 +731,6 @@ export function CodeWorkspace({
   activeTestIdRef.current = activeTestId;
   editorThemeRef.current = editorTheme;
   remotePeersRef.current = remotePeers;
-  testsOpenRef.current = testsOpen;
 
   const applyWorkspaceLayout = useCallback((
     requested: CodeWorkspaceLayout,
@@ -677,7 +741,7 @@ export function CodeWorkspace({
     const resolved = resolveCodeWorkspaceLayout(
       root,
       requested,
-      testsOpenRef.current,
+      false,
     );
     resolvedWorkspaceLayoutRef.current = resolved;
     root.style.setProperty(
@@ -701,7 +765,6 @@ export function CodeWorkspace({
       `${resolved.layout.testsHeight}px`,
     );
     root.dataset.codeLayout = resolved.compact ? "compact" : "wide";
-    root.dataset.codeTestsLayout = resolved.testsStacked ? "stacked" : "side";
 
     const updateSeparator = (
       separator: HTMLDivElement | null,
@@ -717,7 +780,6 @@ export function CodeWorkspace({
     };
     updateSeparator(explorerSeparatorRef.current, "explorer");
     updateSeparator(consoleSeparatorRef.current, "console");
-    updateSeparator(testsSeparatorRef.current, "tests");
     if (render) setResolvedWorkspaceLayout(resolved);
     return resolved;
   }, []);
@@ -901,13 +963,17 @@ export function CodeWorkspace({
   }, [applyWorkspaceLayout, session]);
 
   useLayoutEffect(() => {
-    if (!session) return;
-    applyWorkspaceLayout(storedWorkspaceLayoutRef.current, true);
-  }, [applyWorkspaceLayout, session, testsOpen]);
-
-  useLayoutEffect(() => {
     monacoRef.current?.editor.setTheme(editorTheme);
   }, [editorTheme]);
+
+  useLayoutEffect(() => {
+    const editor = editorRef.current;
+    const monaco = monacoRef.current;
+    const model = editor?.getModel();
+    if (model && monaco) {
+      monaco.editor.setModelLanguage(model, activeEditorLanguage);
+    }
+  }, [activeEditorLanguage]);
 
   const publishAwareness = useCallback(() => {
     const bridge = sessionRef.current?.awareness;
@@ -1606,6 +1672,21 @@ export function CodeWorkspace({
     try {
       await handle.waitUntilSynchronized?.();
       requireActiveRun();
+      if (effect.type === "start-run") {
+        const currentEntry = listCodeWorkspaceEntries(handle.document)
+          .find((entry) => entry.id === effect.entryId);
+        const currentEntrypoint = workspaceFilePaths(handle.document)
+          .get(effect.entryId);
+        if (
+          !currentEntry
+          || currentEntry.kind !== "file"
+          || currentEntry.contentKind !== "text"
+          || !isPythonFileName(currentEntry.name)
+          || currentEntrypoint !== effect.entrypoint
+        ) {
+          throw new Error("Запуск доступен только для актуального Python-файла");
+        }
+      }
       if (effect.type === "start-run" && effect.testId) {
         const baseline = await capturePythonWorkspaceRunBaseline(
           handle.document,
@@ -1956,12 +2037,6 @@ export function CodeWorkspace({
     })));
   }, [activeId, remotePeers]);
 
-  const active = entries.find((entry) => entry.id === activeId) ?? null;
-  const activeSupportsTests = Boolean(
-    active?.kind === "file"
-    && active.contentKind === "text"
-    && /\.py$/iu.test(active.name),
-  );
   const activeFileTests = useMemo(() => (
     activeSupportsTests && active
       ? tests.filter((test) => test.entryId === active.id)
@@ -1996,6 +2071,12 @@ export function CodeWorkspace({
         : "idle",
     );
   }, [activeId, activeTestId, tests]);
+
+  useEffect(() => {
+    if (!activeSupportsTests && sidebarPage === "tests") {
+      setSidebarPage("explorer");
+    }
+  }, [activeSupportsTests, sidebarPage]);
 
   useLayoutEffect(() => {
     if (!activeTest) {
@@ -2250,6 +2331,7 @@ export function CodeWorkspace({
       || !active
       || active.kind !== "file"
       || active.contentKind !== "text"
+      || !activeSupportsTests
       || readOnly
       || terminalReadOnly
       || terminalRunning
@@ -2277,6 +2359,16 @@ export function CodeWorkspace({
       ) return;
       const currentTerminal = terminalStateRef.current;
       if (currentTerminal && currentTerminal.mode !== "shell") return;
+      const currentEntry = listCodeWorkspaceEntries(session.document)
+        .find((entry) => entry.id === requestedEntryId);
+      if (
+        !currentEntry
+        || currentEntry.kind !== "file"
+        || currentEntry.contentKind !== "text"
+        || !isPythonFileName(currentEntry.name)
+      ) {
+        throw new Error("Запуск доступен только для Python-файлов");
+      }
       const entrypoint = workspaceFilePaths(session.document).get(requestedEntryId);
       if (!entrypoint) throw new Error("Python entry point is unavailable");
       const actionId = crypto.randomUUID();
@@ -2327,7 +2419,8 @@ export function CodeWorkspace({
     event: ReactKeyboardEvent<HTMLDivElement>,
   ) => {
     if (
-      event.key !== "F9"
+      !activeSupportsTests
+      || event.key !== "F9"
       || event.ctrlKey
       || event.metaKey
       || event.altKey
@@ -2342,7 +2435,7 @@ export function CodeWorkspace({
       || (currentTerminal !== null && currentTerminal.mode !== "shell")
     ) return;
     void startSharedRun(false);
-  }, [startSharedRun]);
+  }, [activeSupportsTests, startSharedRun]);
 
   const activeTestNameTarget = activeTest
     ? { kind: "test", testId: activeTest.id, field: "name" } as const
@@ -2358,11 +2451,6 @@ export function CodeWorkspace({
     resolvedWorkspaceLayout,
     "console",
   );
-  const testsSplit = codeWorkspaceSplitDescriptor(
-    resolvedWorkspaceLayout,
-    "tests",
-  );
-
   if (!session) {
     return (
       <div className="code-workspace-gate" role="status">
@@ -2378,35 +2466,298 @@ export function CodeWorkspace({
       data-code-theme={theme}
       data-code-layout={resolvedWorkspaceLayout.compact ? "compact" : "wide"}
       onKeyDownCapture={handleWorkspaceKeyDownCapture}
-      data-code-tests-layout={
-        resolvedWorkspaceLayout.testsStacked ? "stacked" : "side"
-      }
     >
-      <CodeExplorer
-        id={explorerPanelId}
-        entries={entries}
-        activeId={activeId}
-        readOnly={readOnly}
-        renamingId={renamingId}
-        renameValue={renameValue}
-        onActivate={setActiveId}
-        onBeginRename={beginRename}
-        onRenameValueChange={setRenameValue}
-        onCommitRename={commitRename}
-        awarenessPeers={remotePeers}
-        publishAwareness={publishOwnedAwareness}
-        onCancelRename={() => {
-          setRenamingId(null);
-          setRenameValue("");
-        }}
-        onCreate={createEntry}
-        onUpload={(files, parentId) => void uploadFiles(files, parentId)}
-        onDuplicate={duplicateEntry}
-        onDelete={deleteEntry}
-        onMove={moveEntry}
-        onUndo={undoExplorer}
-        onRedo={redoExplorer}
-      />
+      <aside className="code-sidebar" aria-label="Боковая панель кода">
+        <nav className="code-activity-bar" aria-label="Разделы рабочей области">
+          <button
+            type="button"
+            className={`code-activity-bar__item code-activity-bar__explorer${
+              sidebarPage === "explorer" ? " is-active" : ""
+            }`}
+            aria-label="Проводник"
+            title="Проводник"
+            aria-pressed={sidebarPage === "explorer"}
+            aria-controls={explorerPanelId}
+            onClick={() => setSidebarPage("explorer")}
+          >
+            <Files size={21} strokeWidth={1.7} />
+          </button>
+          <button
+            type="button"
+            className={`code-activity-bar__item code-tests-toggle${
+              testsPanelOpen ? " is-active" : ""
+            }`}
+            aria-label="Тесты"
+            title={activeSupportsTests ? "Тесты" : "Тесты доступны для Python-файлов"}
+            aria-pressed={testsPanelOpen}
+            aria-expanded={testsPanelOpen}
+            aria-controls={testsPanelId}
+            disabled={!activeSupportsTests}
+            onClick={() => setSidebarPage("tests")}
+          >
+            <TestTube2 size={21} strokeWidth={1.7} />
+            <span className="sr-only">Тесты</span>
+            {activeFileTests.length > 0 && (
+              <span className="code-activity-bar__badge">
+                {activeFileTests.length}
+              </span>
+            )}
+          </button>
+        </nav>
+
+        <div
+          className="code-sidebar__page"
+          hidden={sidebarPage !== "explorer"}
+        >
+          <CodeExplorer
+            id={explorerPanelId}
+            entries={entries}
+            activeId={activeId}
+            readOnly={readOnly}
+            renamingId={renamingId}
+            renameValue={renameValue}
+            onActivate={setActiveId}
+            onBeginRename={beginRename}
+            onRenameValueChange={setRenameValue}
+            onCommitRename={commitRename}
+            awarenessPeers={remotePeers}
+            publishAwareness={publishOwnedAwareness}
+            onCancelRename={() => {
+              setRenamingId(null);
+              setRenameValue("");
+            }}
+            onCreate={createEntry}
+            onUpload={(files, parentId) => void uploadFiles(files, parentId)}
+            onDuplicate={duplicateEntry}
+            onDelete={deleteEntry}
+            onMove={moveEntry}
+            onUndo={undoExplorer}
+            onRedo={redoExplorer}
+          />
+        </div>
+
+        {testsPanelOpen && (
+          <section id={testsPanelId} className="code-sidebar-tests">
+            <header className="code-sidebar-tests__head">
+              <strong>Тесты</strong>
+              <span>{activeFileTests.length}</span>
+            </header>
+            <div className="code-console__inputs">
+              {activeFileTests.length === 0 ? (
+                <div className="code-tests-empty">
+                  <button
+                    type="button"
+                    disabled={readOnly}
+                    onClick={createTest}
+                  >
+                    <Plus size={15} /> Создать тест
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div
+                    className="code-tests__tabs"
+                    role="tablist"
+                    aria-label="Тесты"
+                  >
+                    {activeFileTests.map((test) => (
+                      <button
+                        key={test.id}
+                        type="button"
+                        role="tab"
+                        aria-selected={test.id === activeTestId}
+                        className={test.id === activeTestId ? "is-active" : ""}
+                        onClick={() => {
+                          if (document.activeElement instanceof HTMLElement) {
+                            document.activeElement.blur();
+                          }
+                          setActiveTestId(test.id);
+                        }}
+                      >
+                        <TestTube2 size={13} />
+                        <span>{test.name}</span>
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      aria-label="Добавить тест"
+                      title="Добавить тест"
+                      onClick={createTest}
+                      disabled={readOnly}
+                    >
+                      <Plus size={14} />
+                    </button>
+                  </div>
+                  {activeTest && (
+                    <div className="code-test__meta" key={activeTest.id}>
+                      {activeTestNameTarget && (
+                        <div className="code-test__field code-test__field--title">
+                          <label htmlFor={`${testFieldIdPrefix}-test-title`}>
+                            Title:
+                          </label>
+                          <NativeInputPresence
+                            className="code-presence-field"
+                            target={activeTestNameTarget}
+                            value={testNameDraft}
+                            peers={remotePeers}
+                            publish={publishOwnedAwareness}
+                          >
+                            {(presence) => (
+                              <input
+                                {...presence}
+                                id={`${testFieldIdPrefix}-test-title`}
+                                data-code-test-field={`${activeTest.id}:name`}
+                                aria-label="Название теста"
+                                value={testNameDraft}
+                                readOnly={readOnly}
+                                onChange={(event) => setTestNameDraft(event.target.value)}
+                                onBlur={(event) => {
+                                  presence.onBlur(event);
+                                  if (activeTestIdRef.current !== activeTest.id) return;
+                                  if (event.target.value.trim()) {
+                                    patchTest(activeTest.id, { name: event.target.value });
+                                  } else {
+                                    setTestNameDraft(activeTest.name);
+                                  }
+                                }}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter") event.currentTarget.blur();
+                                }}
+                              />
+                            )}
+                          </NativeInputPresence>
+                        </div>
+                      )}
+                      {activeTestTimeoutTarget && (
+                        <div className="code-test__field code-test__field--timeout">
+                          <label htmlFor={`${testFieldIdPrefix}-test-timeout`}>
+                            Timeout:
+                          </label>
+                          <NativeInputPresence
+                            className="code-presence-field"
+                            target={activeTestTimeoutTarget}
+                            value={testTimeoutDraft}
+                            peers={remotePeers}
+                            publish={publishOwnedAwareness}
+                          >
+                            {(presence) => (
+                              <input
+                                {...presence}
+                                id={`${testFieldIdPrefix}-test-timeout`}
+                                data-code-test-field={`${activeTest.id}:timeout`}
+                                type="text"
+                                inputMode="numeric"
+                                pattern="[0-9]*"
+                                maxLength={String(CODE_TEST_TIMEOUT_MAX_MS).length}
+                                aria-label="Лимит теста, мс"
+                                title="Лимит теста, мс"
+                                value={testTimeoutDraft}
+                                readOnly={readOnly}
+                                onChange={(event) => {
+                                  if (/^\d*$/u.test(event.target.value)) {
+                                    setTestTimeoutDraft(event.target.value);
+                                  }
+                                }}
+                                onBlur={(event) => {
+                                  presence.onBlur(event);
+                                  if (activeTestIdRef.current !== activeTest.id) return;
+                                  const timeoutMs = Number(event.currentTarget.value);
+                                  if (
+                                    event.currentTarget.value !== ""
+                                    && Number.isSafeInteger(timeoutMs)
+                                    && timeoutMs >= CODE_TEST_TIMEOUT_MIN_MS
+                                    && timeoutMs <= CODE_TEST_TIMEOUT_MAX_MS
+                                  ) {
+                                    patchTest(activeTest.id, { timeoutMs });
+                                  } else {
+                                    setTestTimeoutDraft(String(activeTest.timeoutMs));
+                                  }
+                                }}
+                                onKeyDown={(event) => {
+                                  if (event.key === "Enter") event.currentTarget.blur();
+                                }}
+                              />
+                            )}
+                          </NativeInputPresence>
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        aria-label="Удалить тест"
+                        title="Удалить тест"
+                        disabled={readOnly}
+                        onClick={() => removeCodeTestCase(
+                          session.document,
+                          activeTest.id,
+                          session.origin,
+                        )}
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  )}
+                  <label>
+                    <span>Ввод</span>
+                    {activeTest && activeTestStdin instanceof Y.Text ? (
+                      <CollaborativeMonacoTextField
+                        key={`${activeTest.id}:stdin`}
+                        yText={activeTestStdin}
+                        transactionOrigin={session.origin}
+                        target={{
+                          kind: "test",
+                          testId: activeTest.id,
+                          field: "stdin",
+                        }}
+                        publishAwareness={publishOwnedAwareness}
+                        peers={remotePeers}
+                        modelPath={`eduri-test://${session.document.guid}/${activeTest.id}/stdin.txt`}
+                        ariaLabel={`Ввод теста ${activeTest.name}`}
+                        theme={editorTheme}
+                        readOnly={readOnly}
+                      />
+                    ) : <div className="code-collaborative-field" />}
+                  </label>
+                  <label>
+                    <span>Ожидаемый вывод</span>
+                    {activeTest && activeTestExpectedOutput instanceof Y.Text ? (
+                      <CollaborativeMonacoTextField
+                        key={`${activeTest.id}:expectedOutput`}
+                        yText={activeTestExpectedOutput}
+                        transactionOrigin={session.origin}
+                        target={{
+                          kind: "test",
+                          testId: activeTest.id,
+                          field: "expectedOutput",
+                        }}
+                        publishAwareness={publishOwnedAwareness}
+                        peers={remotePeers}
+                        modelPath={`eduri-test://${session.document.guid}/${activeTest.id}/expected.txt`}
+                        ariaLabel={`Ожидаемый вывод теста ${activeTest.name}`}
+                        theme={editorTheme}
+                        readOnly={readOnly}
+                      />
+                    ) : <div className="code-collaborative-field" />}
+                  </label>
+                  <button
+                    type="button"
+                    disabled={
+                      readOnly
+                      || terminalReadOnly
+                      || terminalRunning
+                      || runRequestPending
+                      || !activeSupportsTests
+                      || !activeTest
+                    }
+                    onClick={() => void startSharedRun(true)}
+                  >
+                    <Play size={15} /> Проверить
+                  </button>
+                </>
+              )}
+            </div>
+          </section>
+        )}
+      </aside>
 
       <div
         ref={explorerSeparatorRef}
@@ -2414,8 +2765,8 @@ export function CodeWorkspace({
         data-code-split="explorer"
         role="separator"
         tabIndex={0}
-        aria-label="Изменить размер проводника"
-        aria-controls={`${explorerPanelId} ${editorPanelId}`}
+        aria-label="Изменить размер боковой панели"
+        aria-controls={`${sidebarPage === "tests" ? testsPanelId : explorerPanelId} ${editorPanelId}`}
         aria-orientation={explorerSplit.orientation}
         aria-valuemin={explorerSplit.minimum}
         aria-valuemax={explorerSplit.maximum}
@@ -2433,22 +2784,7 @@ export function CodeWorkspace({
         <header className="code-main__toolbar">
           <strong>{active?.name ?? "Python"}</strong>
           <div>
-            <button
-              type="button"
-              className={`code-tests-toggle${testsOpen ? " is-active" : ""}`}
-              aria-label={testsOpen ? "Скрыть тесты" : "Показать тесты"}
-              title={activeSupportsTests
-                ? (testsOpen ? "Скрыть тесты" : "Показать тесты")
-                : "Автотесты доступны для Python-файлов"}
-              aria-expanded={testsOpen}
-              aria-controls={testsPanelId}
-              disabled={!activeSupportsTests && !testsOpen}
-              onClick={() => setTestsOpen((current) => !current)}
-            >
-              <TestTube2 size={15} />
-              <span>Тесты</span>
-              <span className="code-tests-toggle__count">{activeFileTests.length}</span>
-            </button>
+            {(activeSupportsTests || terminalRunning) && (
             <button
               type="button"
               className="code-run-command"
@@ -2458,8 +2794,7 @@ export function CodeWorkspace({
                 readOnly
                 || terminalReadOnly
                 || runRequestPending
-                || active?.kind !== "file"
-                || active.contentKind !== "text"
+                || (!terminalRunning && !activeSupportsTests)
               }
               onClick={() => {
                 if (terminalRunning) stopSharedRun();
@@ -2469,6 +2804,7 @@ export function CodeWorkspace({
               {terminalRunning ? <Square size={15} /> : <Play size={16} />}
               {terminalRunning ? "Stop" : "F9"}
             </button>
+            )}
             {syncStatus && <CodeSyncIndicator {...syncStatus} />}
           </div>
         </header>
@@ -2477,7 +2813,7 @@ export function CodeWorkspace({
             <Editor
               path={active.id}
               onMount={handleEditorMount}
-              language={active.name.endsWith(".py") ? "python" : "plaintext"}
+              language={activeEditorLanguage}
               defaultValue={active.text ?? ""}
               theme={editorTheme}
               options={mainEditorOptions}
@@ -2558,230 +2894,7 @@ export function CodeWorkspace({
         }}
       />
 
-      <section
-        id={consolePanelId}
-        className={`code-console${testsOpen ? " is-tests-open" : ""}`}
-      >
-        {testsOpen && (
-        <div id={testsPanelId} className="code-console__inputs">
-          {!activeSupportsTests ? (
-            <div className="code-tests-empty">
-              Выберите Python-файл, чтобы открыть его автотесты
-            </div>
-          ) : activeFileTests.length === 0 ? (
-            <div className="code-tests-empty">
-              <button
-                type="button"
-                disabled={readOnly}
-                onClick={createTest}
-              >
-                <Plus size={15} /> Создать тест
-              </button>
-            </div>
-          ) : (
-            <>
-          <div className="code-tests__tabs" role="tablist" aria-label="Тесты">
-            {activeFileTests.map((test) => (
-              <button
-                key={test.id}
-                type="button"
-                role="tab"
-                aria-selected={test.id === activeTestId}
-                className={test.id === activeTestId ? "is-active" : ""}
-                onClick={() => {
-                  if (document.activeElement instanceof HTMLElement) {
-                    document.activeElement.blur();
-                  }
-                  setActiveTestId(test.id);
-                }}
-              >
-                <TestTube2 size={13} />
-                <span>{test.name}</span>
-              </button>
-            ))}
-            <button
-              type="button"
-              aria-label="Добавить тест"
-              title="Добавить тест"
-              onClick={createTest}
-              disabled={readOnly}
-            ><Plus size={14} /></button>
-          </div>
-          {activeTest && (
-            <div className="code-test__meta" key={activeTest.id}>
-              {activeTestNameTarget && (
-                <div className="code-test__field code-test__field--title">
-                  <label htmlFor={`${testFieldIdPrefix}-test-title`}>Title:</label>
-                  <NativeInputPresence
-                    className="code-presence-field"
-                    target={activeTestNameTarget}
-                    value={testNameDraft}
-                    peers={remotePeers}
-                    publish={publishOwnedAwareness}
-                  >
-                    {(presence) => (
-                      <input
-                        {...presence}
-                        id={`${testFieldIdPrefix}-test-title`}
-                        data-code-test-field={`${activeTest.id}:name`}
-                        aria-label="Название теста"
-                        value={testNameDraft}
-                        readOnly={readOnly}
-                        onChange={(event) => setTestNameDraft(event.target.value)}
-                        onBlur={(event) => {
-                          presence.onBlur(event);
-                          if (activeTestIdRef.current !== activeTest.id) return;
-                          if (event.target.value.trim()) {
-                            patchTest(activeTest.id, { name: event.target.value });
-                          } else {
-                            setTestNameDraft(activeTest.name);
-                          }
-                        }}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") event.currentTarget.blur();
-                        }}
-                      />
-                    )}
-                  </NativeInputPresence>
-                </div>
-              )}
-              {activeTestTimeoutTarget && (
-                <div className="code-test__field code-test__field--timeout">
-                  <label htmlFor={`${testFieldIdPrefix}-test-timeout`}>Timeout:</label>
-                  <NativeInputPresence
-                    className="code-presence-field"
-                    target={activeTestTimeoutTarget}
-                    value={testTimeoutDraft}
-                    peers={remotePeers}
-                    publish={publishOwnedAwareness}
-                  >
-                    {(presence) => (
-                      <input
-                        {...presence}
-                        id={`${testFieldIdPrefix}-test-timeout`}
-                        data-code-test-field={`${activeTest.id}:timeout`}
-                        type="text"
-                        inputMode="numeric"
-                        pattern="[0-9]*"
-                        maxLength={String(CODE_TEST_TIMEOUT_MAX_MS).length}
-                        aria-label="Лимит теста, мс"
-                        title="Лимит теста, мс"
-                        value={testTimeoutDraft}
-                        readOnly={readOnly}
-                        onChange={(event) => {
-                          if (/^\d*$/u.test(event.target.value)) {
-                            setTestTimeoutDraft(event.target.value);
-                          }
-                        }}
-                        onBlur={(event) => {
-                          presence.onBlur(event);
-                          if (activeTestIdRef.current !== activeTest.id) return;
-                          const timeoutMs = Number(event.currentTarget.value);
-                          if (
-                            event.currentTarget.value !== ""
-                            && Number.isSafeInteger(timeoutMs)
-                            && timeoutMs >= CODE_TEST_TIMEOUT_MIN_MS
-                            && timeoutMs <= CODE_TEST_TIMEOUT_MAX_MS
-                          ) {
-                            patchTest(activeTest.id, {
-                              timeoutMs,
-                            });
-                          } else {
-                            setTestTimeoutDraft(String(activeTest.timeoutMs));
-                          }
-                        }}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") event.currentTarget.blur();
-                        }}
-                      />
-                    )}
-                  </NativeInputPresence>
-                </div>
-              )}
-              <button
-                type="button"
-                aria-label="Удалить тест"
-                title="Удалить тест"
-                disabled={readOnly}
-                onClick={() => removeCodeTestCase(
-                  session.document,
-                  activeTest.id,
-                  session.origin,
-                )}
-              ><Trash2 size={14} /></button>
-            </div>
-          )}
-          <label>
-            <span>Ввод</span>
-            {activeTest && activeTestStdin instanceof Y.Text ? (
-              <CollaborativeMonacoTextField
-                key={`${activeTest.id}:stdin`}
-                yText={activeTestStdin}
-                transactionOrigin={session.origin}
-                target={{
-                  kind: "test",
-                  testId: activeTest.id,
-                  field: "stdin",
-                }}
-                publishAwareness={publishOwnedAwareness}
-                peers={remotePeers}
-                modelPath={`eduri-test://${session.document.guid}/${activeTest.id}/stdin.txt`}
-                ariaLabel={`Ввод теста ${activeTest.name}`}
-                theme={editorTheme}
-                readOnly={readOnly}
-              />
-            ) : <div className="code-collaborative-field" />}
-          </label>
-          <label>
-            <span>Ожидаемый вывод</span>
-            {activeTest && activeTestExpectedOutput instanceof Y.Text ? (
-              <CollaborativeMonacoTextField
-                key={`${activeTest.id}:expectedOutput`}
-                yText={activeTestExpectedOutput}
-                transactionOrigin={session.origin}
-                target={{
-                  kind: "test",
-                  testId: activeTest.id,
-                  field: "expectedOutput",
-                }}
-                publishAwareness={publishOwnedAwareness}
-                peers={remotePeers}
-                modelPath={`eduri-test://${session.document.guid}/${activeTest.id}/expected.txt`}
-                ariaLabel={`Ожидаемый вывод теста ${activeTest.name}`}
-                theme={editorTheme}
-                readOnly={readOnly}
-              />
-            ) : <div className="code-collaborative-field" />}
-          </label>
-          <button type="button" disabled={readOnly || terminalReadOnly || terminalRunning || runRequestPending || !activeSupportsTests || !activeTest} onClick={() => void startSharedRun(true)}>
-            <Play size={15} /> Проверить
-          </button>
-            </>
-          )}
-        </div>
-        )}
-        {testsOpen && (
-          <div
-            ref={testsSeparatorRef}
-            className="code-workspace__separator code-workspace__separator--tests"
-            data-code-split="tests"
-            role="separator"
-            tabIndex={0}
-            aria-label="Изменить размер панели автотестов"
-            aria-controls={`${testsPanelId} ${terminalPanelId}`}
-            aria-orientation={testsSplit.orientation}
-            aria-valuemin={testsSplit.minimum}
-            aria-valuemax={testsSplit.maximum}
-            aria-valuenow={testsSplit.value}
-            aria-valuetext={`${testsSplit.value} пикселей`}
-            onPointerDown={(event) => startWorkspaceResize("tests", event)}
-            onKeyDown={(event) => handleWorkspaceSeparatorKeyDown("tests", event)}
-            onDoubleClick={(event) => {
-              event.preventDefault();
-              resetWorkspaceSplit("tests");
-            }}
-          />
-        )}
+      <section id={consolePanelId} className="code-console">
         <div id={terminalPanelId} className="code-console__output">
           <header>
             <strong>Терминал</strong>

@@ -56,6 +56,10 @@ locally first, queued durably, and synchronized in the background.
   `Alt+ArrowRight` on a Drawing preset and `Alt+ArrowUp`/`Alt+ArrowDown` on a
   toolbar-configuration row are documented reordering exceptions; they move
   the focused item rather than selecting another tool.
+- Numeric textboxes never expose browser spinner-arrow buttons anywhere in the
+  web client. They retain ordinary typing, validation, and documented keyboard
+  behavior; this is one global presentation rule for every
+  `input[type="number"]`, not a component-specific exception.
 - `Ctrl` and `Cmd` are treated as the same board-command modifier. Tool
   shortcuts reject every modifier and key repeat. Command shortcuts generally
   do not reject an additional `Alt` or `Shift`; `Shift` has special meaning
@@ -70,11 +74,11 @@ locally first, queued durably, and synchronized in the background.
 - A newly mounted board starts in Select with no selection or inline editor.
   The world origin is centered at exactly 100% zoom.
 - Camera, current tool, selection, editor state, code-run UI, grid visibility,
-  toolbar layout, connector-creation curvature, and creation presets are local
+  toolbar layout, and creation presets/styles are local
   board view/input state. The site theme is application presentation state.
   None of them is board CRDT content or an undo item.
-- Site theme, grid visibility, toolbar item order/visibility, line and arrow
-  creation curvature, ordinary creation styles, and the free-drawing palette's
+- Site theme, grid visibility, toolbar item order/visibility, ordinary creation
+  styles, and the free-drawing palette's
   ordered slots and values persist best-effort on the current device. Camera,
   selection, current tool, the current shape kind, active Drawing
   slot, either palette/toolbar configuration mode, open tool/preset popups, the
@@ -85,9 +89,9 @@ locally first, queued durably, and synchronized in the background.
   free-drawing presets unless it is itself remounted. The application provider
   keeps the site theme across board and route remounts.
 - Browser-storage failure never blocks drawing. Site theme falls back to the OS
-  preference, the grid defaults visible, toolbar layout falls back to its
-  built-in main/overflow split, connector curvature falls back to straight,
-  and creation palettes/styles fall back to their built-in values.
+  preference, the grid defaults hidden, toolbar layout falls back to its
+  built-in main/overflow split, and creation palettes/styles fall back to their
+  built-in values.
 
 ## Toolbars
 
@@ -114,6 +118,41 @@ active/disabled treatment as its peers.
 | Code block | none | Select the tool, then click the canvas to place and edit a Python block | Overflow | Disabled |
 | LaTeX formula | none | Select the tool, then click the canvas to place and edit LaTeX source | Overflow | Disabled |
 | Image | none | Select the tool, then click the canvas to open the file picker for that location | Overflow | Disabled |
+
+### Contextual modifier hints
+
+A faint, compact hint stack sits immediately to the left of the main toolbar.
+It is not a static shortcut legend: the renderer reports only held-key actions
+that can change the current tool or gesture **at that moment**. Each row shows
+the key and a short action label. The stack accepts no pointer input, reserves
+no empty placeholder when there are no actions, and is hidden while an object
+editor or board context menu owns keyboard input. On narrow surfaces it remains
+to the toolbar's left in the same top row and the toolbar keeps horizontal
+scrolling. Opening toolbar configuration hides the stack.
+
+| Current renderer state | Visible hints |
+| --- | --- |
+| Select, no active gesture | `Shift` add to selection; `Ctrl` ignore objects; `Alt` lasso |
+| Active rectangular area selection | `Shift` include touched objects; armed `Ctrl` move the area |
+| Active lasso selection | Armed `Ctrl` move the area |
+| Drawing selected, no active gesture | `Alt` laser |
+| Active ordinary Drawing/highlighter stroke | Armed `Ctrl` move the unfinished stroke; `Shift` straight segment |
+| Active laser, pan, pinch, placement, shape/connector drawing, resize, or object drag | none |
+| Active Eraser gesture | `Alt` restore an object from the pending erase set |
+| Active rotation handle gesture | `Shift` snap to 45-degree steps |
+| Hand, Eraser while idle, Text, Line, Arrow, Shape, Code, LaTeX, or Image while idle | none |
+
+`Ctrl` labels also describe the equivalent `Cmd` behavior. For selection-area
+and unfinished-stroke movement, a command key already down at pointer-down is
+not advertised: the movement latch first requires a full `Ctrl`/`Cmd` release,
+and only then does the `Ctrl` row appear. Consequently Drawing begins with only
+the `Shift` row in that pre-held-command case, changes to `Ctrl` plus `Shift`
+after release, and returns to the idle `Alt` row on pointer-up. `Alt` is absent
+during an ordinary stroke because it cannot convert that stroke to laser.
+
+The hint stack is renderer/UI-local state. It creates no CRDT update, awareness
+payload, command, or undo item. Empty states are intentional and must not be
+filled with generic shortcuts such as Space-to-pan.
 
 Shape is one stable tool and one visibility/order unit. Its toolbar button is
 an ordinary single-action button with no adjacent arrow, split action, or shape
@@ -397,10 +436,10 @@ group and all other mutation commands are omitted rather than shown disabled.
 
 ## Grid
 
-- The grid is visible by default. The canvas-menu checkbox changes a
+- The grid is hidden by default. The canvas-menu checkbox changes a
   best-effort browser-profile preference shared by boards on that origin.
-  Exactly the stored string `false` under `eduri-board-grid-visible` starts it
-  hidden.
+  Exactly the stored string `true` under `eduri-board-grid-visible` starts it
+  visible; missing, invalid, or inaccessible storage keeps it hidden.
 - Grid visibility is local presentation state: it is not CRDT or manifest/page
   content, does not synchronize through awareness, and creates no undo item.
   The document schema reserves shared page grid settings for future work, but
@@ -554,14 +593,14 @@ faded object. `Escape` explicitly invokes the same cancellation path.
   budget, points are distributed across the included paths and sampled evenly
   from start to end. This network guard never deletes or shortens a local path.
 - Releasing `Alt` after pointer-up clears awareness and
-  fades every retained stroke together over 800 ms. If the modifier is released
+  fades every retained stroke together over 300 ms. If the modifier is released
   during an active laser stroke, release is remembered: that stroke remains
   visible and drawable through pointer-up, then the complete session fades.
   Re-pressing `Alt` before that pointer-up does not cancel the remembered
   release or start a durable stroke.
 - The awareness clear carries `laserClearMode=fade` for that normal release.
   Explicit cancellation instead carries `laserClearMode=immediate`, so peers
-  do not leave an 800 ms ghost after a cancelled gesture. Older senders without
+  do not leave a 300 ms ghost after a cancelled gesture. Older senders without
   this field retain the compatible normal-fade behavior.
 - While Drawing is selected, the toolbar's Pencil presentation becomes its
   minimal pointer presentation whenever a pre-gesture `Alt` hold can start
@@ -587,10 +626,12 @@ faded object. `Escape` explicitly invokes the same cancellation path.
 - While the primary pointer or pen remains down, holding `Ctrl` or `Cmd`
   temporarily changes movement from drawing to dragging the complete current,
   unfinished stroke. The board camera does not move.
-- `Ctrl`/`Cmd` may be held before or pressed after pointer-down. An initial hold
-  still starts an ordinary Drawing gesture, never laser, and the first movement
-  drags its unfinished geometry. Release `Ctrl`/`Cmd` to resume sampling the
-  same stroke without a connecting jump.
+- `Ctrl`/`Cmd` already held at pointer-down is ignored for movement and the
+  initial hold draws an ordinary freehand stroke. Movement remains disarmed
+  until both `Ctrl` and `Cmd` have been released; pressing either one again
+  during the same pointer gesture then starts dragging the unfinished stroke.
+  A gesture which began without either modifier can enter movement on its first
+  later `Ctrl`/`Cmd` press as usual.
 - No new stroke point is added while dragging. Every already sampled point,
   including a provisional straight endpoint, moves by the same logical delta,
   and the bounded live awareness preview moves with it.
@@ -598,9 +639,10 @@ faded object. `Escape` explicitly invokes the same cancellation path.
   The moved final stroke point therefore remains under the pointer; releasing
   the modifier continues the same stroke from that point without a connecting
   jump.
-- Pressing or releasing `Ctrl`/`Cmd` immediately changes the local cursor
-  between crosshair and grabbing. Geometry changes on the next pointer or
-  compatibility-mouse event.
+- Pressing or releasing an armed `Ctrl`/`Cmd` movement phase immediately changes
+  the local cursor between crosshair and grabbing. The ignored pre-held phase
+  keeps the crosshair. Geometry changes on the next pointer or compatibility-
+  mouse event.
 - Pointer-up while `Ctrl`/`Cmd` is held applies the final movement delta and
   commits the translated stroke. The release coordinate is not added as a new
   drawing sample.
@@ -732,9 +774,13 @@ described below.
 - During the gesture, ordinary committed Transformer/selection chrome is
   suppressed. The dashed translucent rectangle/lasso remains the aggregate
   gesture area, and each currently materialized candidate receives its own
-  noninteractive solid outline. Above 512 materialized candidates, individual
-  outlines are omitted and bounded aggregate-only candidate chrome is used;
-  this visual budget never truncates the candidate IDs used at pointer-up.
+  noninteractive solid outline plus a light theme-aware accent wash. The wash
+  appears and disappears with the display-paced candidate membership while the
+  lasso is still being drawn, making entry into and exit from the current
+  implicit closed region visible before pointer-up. Above 512 materialized
+  candidates, individual previews are omitted and bounded aggregate-only
+  candidate chrome is used; this visual budget never truncates the candidate
+  IDs used at pointer-up.
 - Scene replacement, object add/change/delete, and zoom changes invalidate live
   membership and schedule a display-paced reread. Cancellation destroys the
   candidate chrome and restores the prior committed selection and its ordinary
@@ -838,9 +884,12 @@ presence frame.
 ### Edit and delete
 
 - Double-click/double-tap an editable text, code, or LaTeX object to edit it.
-- `Enter` edits exactly one selected text, code, or LaTeX object.
-- `Delete` or `Backspace` atomically deletes every existing selected mutable
-  object and clears selection. Additional modifiers do not suppress deletion.
+- `Enter` edits exactly one selected text, code, or LaTeX object, or enters
+  point editing for exactly one selected Line.
+- In Line/Arrow point editing, `Delete` or `Backspace` targets only the selected
+  anchor as documented above. Otherwise it atomically deletes every existing
+  selected mutable object and clears selection. Additional modifiers do not
+  suppress deletion.
 
 ## Shapes, text, frame, and placement tools
 
@@ -879,14 +928,12 @@ presence frame.
   logical units.
 - Line and arrow preserve the actual start/end direction relative to their
   normalized bounds.
-- Line and Arrow snapshot their own current curvature at pointer-down. Zero
-  creates the existing straight two-point connector. A nonzero value creates a
-  quadratic Bezier connector with one durable control point on the selected
-  side of the directed start-to-end chord; the arrowhead follows the curve's
-  end tangent rather than the straight chord.
-- Curved connector bounds, rendering, live awareness preview, marquee/lasso
-  selection, and swept eraser collision all follow the curved path. Old
-  straight objects remain valid because the control point is optional.
+- Line and Arrow both create a straight ordered three-anchor smooth path. The
+  two endpoints and initial midpoint use the same durable point geometry and
+  point-editing lifecycle; Arrow differs only by rendering an end arrowhead.
+- Line/Arrow bounds, rendering, live awareness preview, marquee/lasso
+  selection, and swept eraser collision all follow the point path. Old straight
+  and quadratic objects remain readable and convert on their first point edit.
 - Frame text is the fixed label `Область`; there is no frame-label editor.
 - A created non-stroke object is selected. Code and LaTeX enter editing
   immediately; provisional Text becomes selected when its first input creates
@@ -1028,13 +1075,47 @@ does not replace or restyle the selection, mutate an existing object, enter the
 CRDT or awareness, or create an undo item. The renderer snapshots the chosen
 kind and that kind's independent creation style at pointer-down, so changing
 the setting cannot alter a shape gesture already in progress. Switching the
-kind immediately restores its own persisted Rectangle/Ellipse/Diamond/Frame
-style preset for the next gesture.
+  kind immediately restores its own persisted Rectangle/Ellipse/Diamond/Frame
+  direct creation style for the next gesture.
+
+### Shared creation-preset component
+
+Drawing, Line, and Arrow use one shared web palette component. Drawing places
+it inline; Line and Arrow show one
+current composite cell in the main style bar and place that same component in a
+second layer when the cell is pressed. The second layer is not a tool-specific
+chooser and is not replaced when configuration starts. Its palette button,
+cells, repeated-active-cell editor, add/delete/reorder behavior, keyboard and
+pointer handling, focus restoration, and responsive scrolling are one code
+path and one element structure.
+
+The component receives only tool data and declared style properties:
+
+- Line and Arrow presets own stroke color, width, and opacity; Arrow also owns
+  its dash pattern.
+
+Pressing an inactive cell selects its complete future-creation style. Pressing
+the active cell again opens the property editor for that cell. Configuration
+edits any cell without selecting it; add clones the active cell, delete retains
+at least one, and reorder changes only device-local order.
+
+Text uses direct creation controls: foreground, font size, family, and
+bold/italic are edited as one persisted tool style without preset cells.
+Rectangle, Ellipse, Diamond, and Frame also use direct controls. Their outline
+and fill are separate color controls with separate triggers and pickers;
+outline thickness is a third independent control and is never encoded by color
+cell fill or size. Opacity and dash remain separate direct controls.
+
+Selection styling intentionally remains direct-property editing. A selected
+object is durable board content rather than a future creation preset, so it
+continues to use the ordinary color, width, opacity, dash, and text controls
+below and never exposes creation-palette add/delete/reorder actions.
 
 ### Shared colors and ordinary tool settings
 
-Stroke, shape fill, and text foreground use the same device-local Color
-Library. A favorite is an accelerator, never an allow-list: every color control
+Direct selection stroke, shape fill, and text foreground use the same
+device-local Color Library. A favorite is an accelerator, never an allow-list:
+every direct color control
 offers an arbitrary six-digit sRGB color through the built-in saturation/value
 plane and hue rail. There is no `input[type=color]`, platform color dialog, or
 browser EyeDropper. While mounted, the picker keeps one authoritative
@@ -1085,29 +1166,41 @@ action is hidden when any target is Text or LaTeX.
   boundaries; near-gray and dark selections therefore show a correspondingly
   muted or dark rail rather than an unrelated vivid rainbow.
 - The saturation/value handle stays circular and has a solid current-color
-  center. Hue and optional alpha inputs keep a 30-CSS-pixel ordinary hit height,
+  center. The saturation/value plane itself has square, unrounded corners. Hue
+  and optional alpha inputs keep a 30-CSS-pixel ordinary hit height,
   enlarged to 38 CSS pixels for a coarse pointer, while their visible tracks
   remain exactly 14 CSS pixels tall with a one-pixel corner radius. Their thumbs
   are borderless 7 by 14 CSS-pixel rectangles filled by the selected color. The
-  fill reaches the track's top and bottom pixels; thin light and dark box-shadow
-  rings lie entirely outside it rather than consuming its interior.
-- The optional alpha variant exists only in the Drawing preset popup. Its rail
+  fill reaches the track's top and bottom pixels. The light and dark
+  box-shadow rings lie entirely outside it, use exact integer 1 px and 2 px
+  spreads in ordinary and focus states, and never depend on a fractional device
+  pixel which may disappear during rasterization. The saturation/value handle
+  remains unchanged with its exact 1 px exterior dark ring. The focus halo begins outside
+  the enlarged dark ring.
+- The optional alpha variant is used by creation-preset popups. Its rail
   is labelled `Непрозрачность`, displays the current opaque color at the left
   fading to complete transparency over a checkerboard at the right, and edits
   the slot's independent `0..1` opacity. To preserve that left-to-right visual
   direction, the native range is RTL: its value is opacity alpha (`1` at the
   left and `0` at the right), which the picker reports unchanged. Alpha from the
-  rail or RGBA/HSVA/HEXA input is snapped to the configured 1% Drawing step
+  rail or RGBA/HSVA/HEXA input is snapped to the configured 1% preset step
   before preview and commit, so the preset never visibly corrects itself after
-  input. Ordinary stroke/fill/text pickers omit this rail and continue to use
-  the separate general-opacity control where applicable.
+  input. Direct selection stroke/fill/text pickers omit this rail and continue
+  to use the separate general-opacity control where applicable.
 - The checkerboard preview button renders the current alpha when the optional
-  variant is active. Right-clicking it suppresses the browser context menu and
-  lazily mounts an inline advanced panel; `Context Menu` and `Shift+F10` do the
-  same and move focus to its first field. No format rows or format drafts exist
+  variant is active. Primary click lazily mounts a separate portalled advanced
+  popup to the left of the picker and a second click closes it. It falls back
+  to the right only when the board boundary leaves insufficient room on the
+  left. Right-click still suppresses the browser context
+  menu and opens it; `Context Menu` and `Shift+F10` do the same and move focus
+  to its first field. The trigger counts as part of the panel for outside-click
+  ownership, and the portalled popup remains inside its host palette's logical
+  interaction surface, so pointer and focus inside it cannot close the host.
+  The trigger's `pointerdown` cannot close and immediately reopen the panel.
+  No format rows or format drafts exist
   while it is closed. The panel exposes synchronized RGB/RGBA and HSV/HSVA rows
   as appropriate plus six-digit HEX, or eight-digit HEXA in the alpha-enabled
-  Drawing variant. RGB channels are integers from 0 through 255; HSV hue is
+  preset variant. RGB channels are integers from 0 through 255; HSV hue is
   0-360 and saturation/value are percentages from 0% through 100%; alpha accepts
   `0..1` or a percentage. Each row accepts native text paste/edit on `Enter` or
   blur and has a copy action for its current canonical representation, never an
@@ -1212,7 +1305,8 @@ flushed on `pagehide` and surface unmount. Storage failure never blocks input.
 Library operations are device settings: they produce no board update,
 awareness payload, collaboration packet, or undo item.
 
-Other ordinary controls are continuous rather than closed preset lists:
+Direct selection controls and the property editors inside creation-preset cells
+use the following bounds:
 
 - Ordinary Text is edited directly in its board object. The textarea overlay
   follows the object's canvas position, dimensions, zoom, rotation, font,
@@ -1222,13 +1316,20 @@ Other ordinary controls are continuous rather than closed preset lists:
   drawn twice. Code and LaTeX retain their dedicated editors because their
   source-oriented workflows are distinct from plain text editing.
 
-- General stroke width is 0.5-96 with a 0.5 slider step and an adjacent exact
-  numeric input. The Drawing palette retains its separately documented 0.5-16
-  range because the slot's physical preview encodes Drawing width.
+- General selection and Shape stroke width is 0.5-96 with a 0.5 exact-input
+  step. Drawing, Line, and Arrow preset editors use the same reusable width
+  control; Drawing and Line retain their 0.5-16 bound while Arrow uses 0.5-96.
+  The range track moves through progressive common stops (`0.5`, `1`, `1.5`,
+  `2`, `2.5`, `3`, `4`, `5`, `6`, `8`, `10`, `12`, `16`, then wider values up
+  to the tool maximum), giving thin strokes most of the useful travel. A live
+  dot previews thickness and the adjacent exact `px` field accepts every
+  bounded 0.5 value. That field uses only the compact width needed for the
+  rendered number and `px` suffix; the remaining reusable-control width belongs
+  to the slider track.
 - Opacity is 5%-100% with a 1% slider step and exact percentage input. It is
-  hidden for Text creation and for a selection whose opacity-capable objects are
-  all Text and/or LaTeX. Their durable opacity capability and any existing value
-  are still preserved and rendered. A mixed selection containing at least one
+  hidden for a selection whose opacity-capable objects are all Text and/or
+  LaTeX. Their durable opacity capability and any existing value are still
+  preserved and rendered. A mixed selection containing at least one
   opacity-capable non-text object may show the union control; changing it still
   targets every selected object version which declares opacity.
 - Font size accepts every 0.5 value from 8 through 256. A datalist supplies
@@ -1241,12 +1342,21 @@ Other ordinary controls are continuous rather than closed preset lists:
 - Font family uses a portalled select-only combobox/listbox rather than a native
   select or a visible CSS stack. Its named choices are `Inter`, `Georgia`,
   `Cascadia Code`, `Arial`, `Verdana`, `Trebuchet MS`, `Times New Roman`, and
-  `Courier New`. Every ordinary option renders its label in the complete
-  fallback stack that it represents. The closed trigger previews a selected
-  named family using its complete stored stack. A mixed value retains the
-  interface font; an unsupported historical stack is shown as `Выберите шрифт`
-  and cannot be entered or selected again. Choosing a named option persists its
-  complete safe fallback stack rather than its display label.
+  `Courier New`; each provides Cyrillic coverage, with a Cyrillic-capable
+  fallback in its stored stack. Every ordinary option displays its own friendly
+  family name in the complete fallback stack that it represents. The compact
+  closed trigger reads `Шрифт` and renders it in the selected
+  known family. Mixed and unsupported historical values keep the interface
+  font; the trigger title still identifies a known current choice. Hovered and
+  keyboard-active options use only the menu's subtle background and never draw
+  an outline or inset ring around the row. Their background spans the complete
+  inner width and height of the listbox with no gap at any border. The outer
+  frame remains an integer one CSS pixel but uses a reduced-contrast border
+  color instead of an unstable fractional width. The option's
+  accessible name is the same actual family name shown in the list. An
+  unsupported historical stack cannot be entered or selected again.
+  Choosing a named option persists its complete safe fallback stack rather than
+  its display label.
 - Pressing the closed font trigger, `Enter`, `Space`, or an opening navigation
   key opens the listbox. `ArrowUp`/`ArrowDown` move through options,
   `Home`/`End` move to the first/last option, and printable-key typeahead moves
@@ -1271,8 +1381,7 @@ Other ordinary controls are continuous rather than closed preset lists:
 
 The style bar has no broad `Сбросить оформление` action for either a creation
 tool or a selection. Users change the exposed properties directly. This does
-not remove the separate toolbar-layout reset in its configuration dialog or the
-Line/Arrow curvature reset described below.
+not remove the separate toolbar-layout reset in its configuration dialog.
 
 Mixed width, opacity, size, family, color, and dash values remain explicit.
 Exact numeric fields are blank for a mixed value; mixed sliders are visually
@@ -1291,46 +1400,78 @@ Backward, or Send to back), regardless of the current tool or selection. All
 four commands remain available from the selected-object context menu and
 through `Ctrl`/`Cmd` bracket shortcuts.
 
-Text, Line, Arrow, Rectangle, Ellipse, Diamond, and Frame each remember their
-complete creation style independently across tool switches and browser
-remounts. The strict device envelope lives under
-`eduri-board-tool-styles-v1` as `{"version":1,"styles":{...}}`; all seven tool
-records and only their declared capabilities are required. It has the same
-65,536-code-unit, version, fail-closed, 180 ms debounce, `pagehide`/unmount
-flush, and storage-failure semantics as the Color Library. Values are
-normalized to renderer-safe color, width, opacity, dash, font-size,
-font-family, and font-style bounds. These settings are outside the board CRDT,
-awareness, wire protocol, and undo history; only a subsequently created object
-materializes the then-current style as durable object fields.
+Arrow remembers an independent ordered 1-24-cell palette across tool switches
+and browser remounts. The strict
+device envelope lives under `eduri-board-tool-style-palettes-v1` as
+`{"version":1,"palettes":{...}}`. Every target record contains an existing
+`activePresetId` and bounded stable-ID presets with only that target's declared
+style capabilities. Input above 256 KiB, missing/extra targets, invalid or
+duplicate IDs, count violations, a missing active ID, structural drift, or a
+wrong version rejects the complete envelope and rebuilds safe defaults.
 
-### Line and arrow curvature
+On the first load without this envelope, the previous single style from
+`eduri-board-tool-styles-v1` becomes the first active cell for the corresponding
+tool, preserving existing device choices; additional starter cells vary the
+tool's primary color. The legacy envelope remains a compatibility mirror of
+each active cell. Writes use the existing 180 ms debounce and flush on
+`pagehide`/unmount. Values normalize to renderer-safe color, width, opacity,
+dash, font-size, font-family, and font-style bounds. These settings are outside
+the board CRDT, awareness, wire protocol, and undo history; only a subsequently
+created object materializes the selected cell as durable object fields.
 
-When the style bar is showing a Line or Arrow creation preset, it also shows a
-curvature group. It is intentionally absent while the style bar is editing a
-selection: the current control configures future connectors and does not yet
-reshape an existing connector.
+### Line and Arrow point editing
 
-- The slider covers -100% through 100% in 5% steps. Negative and positive
-  values bend toward opposite sides of the directed start-to-end line; zero is
-  straight. The adjacent exact number input exposes the same range and step.
-- The curved-line icon resets the current tool to exactly zero and is disabled
-  while already straight. Slider assistive text reports `Straight`, or the
-  left/right direction and absolute percentage.
-- Line and Arrow remember independent values. Switching between them restores
-  the corresponding value, and pointer-down snapshots it for the complete
-  connector gesture.
-- Curvature is creation input state, not a style property. Changing it writes
-  no CRDT field, awareness payload, collaboration packet, or undo item. Only a
-  newly created curved connector stores its concrete optional geometry control
-  point.
+- A newly created Line or Arrow has three durable ordered anchors: the two endpoints and
+  a center anchor initially halfway between them, so the initial line is
+  straight. Moving the center anchor bends a smooth cubic path through all
+  anchors. Existing two-point and quadratic Line/Arrow objects remain readable;
+  the first point edit converts them to ordered anchors.
+- `Enter` on exactly one selected mutable Line or Arrow enters point editing. A
+  double-click/double-tap on either does the same. The ordinary resize/rotation
+  Transformer and whole-object dragging are hidden while this mode is active.
+- Every durable anchor is draggable. Between each adjacent pair, a smaller
+  insertion handle is shown. Dragging it at least 3 CSS pixels inserts a new
+  durable anchor at that segment; a click or shorter drag is a no-op. The live
+  curve follows an anchor or pending insertion locally without waiting for
+  persistence or collaboration.
+- Pressing an anchor selects it. `Delete` or `Backspace` removes only that
+  anchor while the line has more than two anchors. With no selected anchor, or
+  with only two anchors, deletion is a consumed no-op and never deletes the
+  whole connector.
+- Anchor drag, midpoint insertion, and point deletion each replace the connector
+  transform and ordered point list in one `line.points.set` CRDT command and
+  one local undo item. Normalization may move the local origin while preserving
+  the world-space curve and rotation.
+- `Escape`, a tool/selection/read-only change, object removal, or an outside
+  canvas press exits point editing. Handles and pending insertion are
+  renderer-local and are not awareness or CRDT state.
 
-Both values persist immediately and best-effort under
-`eduri-board-connector-curvature-v1` as
-`{"version":1,"values":{"line":0,"arrow":0}}`. The strict envelope requires
-exact keys, finite values inside `-1..1`, and at most 1,024 UTF-16 code units;
-malformed, structurally different, wrong-version, or out-of-range input resets
-both tools to straight. Valid loaded values and every UI change normalize to a
-0.05 step. Storage failure leaves the current in-memory values usable.
+### Line preset palette
+
+Line uses an independent device-local color/width/opacity palette with the same
+1-24 slot bounds, composite cell rendering, picker, alpha/width ranges,
+add/delete/reorder behavior, and storage-failure semantics as Drawing. It is
+stored under `eduri-board-line-presets-v1`; it does not change board content or
+undo history until a new Line is created.
+
+Line and Drawing render the palette through the same web component, element
+structure, handlers, and CSS classes. The Line adapter changes only where that
+shared component is placed: below the main style bar instead of inline inside
+it. There is no separate Line chooser or configuration implementation.
+
+- Ordinary Line mode shows one composite cell for the active preset. Pressing
+  it opens the chooser. Pressing an inactive chooser cell selects its complete
+  preset; pressing the already active cell a second time opens that cell's
+  color/opacity/width picker.
+- The palette button lives inside the opened Line preset chooser, never beside
+  the single active cell. It enters configuration mode, where all Line cells
+  may be edited, created, deleted, and reordered exactly like Drawing cells.
+  The same mounted palette component stays in the second-layer panel while its
+  configuration state changes; it is not replaced by another chooser or moved
+  into the main style bar. The main style bar continues to show only its single
+  current Line cell. The same palette button remains at the left of the second
+  layer and becomes its visible finish-configuration control. The Line and
+  Drawing preset data remain independent.
 
 ### Drawing palette and preset slots
 
@@ -1370,9 +1511,11 @@ A fresh browser profile starts with six device-local slots:
   the step. `Ctrl`/`Cmd+wheel` is consumed without changing width so browser
   touchpad-pinch zoom cannot leak through the slot. While a palette reorder owns
   the pointer, vertical wheel is likewise consumed without changing width.
-- Configuration mode puts a restrained scrim over the style bar and its preset
-  wells: 38% dark overlay in the light theme and 30% in the dark theme. The
-  palette toggle stays emphasized above the scrim with a distinct blue pressed
+- Configuration mode puts a restrained scrim over only the shared palette
+  surface and its preset wells: 38% dark overlay in the light theme and 30% in
+  the dark theme. Drawing and the floating Line/Arrow second layer use the same
+  palette-owned overlay; sibling controls and the surrounding style bar never
+  dim. The palette toggle stays emphasized above the scrim with a distinct blue pressed
   color; in dark mode this pressed color is deliberately different from both
   its idle and hover colors. Edit-only delete/add controls and an open preset
   popup remain visible and operable.
@@ -1383,18 +1526,36 @@ A fresh browser profile starts with six device-local slots:
   unlike an active slot in ordinary mode, it is not a close toggle here.
 - The popup embeds the same in-app saturation/value, dynamic hue, preview, and
   lazy advanced-format picker as ordinary style colors; it contains no native
-  color input or EyeDropper. This is the alpha-enabled picker variant: its
+  color input or EyeDropper. It starts directly with the picker and has no
+  redundant tool-name header, close-icon row, or leading divider. This is the
+  alpha-enabled picker variant: its
   integrated rail edits the slot's opacity from 0%-100% in 1% steps, including
   complete transparency, while width remains a separate 0.5-16 control in 0.5
-  steps. Color and alpha previews update the device-local slot at most once per
+  steps, separated from the color controls above it by a one-pixel divider with
+  equal 7 CSS-pixel spacing on both sides.
+  Color and alpha previews update the device-local slot at most once per
   animation frame; they never create a board undo item or add that slot color
   to Recent Colors.
-- Its close button, outside pointer-down, tool change, or `Escape` closes it.
-  The close button and `Escape` restore focus to the owning slot; outside
-  pointer-down does not force focus.
+- Outside pointer-down, tool change, or `Escape` closes it. `Escape` restores
+  focus to the owning slot; outside pointer-down does not force focus.
 - The swatch uses a transparency checkerboard and represents color, opacity, and
   width. At 100% zoom its circle diameter is twice the logical pen width, up to
-  the fully filled 32 px slot.
+  a 32 px color area centered inside an exact 34 px circular well with a
+  one-pixel border. On a device with a real fine-pointer hover, one
+  80 ms linear scale transition changes the colored circle's diameter by
+  4 px when that fits within the cell; otherwise it reduces the diameter by 2
+  px rather than overflowing. Subpixel interpolation and edge antialiasing vary
+  the alpha of partially covered boundary pixels, without staged ring layers or
+  a detached outline. Pointer exit restores the exact preview size.
+  `aria-pressed` selection never
+  changes that size. The selected slot is identified by a compact accent marker
+  in a dedicated row below its circular cell; it has no square outline or
+  selected background. The palette reserves this vertical space instead of
+  overlaying the marker on the cell or clipping it in the scrolling strip.
+  The inline Drawing palette provides that clearance in its style bar; the
+  floating Line/Arrow palette provides it inside its own scroll track. Mounting
+  or opening that floating palette never changes the main style-bar frame
+  dimensions or position.
 - New strokes are always solid and `source-over`; the wide translucent yellow
   slot is not a separate marker tool.
 
@@ -1405,14 +1566,12 @@ Configuration-mode editing:
   active slot. Deleting the active slot activates the slot now at the same
   index, or the preceding final slot when the deleted slot was last. Focus
   moves to the next visible slot, otherwise the preceding slot.
-- The add button is visually docked immediately to the right of the centered
-  preset strip, but is an absolute sibling outside the strip's flex and scroll
-  geometry. Entering configuration mode therefore cannot move the centered
-  strip merely because `+` appeared. A real appended slot still widens and
-  recenters the strip normally. On a width-capped viewport, a centered strip
-  reserves symmetric side room; a fixed-left responsive strip reserves the
-  button's space only on its right. Both remain horizontally scrollable, so the
-  button stays visible and the final slot remains reachable. The docked button
+- The add button is visually docked immediately outside the right edge of the
+  style bar. It is an absolutely positioned child of the style-bar root and is
+  outside the centered preset strip's flex/scroll content. It takes no layout
+  space, never shifts or widens the palette when configuration mode starts, and
+  cannot be clipped by the strip's horizontal scroller.
+  The docked button
   uses the active theme's panel, border, text, and hover tokens rather than
   relying on the dimmed strip behind it. Pressing it
   appends a clone of the active slot, leaves the current active slot unchanged,
@@ -1811,14 +1970,14 @@ selected concrete shape never change this table.
 | Hold `Shift` while dragging the rotation handle | Snap the shown angle to 45-degree increments on movement; release for smooth rotation |
 | Arrow | Move selection 1 logical unit |
 | `Shift`+Arrow | Move selection 10 logical units |
-| `Delete` or `Backspace` | Delete selection |
+| `Delete` or `Backspace` | Delete selected Line anchor in point editing; otherwise delete selection |
 | `Ctrl`/`Cmd+C` | Copy selection through the native copy event |
 | `Ctrl`/`Cmd+X` | Cut selection through the native cut event |
 | `Ctrl`/`Cmd+V` | Paste an Eduri fragment, image, or plain text through the native paste event |
 | `Ctrl`/`Cmd+D` | Duplicate selection |
 | `Context Menu` or `Shift+F10` | Open the canvas/object context menu at viewport center |
-| `Enter` | Edit one selected text/code/LaTeX object |
-| `Escape` | Cancel gesture; text editing closes, clears selection, and restores board focus in one step; otherwise close editor, clear selection, or return Select |
+| `Enter` | Edit one selected text/code/LaTeX object or enter Line/Arrow point editing |
+| `Escape` | Exit Line/Arrow point editing; otherwise cancel gesture, close text editing, clear selection, or return Select |
 
 `Enter` is blocked by `Ctrl`/`Cmd` or `Alt`; `Shift` does not block it. Arrow
 nudge is blocked by `Ctrl`/`Cmd` or `Alt`.
@@ -1879,13 +2038,16 @@ non-Select tool; those nested states can require multiple presses.
   unknown resource path stays on its missing/ended surface without a profile
   modal.
 - Entering an online guest room or authenticated lesson without a valid saved
-  profile opens `Профиль` as a mandatory modal. The guest default name is
-  `Гость`; a lesson uses the authenticated account display name when it is
-  valid; the initial color is `#2563eb`. Board, Code, and Call providers are not
-  mounted until a valid profile is saved, so no temporary generated identity
-  can appear. The mandatory modal has no close/Cancel action and ignores
-  `Escape` and backdrop dismissal. Opening it later from the header edits the
-  saved profile and is ordinarily dismissible.
+  profile opens `Профиль` as an initial, dismissible suggestion. The guest
+  default name is `Гость`; a lesson uses the authenticated account display name
+  when it is valid; the initial color is `#2563eb`. The default name appears as
+  phantom placeholder text in the initially empty `Display Name` field, so a
+  person can type immediately without first deleting it. Until a profile is
+  saved, Board, Code, and Call use that normalized default and color for the
+  current online session without writing browser storage. Close, Cancel,
+  `Escape`, and backdrop dismissal all keep this temporary profile and leave
+  the room usable. Opening it later from the header edits the saved profile or
+  offers the same suggestion again.
 - The form contains a `Display Name` field, live initial/avatar preview, and the
   complete in-app Board color picker. The picker offers arbitrary opaque sRGB
   through its saturation/value plane, hue rail, keyboard axes, and lazy
@@ -1894,9 +2056,9 @@ non-Select tool; those nested states can require multiple presses.
   characters and 240 UTF-8 bytes without control or bidi-formatting characters,
   plus a canonical lowercase six-digit `#rrggbb` color.
 - `Display Name` receives initial focus and the shared modal traps `Tab` within
-  its controls. Closing an ordinary editor through Close, Cancel, `Escape`, or
-  the backdrop restores the previously focused control. The required first-entry
-  variant has no dismiss path, including `Escape` or backdrop. At viewport width
+  its controls. Closing it through Close, Cancel, `Escape`, or the backdrop
+  restores the previously focused control. The profile backdrop is intentionally
+  lighter than ordinary modals. At viewport width
   760 px and below the same modal is a bottom-aligned full-width sheet with
   bounded internal scrolling; its data and dismissal rules do not change.
 - One device-local profile is shared by every online guest room and lesson on
@@ -2072,19 +2234,19 @@ offline or has pending server sync.
 - Plainly activating any folder, including an empty one, shows an in-workspace folder
   action surface instead of a blank editor. Its only visible actions are
   `Прикрепить файл`, `Создать файл`, and `Создать папку`, all targeting that
-  folder and all disabled in read-only mode. The Explorer header keeps a
-  visible trash action for the complete current selection. It is disabled
-  without a selection, during rename, in read-only mode, or whenever deletion
-  would include required `main.py`; its tooltip names a singular target,
-  reports the group count, or explains why deletion is unavailable.
-- Right-click, `Shift+F10`, the Context Menu key, and the Explorer ellipsis open
-  the custom action menu. Right-clicking a selected row preserves the complete
-  group while moving keyboard focus to that row; right-clicking an unselected
-  row replaces selection with that row. Rename and duplicate are omitted for a
-  multi-selection. Create file/folder, upload, singular rename/duplicate, and
-  group delete live in this menu rather than the editor toolbar. Duplicate
-  creates a collision-free sibling text or binary file with the same content;
-  an immutable binary identity may be referenced by both files.
+  folder and all disabled in read-only mode.
+- The Explorer header contains only the `Проводник` title: it has no ellipsis
+  or dedicated delete button. Right-click opens the custom action menu; on a
+  row it exposes that selection's actions, while right-clicking the Explorer
+  background exposes root create/upload actions. `Shift+F10` and the Context
+  Menu key provide the same row menu from the keyboard. Right-clicking a
+  selected row preserves the complete group while moving keyboard focus to
+  that row; right-clicking an unselected row replaces selection with that row.
+  Rename and duplicate are omitted for a multi-selection. Create file/folder,
+  upload, singular rename/duplicate, and group delete live in this menu rather
+  than the editor toolbar. Duplicate creates a collision-free sibling text or
+  binary file with the same content; an immutable binary identity may be
+  referenced by both files.
 - Starting a drag on a selected row drags all selected visible roots together;
   starting on an unselected row first makes it the sole selection. A group can
   be dropped on a folder or the Explorer background to move it into that folder
@@ -2111,8 +2273,9 @@ offline or has pending server sync.
   merged test whose target was already deleted remains preserved but hidden and
   cannot execute. Legacy tests without a target are treated as tests of
   `main.py`.
-- Tests are closed by default behind the `Тесты` toolbar toggle. For a text
-  file whose name ends in `.py` case-insensitively, opening
+- Tests are closed by default behind the `Тесты` toolbar toggle. The toggle and
+  idle `F9` action exist only for a text file whose current name ends in `.py`
+  case-insensitively. Opening
   the panel exposes stdin, expected output, a bounded-width name field visibly
   labelled `Title:`, and a compact `250..45000` ms field visibly labelled
   `Timeout:` without increment/decrement steppers. Output always uses
@@ -2122,11 +2285,28 @@ offline or has pending server sync.
   normal test form. Every test, including the only test, has a delete action;
   deleting the last test returns to the `Создать тест` state. New and legacy
   tests default to 5,000 ms. Test uses its stored deterministic stdin and
-  timeout and never opens the live terminal prompt. On a folder, binary file,
-  or non-Python text file the closed toggle is disabled; if the panel was open
-  before switching, it remains closable and shows a request to select a Python
-  file. The shared execution host rejects a stale or forged Test action when
-  its test ID is not attached to the accompanying Python entry ID.
+  timeout and never opens the live terminal prompt. Switching or renaming to a
+  folder, binary file, or non-Python text file closes the test panel and removes
+  both Python actions from the toolbar. An already-running shared process keeps
+  its `Stop` action visible until it finishes, even if another file is selected.
+  Plain F9 in a non-Python file is not captured. The initiating client
+  revalidates the current `.py` name after synchronization, and the shared
+  execution host rejects a stale or forged Run/Test action whose entry is no
+  longer a text `.py` file or whose test ID belongs to another entry.
+- The main Monaco model's language follows the current filename rather than
+  stable entry ID. Renaming `main.py` to `main.txt` changes that same mounted
+  model to `plaintext` immediately and removes Python highlighting; `.md`,
+  `.json`, `.js`, `.ts`, and other recognized extensions use their matching
+  Monaco language without becoming runnable Python. Renaming the stable entry
+  back to `.py` restores Python highlighting, Run, and its existing tests.
+- The test-name tabs remain one stable horizontal row regardless of test count.
+  Every tab and the add action retain fixed width behavior, while overflow uses
+  a visible thin horizontal scrollbar with touchpad, wheel/Shift-wheel, drag,
+  and touch scrolling instead of wrapping or widening the sidebar. The stdin
+  and expected-output Monaco fields are each 86 px tall rather than expanding
+  to consume the remaining sidebar height; the enclosing test panel remains
+  vertically scrollable on short layouts. Test tabs, metadata, labels, action
+  text, and the two Monaco fields use the larger test-panel typography.
 - The Explorer/editor boundary, editor/terminal boundary, and (while tests are
   open) tests/terminal boundary are eight-pixel drag targets with a centered
   one-pixel line; coarse pointers receive a wider transparent hit area. Mouse,
@@ -2228,17 +2408,26 @@ offline or has pending server sync.
   Local edits enter an atomic IndexedDB update log/outbox before network send.
   Offline and reconnect require no Save or Retry action. The small cloud badge
   is part of the editor's top toolbar, so it never overlays Explorer, Monaco,
-  tests, or the terminal. It reports connecting/offline state and the count of
-  updates awaiting ACK. Hover, keyboard focus, or a touch press opens a compact
-  detail popup with the connection, local durability, queued ACK count,
-  editor/terminal availability, and the provider error when present. Pointer
-  leave, blur, outside press, or `Escape` closes it. Status changes update the
-  same mounted control and open popup without moving the toolbar or flashing.
+  tests, or the terminal. The badge itself is one small, muted cloud without a
+  pending counter, spinner, or green/blue state-color transition; connection
+  detail belongs inside its popup so ordinary synchronization does not attract
+  attention. The online popup heading reads `Синхронизация` and
+  `Изменения синхронизированы`. Its compact body uses an icon rather than the
+  visible word `Соединение`, followed by the connection value. A queued ACK row
+  exists only when the count is nonzero, and the provider error appears only
+  when present. It has no `Локальные данные`, `Редактор`, or `Общий терминал`
+  rows.
+  Hover opens the popup only while a hover-capable pointer remains on the cloud
+  trigger itself. The hover popup has no pointer hit area: entering the popup's
+  painted rectangle cannot keep it open. Clicking the cloud with mouse, pen, or
+  touch pins the popup; clicking the cloud again, pressing outside both cloud
+  and popup, blur, or `Escape` closes it. A press inside a pinned popup does not
+  close it. Keyboard focus provides the equivalent accessible transient view.
+  Status changes update the same mounted cloud and open popup without moving
+  the toolbar or flashing.
   The popup chooses the side with useful room inside the workspace/viewport and
   scrolls within its bounded height, so a short viewport or long provider error
   cannot clip it behind the workspace's overflow boundary.
-  A transparent bridge across the visual gap keeps pointer hover continuous
-  while moving between the badge and the popup, including to its scrollbar.
   The bounded popup itself is the next keyboard focus stop, so its overflow can
   be scrolled with Arrow/Page/Home/End without a pointer; `Escape` closes it and
   restores badge focus.
@@ -2380,6 +2569,11 @@ Displayed byte units use binary multiples of 1024.
 
 ## Lesson call controls
 
+- Local `npm run dev` starts an isolated pinned LiveKit server and configures
+  the development API to use it. Local calls retain the same application room
+  authorization, two-participant limit, explicit capture controls, and muted
+  entry behavior as production; no production media endpoint or credential is
+  used.
 - Opening or joining a lesson call does not request capture permission and does
   not publish a microphone or camera track. Both controls start disabled on
   every entry and re-entry; each is enabled only by its own explicit button.
@@ -2437,8 +2631,11 @@ Displayed byte units use binary multiples of 1024.
   primary actions instead of tinting Explorer, terminal, Board, or call areas.
 - Primary and destructive actions use theme-specific foregrounds over their
   fills. Form hover, focus, and validation borders remain distinct in dark
-  mode; inactive segmented controls, cards and side-panel shadows use the
-  active palette. The authenticated sidebar has separate light and dark
+  mode. Site cards, panels, popups, menus, controls, and rendered board objects
+  use a flat presentation without decorative depth shadows in either theme.
+  Focus, selection, validation, connection-state rings, and the ephemeral
+  laser glow remain functional indicators rather than elevation effects. The
+  authenticated sidebar has separate light and dark
   surfaces, navigation, account, hover, active, and divider colors rather than
   acting as an always-dark exception.
 - Grid visibility is likewise device-local presentation state. The context-menu

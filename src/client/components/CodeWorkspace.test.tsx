@@ -15,6 +15,7 @@ import {
   listCodeWorkspaceEntries,
   listCodeTestCases,
   removeCodeWorkspaceEntry,
+  renameCodeWorkspaceEntry,
   replaceCodeWorkspaceText,
 } from "../../code/core/index.js";
 import type { CodeWorkspaceSessionHandle } from "./CodeWorkspace.js";
@@ -49,6 +50,7 @@ const terminalRunnerMocks = vi.hoisted(() => ({
 }));
 const editorMocks = vi.hoisted(() => ({
   props: vi.fn(),
+  setModelLanguage: vi.fn(),
   setTheme: vi.fn(),
   instances: [] as Array<{ model: Record<string, any>; editor: Record<string, any> }>,
 }));
@@ -64,6 +66,7 @@ vi.mock("@monaco-editor/react", () => ({
   default: (props: {
     value?: string;
     defaultValue?: string;
+    language?: string;
     path?: string;
     theme?: string;
     onMount?: (editor: unknown, monaco: unknown) => void;
@@ -198,7 +201,10 @@ vi.mock("@monaco-editor/react", () => ({
       };
       editorMocks.instances.push({ model, editor });
       props.onMount?.(editor, {
-        editor: { setTheme: editorMocks.setTheme },
+        editor: {
+          setModelLanguage: editorMocks.setModelLanguage,
+          setTheme: editorMocks.setTheme,
+        },
         KeyCode: { KeyY: 2, KeyZ: 1 },
         KeyMod: { CtrlCmd: 1, Shift: 2 },
       });
@@ -277,6 +283,7 @@ afterEach(async () => {
   runnerMocks.startPythonRun.mockReset();
   terminalRunnerMocks.startPythonTerminal.mockReset();
   editorMocks.props.mockReset();
+  editorMocks.setModelLanguage.mockReset();
   editorMocks.setTheme.mockReset();
   editorMocks.instances.length = 0;
   xtermMocks.instances.length = 0;
@@ -785,7 +792,6 @@ describe("CodeWorkspace collaborative session", () => {
       if (!explorerSeparator) throw new Error("Explorer separator not rendered");
 
       expect(workspace.dataset.codeLayout).toBe("wide");
-      expect(workspace.dataset.codeTestsLayout).toBe("side");
       expect(explorerSeparator.getAttribute("aria-orientation")).toBe("vertical");
 
       geometry.width = 560;
@@ -793,7 +799,6 @@ describe("CodeWorkspace collaborative session", () => {
         resizeCallback?.([], {} as ResizeObserver);
       });
       expect(workspace.dataset.codeLayout).toBe("compact");
-      expect(workspace.dataset.codeTestsLayout).toBe("stacked");
       expect(explorerSeparator.getAttribute("aria-orientation"))
         .toBe("horizontal");
       expect(editorMocks.instances).toHaveLength(1);
@@ -801,7 +806,7 @@ describe("CodeWorkspace collaborative session", () => {
       document.destroy();
     });
 
-    it("reserves the editor and stacked console when maximizing compact Explorer", async () => {
+    it("reserves the editor and terminal when maximizing the compact sidebar", async () => {
       mockWorkspaceGeometry({ width: 560, height: 720 });
       const { document, session } = createWorkspaceLayoutSession();
       const workspace = await renderWorkspaceLayout(session);
@@ -819,14 +824,13 @@ describe("CodeWorkspace collaborative session", () => {
       if (!explorerSeparator) throw new Error("Explorer separator not rendered");
 
       expect(workspace.dataset.codeLayout).toBe("compact");
-      expect(workspace.dataset.codeTestsLayout).toBe("stacked");
       expect(explorerSeparator.getAttribute("aria-orientation"))
         .toBe("horizontal");
-      expect(explorerSeparator.getAttribute("aria-valuemax")).toBe("136");
+      expect(explorerSeparator.getAttribute("aria-valuemax")).toBe("304");
+      expect(container?.querySelector(".code-sidebar-tests")).not.toBeNull();
+      expect(container?.querySelector('[data-code-split="tests"]')).toBeNull();
       expect(workspace.style.getPropertyValue("--code-console-height"))
-        .toBe("348px");
-      expect(workspace.style.getPropertyValue("--code-tests-height"))
-        .toBe("190px");
+        .toBe("220px");
 
       await act(async () => {
         explorerSeparator.dispatchEvent(new KeyboardEvent("keydown", {
@@ -835,17 +839,15 @@ describe("CodeWorkspace collaborative session", () => {
           cancelable: true,
         }));
       });
-      expect(explorerSeparator.getAttribute("aria-valuenow")).toBe("136");
+      expect(explorerSeparator.getAttribute("aria-valuenow")).toBe("304");
       expect(workspace.style.getPropertyValue("--code-explorer-height"))
-        .toBe("136px");
+        .toBe("304px");
       expect(workspace.style.getPropertyValue("--code-console-height"))
-        .toBe("348px");
-      expect(workspace.style.getPropertyValue("--code-tests-height"))
-        .toBe("190px");
+        .toBe("180px");
       document.destroy();
     });
 
-    it("resizes the console and tests panel in side and stacked layouts without remounts", async () => {
+    it("keeps tests in the resizable sidebar without remounting editor or terminal", async () => {
       const geometry = { width: 1_200, height: 720 };
       mockWorkspaceGeometry(geometry);
       const resizeObservers: Array<{
@@ -910,28 +912,12 @@ describe("CodeWorkspace collaborative session", () => {
         testsToggle?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
         await Promise.resolve();
       });
-      const testsSeparator = container?.querySelector<HTMLElement>(
-        '[data-code-split="tests"]',
-      );
-      if (!testsSeparator) throw new Error("Tests separator not rendered");
-      mockPointerCapture(testsSeparator);
-      expect(workspace.dataset.codeTestsLayout).toBe("side");
-      expect(testsSeparator.getAttribute("aria-orientation")).toBe("vertical");
-
-      await act(async () => {
-        testsSeparator.dispatchEvent(workspacePointerEvent("pointerdown", {
-          pointerId: 32,
-          x: 588,
-          y: 400,
-        }));
-        window.dispatchEvent(workspacePointerEvent("pointerup", {
-          pointerId: 32,
-          x: 648,
-          y: 400,
-        }));
-      });
-      expect(workspace.style.getPropertyValue("--code-tests-width"))
-        .toBe("420px");
+      expect(container?.querySelector(".code-sidebar-tests")).not.toBeNull();
+      expect(container?.querySelector(".code-sidebar__page")?.hasAttribute("hidden"))
+        .toBe(true);
+      expect(container?.querySelector('[data-code-split="tests"]')).toBeNull();
+      expect(workspace.style.getPropertyValue("--code-explorer-width"))
+        .toBe("220px");
 
       geometry.width = 800;
       const workspaceObserver = resizeObservers.find((record) => (
@@ -942,30 +928,11 @@ describe("CodeWorkspace collaborative session", () => {
         workspaceObserver.callback([], {} as ResizeObserver);
       });
       expect(workspace.dataset.codeLayout).toBe("wide");
-      expect(workspace.dataset.codeTestsLayout).toBe("stacked");
-      expect(testsSeparator.getAttribute("aria-orientation"))
-        .toBe("horizontal");
-
-      await act(async () => {
-        testsSeparator.dispatchEvent(workspacePointerEvent("pointerdown", {
-          pointerId: 33,
-          x: 400,
-          y: 508,
-        }));
-        window.dispatchEvent(workspacePointerEvent("pointerup", {
-          pointerId: 33,
-          x: 400,
-          y: 478,
-        }));
-      });
-      expect(workspace.style.getPropertyValue("--code-tests-height"))
-        .toBe("210px");
+      expect(container?.querySelector(".code-sidebar-tests")).not.toBeNull();
       expect(JSON.parse(
         window.localStorage.getItem(CODE_WORKSPACE_LAYOUT_STORAGE_KEY) ?? "{}",
       )).toMatchObject({
         consoleHeight: 452,
-        testsWidth: 420,
-        testsHeight: 210,
       });
       expect(editorMocks.instances).toHaveLength(1);
       expect(editorMocks.instances[0]?.editor).toBe(mainEditor);
@@ -1036,6 +1003,89 @@ describe("CodeWorkspace collaborative session", () => {
     document.destroy();
   });
 
+  it("derives Python controls and Monaco language from the current file name", async () => {
+    const document = new Y.Doc();
+    initializeCodeWorkspace(document, "language-test");
+    addCodeTestCase(document, {
+      id: "main-language-test",
+      entryId: "main-py",
+      name: "Main test",
+    }, "language-test");
+    const session: CodeWorkspaceSessionHandle = {
+      document,
+      origin: Object.freeze({ type: "local" }),
+      blobStore: {
+        put: vi.fn(async () => {
+          throw new Error("not used");
+        }),
+        get: vi.fn(async () => null),
+      },
+      flush: vi.fn(async () => undefined),
+    };
+    container = documentOwner().createElement("div");
+    documentOwner().body.append(container);
+    root = createRoot(container);
+    await act(async () => {
+      root?.render(createElement(CodeWorkspace, { session }));
+      await Promise.resolve();
+    });
+
+    expect(editorMocks.props).toHaveBeenLastCalledWith(expect.objectContaining({
+      language: "python",
+    }));
+    expect(container.querySelector(".code-tests-toggle")?.textContent).toContain("1");
+    expect(container.querySelector(".code-run-command")).not.toBeNull();
+    const mountedEditor = editorMocks.instances[0]?.editor;
+
+    await act(async () => {
+      renameCodeWorkspaceEntry(document, "main-py", "main.txt", "remote");
+      await Promise.resolve();
+    });
+    expect(editorMocks.props).toHaveBeenLastCalledWith(expect.objectContaining({
+      language: "plaintext",
+    }));
+    expect(editorMocks.setModelLanguage).toHaveBeenLastCalledWith(
+      editorMocks.instances[0]?.model,
+      "plaintext",
+    );
+    expect(editorMocks.instances).toHaveLength(1);
+    expect(editorMocks.instances[0]?.editor).toBe(mountedEditor);
+    expect(container.querySelector<HTMLButtonElement>(".code-tests-toggle")?.disabled)
+      .toBe(true);
+    expect(container.querySelector(".code-run-command")).toBeNull();
+    const f9 = new KeyboardEvent("keydown", {
+      key: "F9",
+      code: "F9",
+      bubbles: true,
+      cancelable: true,
+    });
+    container.querySelector(".full-code-workspace")?.dispatchEvent(f9);
+    expect(f9.defaultPrevented).toBe(false);
+
+    await act(async () => {
+      renameCodeWorkspaceEntry(document, "main-py", "main.md", "remote");
+      await Promise.resolve();
+    });
+    expect(editorMocks.props).toHaveBeenLastCalledWith(expect.objectContaining({
+      language: "markdown",
+    }));
+    expect(container.querySelector<HTMLButtonElement>(".code-tests-toggle")?.disabled)
+      .toBe(true);
+    expect(container.querySelector(".code-run-command")).toBeNull();
+
+    await act(async () => {
+      renameCodeWorkspaceEntry(document, "main-py", "main.PY", "remote");
+      await Promise.resolve();
+    });
+    expect(editorMocks.props).toHaveBeenLastCalledWith(expect.objectContaining({
+      language: "python",
+    }));
+    expect(container.querySelector(".code-tests-toggle")?.textContent).toContain("1");
+    expect(container.querySelector(".code-run-command")).not.toBeNull();
+    expect(editorMocks.instances).toHaveLength(1);
+    document.destroy();
+  });
+
   it("does not mutate a guest document merely by mounting and enforces read-only controls", async () => {
     const document = new Y.Doc();
     initializeCodeWorkspace(document, "server-bootstrap");
@@ -1069,11 +1119,16 @@ describe("CodeWorkspace collaborative session", () => {
     expect(codeWorkspaceTestCases(document).size).toBe(0);
     expect(updates).toEqual([]);
     expect(onSessionReady).toHaveBeenCalledWith(session);
-    const explorerMenu = container.querySelector<HTMLButtonElement>(
-      'button[aria-label="Меню проводника"]',
+    const explorerTree = container.querySelector<HTMLElement>(
+      '.code-explorer__tree',
     );
     await act(async () => {
-      explorerMenu?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      explorerTree?.dispatchEvent(new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX: 40,
+        clientY: 50,
+      }));
       await Promise.resolve();
     });
     const mutationActions = [

@@ -3,7 +3,9 @@ import {
   MAX_BOARD_LINE_COORDINATE,
   boardLineBounds,
   boardLineCubicPoints,
+  boardPointLineCubicPoints,
   createBoardLineObjectGeometry,
+  createBoardPointLineObjectGeometry,
   parseBoardLineGeometry,
   sampleBoardLineGeometry,
 } from "./lineGeometry";
@@ -51,6 +53,42 @@ describe("Board line geometry", () => {
         control: [50, 0],
       },
     });
+  });
+
+  it("creates and parses editable point lines with a middle curvature anchor", () => {
+    const created = createBoardPointLineObjectGeometry([
+      [10, 30],
+      [60, 5],
+      [110, 30],
+    ]);
+    expect(created).toEqual({
+      transform: [10, 5, 100, 25, 0],
+      props: { points: [[0, 25], [50, 0], [100, 25]] },
+    });
+    expect(parseBoardLineGeometry(created.props)).toEqual({
+      start: [0, 25],
+      end: [100, 25],
+      points: [[0, 25], [50, 0], [100, 25]],
+    });
+  });
+
+  it("builds a continuous cubic path through every editable anchor", () => {
+    const cubic = boardPointLineCubicPoints([
+      [0, 20],
+      [50, 0],
+      [100, 20],
+      [150, 10],
+    ]);
+    expect(cubic).toHaveLength(20);
+    expect(cubic?.slice(0, 2)).toEqual([0, 20]);
+    expect(cubic?.slice(-2)).toEqual([150, 10]);
+    const sampled = sampleBoardLineGeometry({
+      start: [0, 20],
+      end: [150, 10],
+      points: [[0, 20], [50, 0], [100, 20], [150, 10]],
+    });
+    expect(sampled[0]).toEqual([0, 20]);
+    expect(sampled.at(-1)).toEqual([150, 10]);
   });
 
   it("converts the quadratic control to an equivalent cubic path", () => {

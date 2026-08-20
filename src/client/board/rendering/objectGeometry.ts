@@ -5,6 +5,7 @@ import type {
 } from "../../../board/core";
 import {
   boardLineCubicPoints,
+  boardPointLineCubicPoints,
   decodeStrokePoints,
   parseBoardLineGeometry,
   sampleBoardLineGeometry,
@@ -78,9 +79,10 @@ export function renderedLineGeometry(
 ): BoardLineGeometry | null {
   const geometry = parseBoardLineGeometry(object.props);
   if (!geometry) return null;
-  const intrinsicPoints = geometry.control
-    ? [geometry.start, geometry.control, geometry.end]
-    : [geometry.start, geometry.end];
+  const intrinsicPoints = geometry.points
+    ?? (geometry.control
+      ? [geometry.start, geometry.control, geometry.end]
+      : [geometry.start, geometry.end]);
   const scaled = scaleIntrinsicPoints(
     intrinsicPoints.map(([x, y]) => ({ x, y })),
     object.transform,
@@ -93,6 +95,14 @@ export function renderedLineGeometry(
   }
   const pointAt = (index: number): BoardLinePoint =>
     [scaled[index * 2], scaled[index * 2 + 1]];
+  if (geometry.points) {
+    const points = geometry.points.map((_point, index) => pointAt(index));
+    return {
+      start: points[0],
+      end: points[points.length - 1],
+      points,
+    };
+  }
   return geometry.control
     ? { start: pointAt(0), control: pointAt(1), end: pointAt(2) }
     : { start: pointAt(0), end: pointAt(1) };
@@ -112,6 +122,27 @@ export function renderedLinePath(
 ): RenderedLinePath | null {
   const geometry = renderedLineGeometry(object);
   if (!geometry) return null;
+  if (geometry.points) {
+    const cubic = boardPointLineCubicPoints(geometry.points);
+    if (!cubic) {
+      return {
+        points: flattenedLinePoints(geometry.points),
+        bezier: false,
+        endTangent: {
+          x: geometry.end[0] - geometry.start[0],
+          y: geometry.end[1] - geometry.start[1],
+        },
+      };
+    }
+    return {
+      points: [...cubic],
+      bezier: true,
+      endTangent: {
+        x: cubic[cubic.length - 2] - cubic[cubic.length - 4],
+        y: cubic[cubic.length - 1] - cubic[cubic.length - 3],
+      },
+    };
+  }
   const cubic = boardLineCubicPoints(geometry);
   if (!cubic) {
     return {

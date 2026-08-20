@@ -16,7 +16,7 @@ import {
   defaultBoardToolbarPreferences,
   type BoardToolbarPreferences,
 } from "./toolbarPreferences";
-import type { BoardTool } from "./rendering/types";
+import type { BoardModifierHintAction, BoardTool } from "./rendering/types";
 
 interface Events {
   readonly chooseTool: Mock;
@@ -28,6 +28,7 @@ interface HarnessProps {
   readonly initialPreferences?: BoardToolbarPreferences;
   readonly initialTool?: BoardTool;
   readonly penLaserActive?: boolean;
+  readonly modifierHints?: readonly BoardModifierHintAction[];
   readonly readOnly?: boolean;
   readonly imageAvailable?: boolean;
 }
@@ -37,6 +38,7 @@ function Harness({
   initialPreferences = defaultBoardToolbarPreferences(),
   initialTool = "select",
   penLaserActive = false,
+  modifierHints = [],
   readOnly = false,
   imageAvailable = true,
 }: HarnessProps) {
@@ -46,6 +48,7 @@ function Harness({
     <BoardToolbar
       activeTool={activeTool}
       penLaserActive={penLaserActive}
+      modifierHints={modifierHints}
       readOnly={readOnly}
       imageAvailable={imageAvailable}
       preferences={preferences}
@@ -125,6 +128,30 @@ async function renderHarness(props: HarnessProps): Promise<void> {
 }
 
 describe("BoardToolbar", () => {
+  it("renders only the contextual modifier hints supplied for the current gesture", async () => {
+    const events = createEvents();
+    await renderHarness({
+      events,
+      modifierHints: ["pen-move", "pen-straight"],
+    });
+
+    const hints = container.querySelector<HTMLElement>(".board-modifier-hints");
+    expect(hints?.getAttribute("aria-label")).toBe(
+      "Доступные модификаторы инструмента",
+    );
+    expect([
+      ...container.querySelectorAll<HTMLElement>(".board-modifier-hints__item"),
+    ].map((item) => item.textContent)).toEqual([
+      "Ctrlдвигать штрих",
+      "Shiftпрямая линия",
+    ]);
+  });
+
+  it("leaves the hint area empty when the current state has no modifiers", async () => {
+    await renderHarness({ events: createEvents() });
+    expect(container.querySelector(".board-modifier-hints")).toBeNull();
+  });
+
   it("keeps Select first and renders default visible and overflow items", async () => {
     const events = createEvents();
     await renderHarness({ events });

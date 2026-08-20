@@ -36,11 +36,12 @@ import {
   type BoardToolbarItemId,
   type BoardToolbarPreferences,
 } from "./toolbarPreferences";
-import type { BoardTool } from "./rendering/types";
+import type { BoardModifierHintAction, BoardTool } from "./rendering/types";
 
 export interface BoardToolbarProps {
   readonly activeTool: BoardTool;
   readonly penLaserActive?: boolean;
+  readonly modifierHints?: readonly BoardModifierHintAction[];
   readonly readOnly: boolean;
   readonly imageAvailable: boolean;
   readonly preferences: BoardToolbarPreferences;
@@ -79,6 +80,24 @@ const TOOL_SHORTCUTS: Readonly<Partial<Record<BoardTool, ToolShortcut>>> = {
   line: { letter: "L", numeric: "5" },
   arrow: { letter: "A", numeric: "6" },
   shape: { letter: "R", numeric: "7" },
+};
+
+const MODIFIER_HINTS: Readonly<Record<
+  BoardModifierHintAction,
+  { readonly key: string; readonly label: string }
+>> = {
+  "select-add": { key: "Shift", label: "добавить к выбору" },
+  "select-area": { key: "Ctrl", label: "игнорировать объекты" },
+  "select-lasso": { key: "Alt", label: "лассо" },
+  "marquee-intersection": { key: "Shift", label: "выбирать касанием" },
+  "selection-area-move": { key: "Ctrl", label: "двигать область" },
+  "pen-laser": { key: "Alt", label: "лазер" },
+  "pen-move": { key: "Ctrl", label: "двигать штрих" },
+  "pen-straight": { key: "Shift", label: "прямая линия" },
+  "eraser-restore": { key: "Alt", label: "вернуть объект" },
+  "rotation-snap": { key: "Shift", label: "шаг 45°" },
+  "line-edit-points": { key: "Enter", label: "изменить точки линии/стрелки" },
+  "line-delete-point": { key: "Delete", label: "удалить точку" },
 };
 
 function shortcutLabel(tool: BoardTool): string | undefined {
@@ -182,6 +201,30 @@ function ShortcutIndicator({ tool }: { readonly tool: BoardTool }) {
   ) : null;
 }
 
+function ModifierHints({
+  actions,
+}: {
+  readonly actions: readonly BoardModifierHintAction[];
+}) {
+  if (actions.length === 0) return null;
+  return (
+    <aside
+      className="board-modifier-hints"
+      aria-label="Доступные модификаторы инструмента"
+    >
+      {actions.map((action) => {
+        const hint = MODIFIER_HINTS[action];
+        return (
+          <span className="board-modifier-hints__item" key={action}>
+            <kbd>{hint.key}</kbd>
+            <span>{hint.label}</span>
+          </span>
+        );
+      })}
+    </aside>
+  );
+}
+
 function ToolIconButton({
   descriptor,
   active,
@@ -219,6 +262,7 @@ function ToolIconButton({
 export function BoardToolbar({
   activeTool,
   penLaserActive = false,
+  modifierHints = [],
   readOnly,
   imageAvailable,
   preferences,
@@ -380,99 +424,102 @@ export function BoardToolbar({
 
   return (
     <>
-      <div
-        className={`board-v2__toolbar board-toolbar${overflowOpen ? " is-popup-open board-toolbar--overflow-open" : ""}`}
-        role="toolbar"
-        aria-label="Инструменты доски"
-      >
-        <ToolIconButton
-          descriptor={{ tool: "select", label: "Выбор", icon: MousePointer2 }}
-          active={activeTool === "select"}
-          disabled={false}
-          itemId="select"
-          onClick={() => chooseTool("select")}
-        />
-
-        {visibleItems.map((itemId) => (
+      <div className={`board-v2__toolbar-layout${overflowOpen ? " board-v2__toolbar-layout--overflow-open" : ""}`}>
+        {!configurationOpen && <ModifierHints actions={modifierHints} />}
+        <div
+          className={`board-v2__toolbar board-toolbar${overflowOpen ? " is-popup-open board-toolbar--overflow-open" : ""}`}
+          role="toolbar"
+          aria-label="Инструменты доски"
+        >
           <ToolIconButton
-            key={itemId}
-            descriptor={descriptorForItem(itemId)}
-            active={activeTool === ITEM_DESCRIPTORS[itemId].tool}
-            disabled={itemIsDisabled(itemId, readOnly, imageAvailable)}
-            itemId={itemId}
-            onClick={() => selectItem(itemId)}
+            descriptor={{ tool: "select", label: "Выбор", icon: MousePointer2 }}
+            active={activeTool === "select"}
+            disabled={false}
+            itemId="select"
+            onClick={() => chooseTool("select")}
           />
-        ))}
 
-        <div className="board-toolbar__overflow">
-          <button
-            ref={overflowTriggerRef}
-            type="button"
-            className={`board-toolbar__overflow-trigger${hiddenToolIsActive ? " is-active" : ""}`}
-            aria-label="Ещё инструменты"
-            aria-haspopup="menu"
-            aria-expanded={overflowOpen}
-            aria-pressed={hiddenToolIsActive}
-            title="Ещё инструменты"
-            onClick={() => {
-              setOverflowOpen((open) => !open);
-            }}
-          >
-            <MoreHorizontal size={19} aria-hidden="true" />
-          </button>
+          {visibleItems.map((itemId) => (
+            <ToolIconButton
+              key={itemId}
+              descriptor={descriptorForItem(itemId)}
+              active={activeTool === ITEM_DESCRIPTORS[itemId].tool}
+              disabled={itemIsDisabled(itemId, readOnly, imageAvailable)}
+              itemId={itemId}
+              onClick={() => selectItem(itemId)}
+            />
+          ))}
 
-          {overflowOpen && (
-            <div
-              ref={overflowMenuRef}
-              className="board-toolbar__menu board-toolbar__overflow-menu"
-              data-toolbar-menu="overflow"
-              role="menu"
-              aria-label="Дополнительные инструменты"
-              onKeyDown={(event) => menuKeyboardNavigation(
-                event,
-                () => closeOverflow(),
-              )}
+          <div className="board-toolbar__overflow">
+            <button
+              ref={overflowTriggerRef}
+              type="button"
+              className={`board-toolbar__overflow-trigger${hiddenToolIsActive ? " is-active" : ""}`}
+              aria-label="Ещё инструменты"
+              aria-haspopup="menu"
+              aria-expanded={overflowOpen}
+              aria-pressed={hiddenToolIsActive}
+              title="Ещё инструменты"
+              onClick={() => {
+                setOverflowOpen((open) => !open);
+              }}
             >
-              {hiddenItems.map((itemId) => (() => {
-                const descriptor = descriptorForItem(itemId);
-                const Icon = descriptor.icon;
-                return (
-                  <button
-                    key={itemId}
-                    type="button"
-                    role="menuitem"
-                    data-overflow-item={itemId}
-                    data-toolbar-tool={descriptor.tool}
-                    aria-current={activeTool === descriptor.tool ? "true" : undefined}
-                    disabled={itemIsDisabled(itemId, readOnly, imageAvailable)}
-                    onClick={() => selectItem(itemId, true)}
-                  >
-                    <Icon size={17} aria-hidden="true" />
-                    <span>{descriptor.label}</span>
-                    {TOOL_SHORTCUTS[descriptor.tool]?.numeric && (
-                      <kbd aria-hidden="true">
-                        {TOOL_SHORTCUTS[descriptor.tool]?.numeric}
-                      </kbd>
-                    )}
-                  </button>
-                );
-              })())}
+              <MoreHorizontal size={19} aria-hidden="true" />
+            </button>
 
-              <button
-                type="button"
-                role="menuitem"
-                className="board-toolbar__configure"
-                data-toolbar-action="configure"
-                onClick={() => {
-                  closeOverflow(false);
-                  setConfigurationOpen(true);
-                }}
+            {overflowOpen && (
+              <div
+                ref={overflowMenuRef}
+                className="board-toolbar__menu board-toolbar__overflow-menu"
+                data-toolbar-menu="overflow"
+                role="menu"
+                aria-label="Дополнительные инструменты"
+                onKeyDown={(event) => menuKeyboardNavigation(
+                  event,
+                  () => closeOverflow(),
+                )}
               >
-                <Settings2 size={17} aria-hidden="true" />
-                <span>Настроить панель</span>
-              </button>
-            </div>
-          )}
+                {hiddenItems.map((itemId) => (() => {
+                  const descriptor = descriptorForItem(itemId);
+                  const Icon = descriptor.icon;
+                  return (
+                    <button
+                      key={itemId}
+                      type="button"
+                      role="menuitem"
+                      data-overflow-item={itemId}
+                      data-toolbar-tool={descriptor.tool}
+                      aria-current={activeTool === descriptor.tool ? "true" : undefined}
+                      disabled={itemIsDisabled(itemId, readOnly, imageAvailable)}
+                      onClick={() => selectItem(itemId, true)}
+                    >
+                      <Icon size={17} aria-hidden="true" />
+                      <span>{descriptor.label}</span>
+                      {TOOL_SHORTCUTS[descriptor.tool]?.numeric && (
+                        <kbd aria-hidden="true">
+                          {TOOL_SHORTCUTS[descriptor.tool]?.numeric}
+                        </kbd>
+                      )}
+                    </button>
+                  );
+                })())}
+
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="board-toolbar__configure"
+                  data-toolbar-action="configure"
+                  onClick={() => {
+                    closeOverflow(false);
+                    setConfigurationOpen(true);
+                  }}
+                >
+                  <Settings2 size={17} aria-hidden="true" />
+                  <span>Настроить панель</span>
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 

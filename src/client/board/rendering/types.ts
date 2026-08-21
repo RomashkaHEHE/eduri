@@ -62,19 +62,28 @@ export interface BoardGesturePreview {
   readonly kind: BoardGesturePreviewTool;
   readonly points: readonly BoardPoint[];
   readonly style?: BoardGesturePreviewStyle;
+  readonly streamId?: string;
+  readonly pointOffset?: number;
+  readonly offset?: BoardPoint;
 }
 
+// These cap one rolling awareness packet, not the complete remote gesture.
 export const MAX_BOARD_GESTURE_PREVIEW_POINTS = 256;
 export const MAX_BOARD_LASER_STROKES = 16;
 export const MAX_BOARD_LASER_POINTS = 160;
+export const MAX_BOARD_ACCUMULATED_PREVIEW_POINTS = 131_072;
+export const MAX_BOARD_ACCUMULATED_LASER_STROKES = 1_024;
 
 export interface BoardLaserStroke {
   readonly points: readonly BoardPoint[];
   readonly style?: BoardGesturePreviewStyle;
+  readonly streamId?: string;
+  readonly pointOffset?: number;
 }
 
 export interface BoardLaserPreview {
   readonly strokes: readonly BoardLaserStroke[];
+  readonly sessionId?: string;
 }
 
 export type BoardLaserClearMode = "fade" | "immediate";
@@ -217,10 +226,24 @@ export function sanitizeBoardLaserPreview(
     strokes.unshift({
       points,
       ...(style ? { style } : {}),
+      ...(typeof rawStroke.streamId === "string" && rawStroke.streamId.length <= 96
+        ? { streamId: rawStroke.streamId }
+        : {}),
+      ...(Number.isSafeInteger(rawStroke.pointOffset) && rawStroke.pointOffset >= 0
+        ? { pointOffset: rawStroke.pointOffset as number }
+        : {}),
     });
     remainingPoints -= points.length;
   }
-  return strokes.length > 0 ? { strokes } : undefined;
+  const valueRecord = value as Record<string, unknown>;
+  return strokes.length > 0
+    ? {
+        strokes,
+        ...(typeof valueRecord.sessionId === "string" && valueRecord.sessionId.length <= 96
+          ? { sessionId: valueRecord.sessionId }
+          : {}),
+      }
+    : undefined;
 }
 
 export interface BoardCamera {
@@ -260,6 +283,7 @@ export interface BoardPresence {
   readonly displayName: string;
   readonly color: string;
   readonly cursor?: BoardPoint;
+  readonly viewport?: BoardCamera;
   readonly selectionIds: readonly string[];
   readonly activeTool?: BoardTool;
   readonly gesturePreview?: BoardGesturePreview;

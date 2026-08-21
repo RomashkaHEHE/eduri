@@ -33,6 +33,7 @@ interface FakeAwarenessState {
   readonly color?: string;
   readonly pageId?: string | null;
   readonly activeTool?: string;
+  readonly viewport?: unknown;
   readonly laserPointer?: BoardPoint | null;
   readonly laserClearMode?: BoardLaserClearMode | null;
   readonly gesturePreview?: {
@@ -697,6 +698,50 @@ describe("LessonBoard local durability", () => {
 });
 
 describe("LessonBoard laser awareness", () => {
+  it("maps local and sanitized remote camera awareness", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockResolvedValue(
+        metricsResponse("2026-07-28T12:00:00.000Z"),
+      ),
+    );
+    await renderLessonBoard();
+    const provider = mocks.providers[0];
+    const localViewport = { x: 120, y: -45, zoom: 0.5 } as const;
+
+    await act(async () => {
+      mocks.surfaceProps?.onAwarenessChange?.({ viewport: localViewport });
+    });
+    expect(provider.presenceCalls.at(-1)).toMatchObject({
+      pageId: CATALOG.pageId,
+      viewport: localViewport,
+    });
+
+    provider.awareness.states.set(88, {
+      userId: "tutor-2",
+      displayName: "Преподаватель",
+      color: "#006d77",
+      pageId: CATALOG.pageId,
+      viewport: { x: 25, y: 35, zoom: 0.005 },
+    });
+    await act(async () => provider.awareness.emitChange());
+    expect(mocks.surfaceProps?.presences?.[0]?.viewport).toEqual({
+      x: 25,
+      y: 35,
+      zoom: 0.02,
+    });
+
+    provider.awareness.states.set(88, {
+      userId: "tutor-2",
+      displayName: "Преподаватель",
+      color: "#006d77",
+      pageId: CATALOG.pageId,
+      viewport: { x: 25, y: 35, zoom: Number.NaN },
+    });
+    await act(async () => provider.awareness.emitChange());
+    expect(mocks.surfaceProps?.presences?.[0]?.viewport).toBeUndefined();
+  });
+
   it("bounds and maps segmented laser awareness while accepting legacy peers", async () => {
     vi.stubGlobal(
       "fetch",

@@ -1,8 +1,24 @@
 import { randomBytes } from "node:crypto";
-import { RoomServiceClient } from "livekit-server-sdk";
+import { RoomServiceClient, TrackSource } from "livekit-server-sdk";
 import type { AppConfig } from "./config.js";
 import type { AppContext, Role } from "./types.js";
 import type { GuestRoomService } from "./guestRooms.js";
+import type { CallLobbyParticipant } from "../shared/call.js";
+import {
+  COLLABORATION_PROFILE_COLORS,
+  normalizeCollaborationColor,
+  normalizeCollaborationDisplayName,
+} from "../shared/collaborationProfile.js";
+
+interface LiveKitParticipantSnapshot {
+  readonly identity: string;
+  readonly name: string;
+  readonly attributes?: Record<string, string>;
+  readonly tracks?: ReadonlyArray<{
+    readonly source: TrackSource;
+    readonly muted: boolean;
+  }>;
+}
 
 export interface LiveKitRoomService {
   createRoom(options: {
@@ -29,6 +45,7 @@ export interface LiveKitRoomService {
       attributes?: Record<string, string>;
     },
   ): Promise<unknown>;
+  listParticipants?(room: string): Promise<LiveKitParticipantSnapshot[]>;
 }
 
 export class LiveKitRevocationError extends Error {
@@ -96,6 +113,49 @@ export function isLiveKitNotFoundError(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   const candidate = error as { status?: unknown; code?: unknown };
   return candidate.status === 404 || candidate.code === "not_found";
+}
+
+function lobbyParticipantName(participant: LiveKitParticipantSnapshot): string {
+  try {
+    return normalizeCollaborationDisplayName(participant.name);
+  } catch {
+    return "Участник";
+  }
+}
+
+function lobbyParticipantColor(participant: LiveKitParticipantSnapshot): `#${string}` {
+  try {
+    return normalizeCollaborationColor(participant.attributes?.["eduri.color"]);
+  } catch {
+    return COLLABORATION_PROFILE_COLORS[0];
+  }
+}
+
+export async function listCallLobbyParticipants(
+  service: LiveKitRoomService | undefined,
+  roomName: string,
+): Promise<CallLobbyParticipant[]> {
+  if (!service?.listParticipants) return [];
+  let participants: LiveKitParticipantSnapshot[];
+  try {
+    participants = await service.listParticipants(roomName);
+  } catch (error) {
+    if (isLiveKitNotFoundError(error)) return [];
+    throw error;
+  }
+  return participants.map((participant) => {
+    const active = (source: TrackSource) => participant.tracks?.some((track) => (
+      track.source === source && !track.muted
+    )) ?? false;
+    return {
+      identity: participant.identity,
+      displayName: lobbyParticipantName(participant),
+      color: lobbyParticipantColor(participant),
+      microphoneEnabled: active(TrackSource.MICROPHONE),
+      cameraEnabled: active(TrackSource.CAMERA),
+      screenShareEnabled: active(TrackSource.SCREEN_SHARE),
+    };
+  });
 }
 
 function logLiveKitFailure(

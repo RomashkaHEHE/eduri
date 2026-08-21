@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   get: vi.fn(),
   ensureResource: vi.fn(),
   callToken: vi.fn(),
+  callParticipants: vi.fn(),
   updateCallProfile: vi.fn(),
   callMounts: 0,
   callUnmounts: 0,
@@ -42,6 +43,7 @@ vi.mock("../api", async (importOriginal) => {
         get: (...args: unknown[]) => mocks.get(...args),
         ensureResource: (...args: unknown[]) => mocks.ensureResource(...args),
         callToken: (...args: unknown[]) => mocks.callToken(...args),
+        callParticipants: (...args: unknown[]) => mocks.callParticipants(...args),
         updateCallProfile: (...args: unknown[]) => mocks.updateCallProfile(...args),
       },
     },
@@ -141,6 +143,7 @@ beforeEach(() => {
   mocks.get.mockReset();
   mocks.ensureResource.mockReset();
   mocks.callToken.mockReset();
+  mocks.callParticipants.mockReset().mockResolvedValue([]);
   mocks.updateCallProfile.mockReset().mockResolvedValue(undefined);
   mocks.callMounts = 0;
   mocks.callUnmounts = 0;
@@ -332,6 +335,13 @@ describe("GuestRoomPage", () => {
       deviceId: "device-id-000000000000000000000000",
       profile: { displayName: "Guest user", color: "#2563eb" },
     });
+
+    const requestParticipants = mocks.callProps?.requestParticipants as
+      | (() => Promise<unknown>)
+      | undefined;
+    expect(requestParticipants).toBeTypeOf("function");
+    await requestParticipants?.();
+    expect(mocks.callParticipants).toHaveBeenCalledWith("share-id");
 
     const updateParticipantProfile = mocks.callProps?.updateParticipantProfile as
       | ((profile: { displayName: string; color: `#${string}` }) => Promise<void>)

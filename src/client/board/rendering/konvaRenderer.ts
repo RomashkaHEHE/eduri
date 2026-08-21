@@ -50,7 +50,6 @@ import type {
   BoardGesturePreviewStyle,
   BoardGesturePreviewTool,
   BoardLaserPreview,
-  BoardLaserStroke,
   BoardModifierHintAction,
   BoardObjectDraft,
   BoardObjectSnapshot,
@@ -65,6 +64,8 @@ import type {
   BoardTool,
 } from "./types";
 import {
+  MAX_BOARD_ACCUMULATED_LASER_STROKES,
+  MAX_BOARD_ACCUMULATED_PREVIEW_POINTS,
   MAX_BOARD_GESTURE_PREVIEW_POINTS,
   MAX_BOARD_LASER_POINTS,
   MAX_BOARD_LASER_STROKES,
@@ -79,6 +80,7 @@ const WHEEL_DELTA_MODE_LINE = 1;
 const WHEEL_DELTA_MODE_PAGE = 2;
 const VIEWPORT_OVERSCAN_PX = 480;
 const CURSOR_INTERPOLATION_MS = 72;
+export const REMOTE_CURSOR_LABEL_IDLE_MS = 5_000;
 const LASER_FADE_MS = 300;
 const LASER_GLOW_PX = 8;
 const MAX_TRANSFORMER_NODES = 256;
@@ -91,10 +93,14 @@ const ERASER_MARKED_OPACITY_FACTOR = 0.24;
 const ERASER_BROAD_PHASE_SEGMENT_PX = 64;
 const MAX_ERASER_BROAD_PHASE_SEGMENTS = 128;
 const MARQUEE_THRESHOLD_PX = 3;
+const RIGHT_BUTTON_PAN_THRESHOLD_PX = 4;
+const RIGHT_BUTTON_CONTEXT_MENU_RESET_MS = 500;
 const PLACEMENT_CLICK_TOLERANCE_PX = 8;
 const LASSO_POINT_DISTANCE_PX = 1.5;
 const MAX_LASSO_POINTS = 2_048;
 const FREEHAND_POINT_DISTANCE_PX = 0.5;
+const LIVE_FREEHAND_POINT_DISTANCE_PX = 1.5;
+const MAX_LOCAL_LASER_POINTS = 1_000_000;
 const GROUP_SELECTION_DASH_PX = [7, 5] as const;
 const TRANSFORMER_ANCHOR_SIZE_PX = 9;
 const TRANSFORMER_STROKE_WIDTH_PX = 1.5;
@@ -190,7 +196,11 @@ interface DrawingGesture {
   readonly style: Readonly<Record<string, unknown>>;
   readonly start: BoardPoint;
   points: Array<BoardPoint & { pressure: number }>;
-  previewAwarenessPoints: BoardPoint[];
+  readonly previewStreamId: string;
+  previewStreamPointOffset: number;
+  previewStreamPoints: BoardPoint[];
+  previewStreamLastSampledPoint: BoardPoint;
+  previewStreamHasLiveEndpoint: boolean;
   previewPoints: number[];
   preview: Konva.Shape;
   previousScreen: BoardPoint;
@@ -223,6 +233,7 @@ interface LaserGesture {
 }
 
 interface LocalLaserStroke {
+  readonly streamId: string;
   points: BoardPoint[];
   previewPoints: number[];
   readonly style: BoardGesturePreviewStyle;
@@ -230,6 +241,7 @@ interface LocalLaserStroke {
 }
 
 interface LaserSession {
+  readonly streamId: string;
   readonly group: Konva.Group;
   readonly strokes: LocalLaserStroke[];
   releaseRequested: boolean;
@@ -239,8 +251,11 @@ interface PanGesture {
   readonly kind: "pan";
   readonly pointerId: number;
   readonly pointerType: string;
+  readonly button: number;
   readonly screen: BoardPoint;
   readonly camera: BoardCamera;
+  readonly activationThresholdPx: number;
+  activated: boolean;
 }
 
 interface PlacementGesture {
@@ -324,10 +339,22 @@ interface CursorMotion {
   readonly from: BoardPoint;
   readonly target: BoardPoint;
   readonly startedAt: number;
+  readonly lastMovedAt: number;
+}
+
+interface RemoteLaserStroke {
+  readonly streamId: string;
+  readonly points: BoardPoint[];
+  style?: BoardGesturePreviewStyle;
+  nextPointOffset: number;
+  pointsChanged: boolean;
 }
 
 interface RemoteLaserTrail {
-  readonly strokes: BoardLaserStroke[];
+  readonly sessionId: string;
+  readonly strokes: RemoteLaserStroke[];
+  readonly strokesById: Map<string, RemoteLaserStroke>;
+  totalPoints: number;
   expiresAt: number;
   active: boolean;
 }
@@ -361,14 +388,18 @@ interface SelectionObjectOutlineGeometry {
 
 interface PresenceRenderEntry {
   cursor: Konva.Group | null;
-  cursorArrow: Konva.Line | null;
+  cursorPointer: Konva.Group | null;
+  cursorArrow: Konva.Path | null;
   cursorLabel: Konva.Label | null;
   cursorTag: Konva.Tag | null;
   cursorText: Konva.Text | null;
   gesturePreview: Konva.Shape | null;
   gestureKind: BoardGesturePreview["kind"] | null;
   gestureColor: string | null;
-  gesturePoints: readonly BoardPoint[] | null;
+  gesturePoints: BoardPoint[] | null;
+  gestureFlatPoints: number[] | null;
+  gestureStreamId: string | null;
+  gestureStreamNextOffset: number;
   gestureStyle: BoardGesturePreviewStyle | null;
   laser: Konva.Group | null;
   readonly selections: Map<string, Konva.Rect>;
@@ -705,6 +736,44 @@ function colorValue(value: unknown, fallback: string): string {
     }
   }
   return fallback;
+}
+
+function colorChannels(value: string): readonly [number, number, number] | null {
+  if (value.startsWith("#")) {
+    const hex = value.slice(1);
+    if (hex.length === 3 || hex.length === 4) {
+      return [
+        Number.parseInt(`${hex[0]}${hex[0]}`, 16),
+        Number.parseInt(`${hex[1]}${hex[1]}`, 16),
+        Number.parseInt(`${hex[2]}${hex[2]}`, 16),
+      ];
+    }
+    if (hex.length === 6 || hex.length === 8) {
+      return [
+        Number.parseInt(hex.slice(0, 2), 16),
+        Number.parseInt(hex.slice(2, 4), 16),
+        Number.parseInt(hex.slice(4, 6), 16),
+      ];
+    }
+    return null;
+  }
+  const match = RGB_COLOR_PATTERN.exec(value) ?? RGBA_COLOR_PATTERN.exec(value);
+  return match
+    ? [Number(match[1]), Number(match[2]), Number(match[3])]
+    : null;
+}
+
+function contrastingTextColor(background: string): string {
+  const channels = colorChannels(background);
+  if (!channels) return "#ffffff";
+  const [red, green, blue] = channels.map((channel) => {
+    const normalized = channel / 255;
+    return normalized <= 0.04045
+      ? normalized / 12.92
+      : ((normalized + 0.055) / 1.055) ** 2.4;
+  });
+  const luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+  return luminance > 0.179 ? "#101828" : "#ffffff";
 }
 
 function themePalette(theme: BoardTheme): BoardThemePalette {
@@ -1179,21 +1248,8 @@ function appendBoundedGesturePoint(points: BoardPoint[], point: BoardPoint): voi
   points.splice(0, points.length, ...compacted);
 }
 
-function evenlySamplePoints(
-  points: readonly BoardPoint[],
-  limit: number,
-): BoardPoint[] {
-  if (points.length <= limit) return points.map((point) => ({ ...point }));
-  if (limit <= 1) return [{ ...points[points.length - 1] }];
-  const sampled: BoardPoint[] = [];
-  for (let index = 0; index < limit; index += 1) {
-    const sourceIndex = Math.round(index * (points.length - 1) / (limit - 1));
-    sampled.push({ ...points[sourceIndex] });
-  }
-  return sampled;
-}
-
 function boundedLaserPreview(
+  sessionId: string,
   localStrokes: readonly LocalLaserStroke[],
 ): BoardLaserPreview | null {
   const strokes = localStrokes
@@ -1224,9 +1280,14 @@ function boundedLaserPreview(
   }
 
   return {
+    sessionId,
     strokes: strokes.map((stroke, index) => ({
-      points: evenlySamplePoints(stroke.points, allocations[index]),
+      points: stroke.points
+        .slice(-allocations[index])
+        .map((point) => ({ ...point })),
       style: stroke.style,
+      streamId: stroke.streamId,
+      pointOffset: Math.max(0, stroke.points.length - allocations[index]),
     })),
   };
 }
@@ -1626,7 +1687,11 @@ export function renderGesturePreviewNode(
     style,
     start,
     points: points.map((point) => ({ ...point, pressure: 0.5 })),
-    previewAwarenessPoints: points,
+    previewStreamId: "remote-static-preview",
+    previewStreamPointOffset: 0,
+    previewStreamPoints: points,
+    previewStreamLastSampledPoint: { ...end },
+    previewStreamHasLiveEndpoint: false,
     previewPoints: flattenedPoints(points),
     preview,
     previousScreen: { x: 0, y: 0 },
@@ -1998,7 +2063,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
     const pointerId = this.activeMousePointerId;
     const button = this.activeMouseButton;
     if (pointerId === null || button === null) return;
-    const buttonMask = button === 0 ? 1 : 4;
+    const buttonMask = button === 0 ? 1 : button === 1 ? 4 : 2;
     if ((event.buttons & buttonMask) === 0) {
       this.handlePointerUp(event, pointerId, false);
       return;
@@ -2028,6 +2093,10 @@ export class KonvaBoardRenderer implements BoardRenderer {
   private laserModifierPressed = false;
   private penLaserPresentationActive = false;
   private modifierHintSignature: string | null = null;
+  private readonly previewStreamNamespace = `${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2)}`;
+  private previewStreamSequence = 0;
   private activeGesture: ActiveGesture | null = null;
   private laserSession: LaserSession | null = null;
   private dragStart = new Map<string, BoardPoint>();
@@ -2039,6 +2108,8 @@ export class KonvaBoardRenderer implements BoardRenderer {
   private viewportQueryBounds: ViewportBounds | null = null;
   private presenceExpiryTimer: number | null = null;
   private presenceAnimationFrame: number | null = null;
+  private rightPanContextMenuResetTimer: number | null = null;
+  private suppressNextContextMenu = false;
   private activeMousePointerId: number | null = null;
   private activeMouseButton: number | null = null;
   private lastMouseInputScreen: BoardPoint | null = null;
@@ -3019,6 +3090,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
     this.presenceExpiryTimer = null;
     if (this.presenceAnimationFrame !== null) cancelAnimationFrame(this.presenceAnimationFrame);
     this.presenceAnimationFrame = null;
+    this.clearRightPanContextMenuSuppression();
     window.removeEventListener("keydown", this.keyDown);
     window.removeEventListener("keyup", this.keyUp);
     window.removeEventListener("mousemove", this.legacyMouseMove, true);
@@ -3134,7 +3206,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
   }
 
   private laserPreview(session: LaserSession): BoardLaserPreview | null {
-    return boundedLaserPreview(session.strokes);
+    return boundedLaserPreview(session.streamId, session.strokes);
   }
 
   private emitLaserSession(session: LaserSession): void {
@@ -3175,6 +3247,11 @@ export class KonvaBoardRenderer implements BoardRenderer {
     this.activeMousePointerId = null;
     this.activeMouseButton = null;
     this.lastMouseInputScreen = null;
+  }
+
+  private nextPreviewStreamId(): string {
+    this.previewStreamSequence += 1;
+    return `${this.previewStreamNamespace}-${this.previewStreamSequence.toString(36)}`;
   }
 
   private isEditingElement(target: EventTarget | null): boolean {
@@ -3221,12 +3298,15 @@ export class KonvaBoardRenderer implements BoardRenderer {
       && this.activeGesture.strokeMoveActive;
     const movingSelection = isSelectionGesture(this.activeGesture)
       && this.activeGesture.commandMoveActive;
+    const activePan = this.activeGesture?.kind === "pan"
+      && this.activeGesture.activated;
     const cursor = this.spacePressed
       || this.currentTool === "hand"
       || movingStroke
       || movingSelection
+      || activePan
       ? (
-          this.activeGesture?.kind === "pan" || movingStroke || movingSelection
+          activePan || movingStroke || movingSelection
             ? "grabbing"
             : "grab"
         )
@@ -3309,6 +3389,10 @@ export class KonvaBoardRenderer implements BoardRenderer {
   ): void {
     const nativeEvent = event.evt;
     nativeEvent.preventDefault();
+    if (this.suppressNextContextMenu) {
+      this.clearRightPanContextMenuSuppression();
+      return;
+    }
     const screen = screenPointFromPointer(nativeEvent, this.element);
     const target = event.target as Konva.Node;
     const targetIsTransformer = target === this.transformer
@@ -3419,6 +3503,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
     let session = this.laserSession;
     if (!session) {
       session = {
+        streamId: this.nextPreviewStreamId(),
         group: new Konva.Group({ listening: false }),
         strokes: [],
         releaseRequested: false,
@@ -3435,6 +3520,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
       this.currentCamera.zoom,
     );
     const stroke: LocalLaserStroke = {
+      streamId: this.nextPreviewStreamId(),
       points: [{ ...point }],
       previewPoints: [point.x, point.y],
       style,
@@ -3460,7 +3546,15 @@ export class KonvaBoardRenderer implements BoardRenderer {
 
   private onPointerDown(event: Konva.KonvaEventObject<PointerEvent>): void {
     const nativeEvent = event.evt;
-    if (nativeEvent.button !== 0 && nativeEvent.button !== 1) return;
+    if (
+      nativeEvent.button !== 0
+      && nativeEvent.button !== 1
+      && nativeEvent.button !== 2
+    ) return;
+    if (nativeEvent.button === 2) {
+      if (this.activeGesture) return;
+      this.clearRightPanContextMenuSuppression();
+    }
     this.pressedPointerIds.add(nativeEvent.pointerId);
     const screen = screenPointFromPointer(nativeEvent, this.element);
     const pointerType = pointerTypeFromEvent(nativeEvent);
@@ -3479,25 +3573,35 @@ export class KonvaBoardRenderer implements BoardRenderer {
     }
     if (this.activeGesture) return;
 
-    if (this.linePointEditor) this.exitLinePointEditing();
-
     const commandHeldAtStart = commandModifierHeld(nativeEvent);
     const laserHeldAtStart = standaloneAltHeld(nativeEvent);
-    this.setLaserModifierPressed(laserHeldAtStart);
+    if (nativeEvent.button !== 2) this.setLaserModifierPressed(laserHeldAtStart);
     const point = worldPoint(screen, this.currentCamera);
     const target = event.target as Konva.Node;
     const targetIsTransformer = target === this.transformer
       || this.transformer.isAncestorOf(target);
     const objectId = objectIdFromTarget(target);
-    const panRequested = this.spacePressed || this.currentTool === "hand" || nativeEvent.button === 1;
+    const rightButtonPanCandidate = nativeEvent.button === 2;
+    const panRequested = this.spacePressed
+      || this.currentTool === "hand"
+      || nativeEvent.button === 1
+      || rightButtonPanCandidate;
     if (panRequested) {
-      nativeEvent.preventDefault();
+      if (!rightButtonPanCandidate) nativeEvent.preventDefault();
+      if (!rightButtonPanCandidate && this.linePointEditor) {
+        this.exitLinePointEditing();
+      }
       this.activeGesture = {
         kind: "pan",
         pointerId: nativeEvent.pointerId,
         pointerType,
+        button: nativeEvent.button,
         screen,
         camera: this.currentCamera,
+        activationThresholdPx: rightButtonPanCandidate
+          ? RIGHT_BUTTON_PAN_THRESHOLD_PX
+          : 0,
+        activated: !rightButtonPanCandidate,
       };
       this.updateDraggable();
       this.capturePointer(nativeEvent);
@@ -3505,6 +3609,8 @@ export class KonvaBoardRenderer implements BoardRenderer {
       this.emitModifierHints();
       return;
     }
+
+    if (this.linePointEditor) this.exitLinePointEditing();
 
     if (this.currentTool === "select") {
       const lassoRequested = standaloneAltHeld(nativeEvent);
@@ -3629,7 +3735,11 @@ export class KonvaBoardRenderer implements BoardRenderer {
       style,
       start: point,
       points: [{ ...point, pressure: pointerPressure(nativeEvent) }],
-      previewAwarenessPoints: [point],
+      previewStreamId: this.nextPreviewStreamId(),
+      previewStreamPointOffset: 0,
+      previewStreamPoints: [{ ...point }],
+      previewStreamLastSampledPoint: { ...point },
+      previewStreamHasLiveEndpoint: false,
       previewPoints: [point.x, point.y],
       preview,
       previousScreen: screen,
@@ -3914,11 +4024,20 @@ export class KonvaBoardRenderer implements BoardRenderer {
       ) {
         continue;
       }
-      appendBoundedGesturePoint(gesture.stroke.points, point);
+      gesture.stroke.points.push(point);
+      gesture.stroke.previewPoints.push(point.x, point.y);
+      if (gesture.stroke.points.length > MAX_LOCAL_LASER_POINTS) {
+        const compacted = [gesture.stroke.points[0]];
+        for (let index = 2; index < gesture.stroke.points.length - 1; index += 2) {
+          compacted.push(gesture.stroke.points[index]);
+        }
+        compacted.push(gesture.stroke.points.at(-1)!);
+        gesture.stroke.points = compacted;
+        gesture.stroke.previewPoints = flattenedPoints(compacted);
+      }
       changed = true;
     }
     if (!changed) return false;
-    gesture.stroke.previewPoints = flattenedPoints(gesture.stroke.points);
     gesture.stroke.preview.points(gesture.stroke.previewPoints);
     this.emitLaserSession(gesture.session);
     this.previewLayer.batchDraw();
@@ -3975,10 +4094,20 @@ export class KonvaBoardRenderer implements BoardRenderer {
       return;
     }
     if (gesture.pointerId !== pointerId) return;
-    nativeEvent.preventDefault();
-    this.setLaserModifierPressed(standaloneAltHeld(nativeEvent));
-
     if (gesture.kind === "pan") {
+      if (
+        !gesture.activated
+        && distance(gesture.screen, screen) < gesture.activationThresholdPx
+      ) return;
+      if (!gesture.activated) {
+        gesture.activated = true;
+        this.suppressNextContextMenu = true;
+        if (gesture.button === 2 && this.linePointEditor) {
+          this.exitLinePointEditing();
+        }
+        this.updateCursor();
+      }
+      nativeEvent.preventDefault();
       this.setCamera({
         x: gesture.camera.x + screen.x - gesture.screen.x,
         y: gesture.camera.y + screen.y - gesture.screen.y,
@@ -3986,6 +4115,8 @@ export class KonvaBoardRenderer implements BoardRenderer {
       });
       return;
     }
+    nativeEvent.preventDefault();
+    this.setLaserModifierPressed(standaloneAltHeld(nativeEvent));
     if (gesture.kind === "placement") {
       gesture.maximumTravelPx = Math.max(
         gesture.maximumTravelPx,
@@ -4105,11 +4236,43 @@ export class KonvaBoardRenderer implements BoardRenderer {
     }
     gesture.points.push({ ...gesturePoint, pressure });
     gesture.previewPoints.push(gesturePoint.x, gesturePoint.y);
-    appendBoundedGesturePoint(
-      gesture.previewAwarenessPoints,
-      gesturePoint,
-    );
+    this.appendDrawingPreviewStreamPoint(gesture, gesturePoint);
     return true;
+  }
+
+  private appendDrawingPreviewStreamPoint(
+    gesture: DrawingGesture,
+    point: BoardPoint,
+  ): void {
+    const points = gesture.previewStreamPoints;
+    const shouldSample = distance(
+      gesture.previewStreamLastSampledPoint,
+      point,
+    ) * this.currentCamera.zoom >= LIVE_FREEHAND_POINT_DISTANCE_PX;
+    if (!shouldSample) {
+      if (gesture.previewStreamHasLiveEndpoint) {
+        points[points.length - 1] = { ...point };
+      } else {
+        points.push({ ...point });
+        gesture.previewStreamHasLiveEndpoint = true;
+        if (points.length > MAX_BOARD_GESTURE_PREVIEW_POINTS) {
+          points.shift();
+          gesture.previewStreamPointOffset += 1;
+        }
+      }
+      return;
+    }
+    if (gesture.previewStreamHasLiveEndpoint) {
+      points[points.length - 1] = { ...point };
+      gesture.previewStreamHasLiveEndpoint = false;
+    } else {
+      points.push({ ...point });
+    }
+    gesture.previewStreamLastSampledPoint = { ...point };
+    const overflow = points.length - MAX_BOARD_GESTURE_PREVIEW_POINTS;
+    if (overflow <= 0) return;
+    points.splice(0, overflow);
+    gesture.previewStreamPointOffset += overflow;
   }
 
   private updateStraightFreehandPoint(
@@ -4137,8 +4300,11 @@ export class KonvaBoardRenderer implements BoardRenderer {
     if (distance(anchor, gesturePoint) < minimumDistance) {
       gesture.points.pop();
       gesture.previewPoints.splice(-2, 2);
-      gesture.previewAwarenessPoints.pop();
-      appendBoundedGesturePoint(gesture.previewAwarenessPoints, anchor);
+      gesture.previewStreamPoints[
+        gesture.previewStreamPoints.length - 1
+      ] = { x: anchor.x, y: anchor.y };
+      gesture.previewStreamLastSampledPoint = { x: anchor.x, y: anchor.y };
+      gesture.previewStreamHasLiveEndpoint = false;
       gesture.straightPointActive = false;
       return true;
     }
@@ -4156,9 +4322,9 @@ export class KonvaBoardRenderer implements BoardRenderer {
     };
     gesture.previewPoints[gesture.previewPoints.length - 2] = gesturePoint.x;
     gesture.previewPoints[gesture.previewPoints.length - 1] = gesturePoint.y;
-    gesture.previewAwarenessPoints[
-      gesture.previewAwarenessPoints.length - 1
-    ] = gesturePoint;
+    gesture.previewStreamPoints[
+      gesture.previewStreamPoints.length - 1
+    ] = { ...gesturePoint };
     return true;
   }
 
@@ -4264,8 +4430,11 @@ export class KonvaBoardRenderer implements BoardRenderer {
       this.releasePointer(pointerId);
       return;
     }
-    nativeEvent.preventDefault();
-    if (!cancelled) {
+    if (gesture.kind !== "pan" || gesture.activated) nativeEvent.preventDefault();
+    if (
+      !cancelled
+      && (gesture.kind !== "pan" || gesture.button !== 2)
+    ) {
       this.setLaserModifierPressed(standaloneAltHeld(nativeEvent));
     }
     if (cancelled || gesture.kind === "pinch") {
@@ -4309,6 +4478,9 @@ export class KonvaBoardRenderer implements BoardRenderer {
     this.releasePointer(pointerId);
     this.touchPointers.delete(pointerId);
     if (gesture.kind === "pan") {
+      if (gesture.button === 2 && gesture.activated) {
+        this.scheduleRightPanContextMenuReset();
+      }
       this.updateCursor();
       return;
     }
@@ -4423,10 +4595,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
       return;
     }
     const points = gesture.tool === "pen" || gesture.tool === "highlighter"
-      ? gesture.previewAwarenessPoints.map((point) => ({
-          x: point.x + gesture.strokeOffset.x,
-          y: point.y + gesture.strokeOffset.y,
-        }))
+      ? gesture.previewStreamPoints.map((point) => ({ ...point }))
       : gesture.tool === "line" || gesture.tool === "arrow"
         ? (() => {
             const control = gesture.fixedConnectorControl ?? {
@@ -4445,6 +4614,13 @@ export class KonvaBoardRenderer implements BoardRenderer {
       kind: gesture.tool,
       points,
       ...(style ? { style } : {}),
+      ...(gesture.tool === "pen" || gesture.tool === "highlighter"
+        ? {
+            streamId: gesture.previewStreamId,
+            pointOffset: gesture.previewStreamPointOffset,
+            offset: { ...gesture.strokeOffset },
+          }
+        : {}),
     });
   }
 
@@ -4648,6 +4824,9 @@ export class KonvaBoardRenderer implements BoardRenderer {
     const gesture = this.activeGesture;
     if (!gesture) return;
     this.activeGesture = null;
+    if (gesture.kind === "pan" && gesture.button === 2 && gesture.activated) {
+      this.scheduleRightPanContextMenuReset();
+    }
     if (gesture.kind === "drawing") {
       gesture.preview.destroy();
       if (isGesturePreviewTool(gesture.tool)) {
@@ -4671,6 +4850,24 @@ export class KonvaBoardRenderer implements BoardRenderer {
     }
     this.updateCursor();
     this.previewLayer.batchDraw();
+  }
+
+  private clearRightPanContextMenuSuppression(): void {
+    this.suppressNextContextMenu = false;
+    if (this.rightPanContextMenuResetTimer === null) return;
+    window.clearTimeout(this.rightPanContextMenuResetTimer);
+    this.rightPanContextMenuResetTimer = null;
+  }
+
+  private scheduleRightPanContextMenuReset(): void {
+    if (!this.suppressNextContextMenu || this.destroyed) return;
+    if (this.rightPanContextMenuResetTimer !== null) {
+      window.clearTimeout(this.rightPanContextMenuResetTimer);
+    }
+    this.rightPanContextMenuResetTimer = window.setTimeout(() => {
+      this.rightPanContextMenuResetTimer = null;
+      this.suppressNextContextMenu = false;
+    }, RIGHT_BUTTON_CONTEXT_MENU_RESET_MS);
   }
 
   private changeSelection(ids: readonly string[]): void {
@@ -5130,6 +5327,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
             from: presence.cursor,
             target: presence.cursor,
             startedAt: animationTime - CURSOR_INTERPOLATION_MS,
+            lastMovedAt: wallTime,
           });
         } else if (
           previous.target.x !== presence.cursor.x
@@ -5141,6 +5339,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
             from: teleported ? presence.cursor : current,
             target: presence.cursor,
             startedAt: animationTime,
+            lastMovedAt: wallTime,
           });
         }
       } else {
@@ -5152,14 +5351,111 @@ export class KonvaBoardRenderer implements BoardRenderer {
         : undefined;
       const existingTrail = this.remoteLaserTrails.get(presence.clientId);
       if (incomingLaser) {
-        this.remoteLaserTrails.set(presence.clientId, {
-          strokes: incomingLaser.strokes.map((stroke) => ({
+        const sessionId = incomingLaser.sessionId ?? "";
+        const streamed = sessionId.length > 0
+          && incomingLaser.strokes.every((stroke) => stroke.streamId);
+        if (!streamed || !existingTrail || existingTrail.sessionId !== sessionId) {
+          const strokes = incomingLaser.strokes.map((stroke, index) => ({
+            streamId: stroke.streamId ?? `legacy-${index}`,
             points: stroke.points.map((point) => ({ ...point })),
             ...(stroke.style ? { style: { ...stroke.style } } : {}),
-          })),
-          expiresAt: Number.POSITIVE_INFINITY,
-          active: true,
-        });
+            nextPointOffset: (stroke.pointOffset ?? 0) + stroke.points.length,
+            pointsChanged: true,
+          }));
+          this.remoteLaserTrails.set(presence.clientId, {
+            sessionId,
+            strokes,
+            strokesById: new Map(strokes.map((stroke) => [stroke.streamId, stroke])),
+            totalPoints: strokes.reduce((total, stroke) => total + stroke.points.length, 0),
+            expiresAt: Number.POSITIVE_INFINITY,
+            active: true,
+          });
+        } else {
+          existingTrail.active = true;
+          existingTrail.expiresAt = Number.POSITIVE_INFINITY;
+          for (const incomingStroke of incomingLaser.strokes) {
+            const streamId = incomingStroke.streamId!;
+            const pointOffset = incomingStroke.pointOffset ?? 0;
+            const incomingEnd = pointOffset + incomingStroke.points.length;
+            let stroke = existingTrail.strokesById.get(streamId);
+            if (!stroke) {
+              stroke = {
+                streamId,
+                points: incomingStroke.points.map((point) => ({ ...point })),
+                ...(incomingStroke.style ? { style: { ...incomingStroke.style } } : {}),
+                nextPointOffset: incomingEnd,
+                pointsChanged: true,
+              };
+              existingTrail.strokes.push(stroke);
+              existingTrail.strokesById.set(streamId, stroke);
+              existingTrail.totalPoints += stroke.points.length;
+            } else if (pointOffset > stroke.nextPointOffset) {
+              existingTrail.totalPoints -= stroke.points.length;
+              stroke.points.splice(
+                0,
+                stroke.points.length,
+                ...incomingStroke.points.map((point) => ({ ...point })),
+              );
+              stroke.style = incomingStroke.style
+                ? { ...incomingStroke.style }
+                : undefined;
+              stroke.nextPointOffset = incomingEnd;
+              stroke.pointsChanged = true;
+              existingTrail.totalPoints += stroke.points.length;
+            } else if (incomingEnd >= stroke.nextPointOffset) {
+              const overlap = Math.max(0, stroke.nextPointOffset - pointOffset);
+              let pointsChanged = false;
+              if (overlap > 0 && incomingStroke.points.length > 0 && stroke.points.length > 0) {
+                const incomingPoint = incomingStroke.points[
+                  Math.min(overlap, incomingStroke.points.length) - 1
+                ];
+                const previousPoint = stroke.points[stroke.points.length - 1];
+                if (
+                  previousPoint.x !== incomingPoint.x
+                  || previousPoint.y !== incomingPoint.y
+                ) {
+                  stroke.points[stroke.points.length - 1] = { ...incomingPoint };
+                  pointsChanged = true;
+                }
+              }
+              for (let index = overlap; index < incomingStroke.points.length; index += 1) {
+                stroke.points.push({ ...incomingStroke.points[index] });
+                existingTrail.totalPoints += 1;
+                pointsChanged = true;
+              }
+              stroke.nextPointOffset = incomingEnd;
+              stroke.pointsChanged = stroke.pointsChanged || pointsChanged;
+            }
+          }
+          if (existingTrail.strokes.length > MAX_BOARD_ACCUMULATED_LASER_STROKES) {
+            const removed = existingTrail.strokes.splice(
+              0,
+              existingTrail.strokes.length - MAX_BOARD_ACCUMULATED_LASER_STROKES,
+            );
+            for (const stroke of removed) {
+              existingTrail.strokesById.delete(stroke.streamId);
+              existingTrail.totalPoints -= stroke.points.length;
+            }
+            // Children are positionally reused by syncPresenceLaser().
+            for (const stroke of existingTrail.strokes) stroke.pointsChanged = true;
+          }
+          if (existingTrail.totalPoints > MAX_BOARD_ACCUMULATED_PREVIEW_POINTS) {
+            let compactedTotal = 0;
+            for (const stroke of existingTrail.strokes) {
+              if (stroke.points.length > 2) {
+                const compacted = [stroke.points[0]];
+                for (let index = 2; index < stroke.points.length - 1; index += 2) {
+                  compacted.push(stroke.points[index]);
+                }
+                compacted.push(stroke.points.at(-1)!);
+                stroke.points.splice(0, stroke.points.length, ...compacted);
+                stroke.pointsChanged = true;
+              }
+              compactedTotal += stroke.points.length;
+            }
+            existingTrail.totalPoints = compactedTotal;
+          }
+        }
       } else if (existingTrail?.active) {
         if (presence.laserClearMode === "immediate") {
           this.remoteLaserTrails.delete(presence.clientId);
@@ -5181,6 +5477,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
   private createPresenceEntry(): PresenceRenderEntry {
     return {
       cursor: null,
+      cursorPointer: null,
       cursorArrow: null,
       cursorLabel: null,
       cursorTag: null,
@@ -5189,6 +5486,9 @@ export class KonvaBoardRenderer implements BoardRenderer {
       gestureKind: null,
       gestureColor: null,
       gesturePoints: null,
+      gestureFlatPoints: null,
+      gestureStreamId: null,
+      gestureStreamNextOffset: 0,
       gestureStyle: null,
       laser: null,
       selections: new Map(),
@@ -5211,44 +5511,67 @@ export class KonvaBoardRenderer implements BoardRenderer {
     const color = colorValue(presence.color, DEFAULT_ACCENT);
     if (!entry.cursor) {
       const cursor = new Konva.Group({ listening: false });
-      const arrow = new Konva.Line({
-        points: [0, 0, 0, 18, 5, 13, 10, 23, 14, 21, 9, 11, 17, 10],
-        closed: true,
-        strokeWidth: 1.5,
+      const pointer = new Konva.Group({ listening: false });
+      const arrow = new Konva.Path({
+        data: [
+          "M 0 0",
+          "L 15.65 6.55",
+          "Q 16.65 6.97 15.63 7.38",
+          "L 10.25 9.55",
+          "Q 9.88 9.7 9.72 10.08",
+          "L 7.35 15.35",
+          "Q 6.9 16.2 6.47 15.33",
+          "Z",
+        ].join(" "),
+        strokeWidth: 1.25,
+        strokeScaleEnabled: false,
+        lineJoin: "round",
         listening: false,
         perfectDrawEnabled: false,
       });
-      const label = new Konva.Label({ listening: false });
-      const tag = new Konva.Tag({ cornerRadius: 3 });
+      const label = new Konva.Label({ visible: false, listening: false });
+      const tag = new Konva.Tag({ cornerRadius: 4 });
       const text = new Konva.Text({
-        fill: "#ffffff",
-        fontSize: 11,
-        fontStyle: "bold",
+        fontSize: 10.5,
+        fontStyle: "normal",
         padding: 4,
       });
       label.add(tag, text);
-      cursor.add(arrow, label);
+      pointer.add(arrow);
+      cursor.add(pointer, label);
       this.presenceWorld.add(cursor);
       entry.cursor = cursor;
+      entry.cursorPointer = pointer;
       entry.cursorArrow = arrow;
       entry.cursorLabel = label;
       entry.cursorTag = tag;
       entry.cursorText = text;
     }
     const inverseZoom = 1 / this.currentCamera.zoom;
+    entry.cursor!.setAttrs({
+      scaleX: inverseZoom,
+      scaleY: inverseZoom,
+    });
+    const senderZoom = presence.viewport?.zoom;
+    const pointerScale = senderZoom
+      && Number.isFinite(senderZoom)
+      && senderZoom > 0
+      ? 1 / senderZoom
+      : 1;
+    entry.cursorPointer!.setAttrs({
+      scaleX: pointerScale,
+      scaleY: pointerScale,
+    });
     entry.cursorArrow!.setAttrs({
       fill: color,
-      stroke: "#ffffff",
-      scaleX: inverseZoom,
-      scaleY: inverseZoom,
+      stroke: this.currentTheme === "dark" ? "#f8fafc" : "#18202b",
     });
     entry.cursorLabel!.setAttrs({
-      x: 15 * inverseZoom,
-      y: 18 * inverseZoom,
-      scaleX: inverseZoom,
-      scaleY: inverseZoom,
+      x: Math.max(12, 15 * pointerScale),
+      y: Math.max(13, 17 * pointerScale),
     });
     entry.cursorTag!.fill(color);
+    entry.cursorText!.fill(contrastingTextColor(color));
     const displayName = boundedTextValue(
       presence.displayName,
       "",
@@ -5271,14 +5594,101 @@ export class KonvaBoardRenderer implements BoardRenderer {
       entry.gestureKind = null;
       entry.gestureColor = null;
       entry.gesturePoints = null;
+      entry.gestureFlatPoints = null;
+      entry.gestureStreamId = null;
+      entry.gestureStreamNextOffset = 0;
       entry.gestureStyle = null;
       return;
     }
     const color = colorValue(presence.color, DEFAULT_ACCENT);
     const points = boundedGesturePoints(gesture.points);
     const style = sanitizeBoardGesturePreviewStyle(gesture.style);
+    const streamId = typeof gesture.streamId === "string"
+      && gesture.streamId.length > 0
+      && gesture.streamId.length <= 96
+      && (gesture.kind === "pen" || gesture.kind === "highlighter")
+      ? gesture.streamId
+      : null;
+    const pointOffset = Number.isSafeInteger(gesture.pointOffset)
+      && (gesture.pointOffset ?? -1) >= 0
+      ? gesture.pointOffset!
+      : 0;
+    const offset = gesture.offset && isFinitePoint(gesture.offset)
+      ? gesture.offset
+      : { x: 0, y: 0 };
+
+    if (streamId) {
+      const sameStream = entry.gestureStreamId === streamId
+        && entry.gestureKind === gesture.kind
+        && entry.gestureColor === color
+        && equalGesturePreviewStyles(entry.gestureStyle, style)
+        && entry.gesturePreview instanceof Konva.Line
+        && entry.gesturePoints !== null
+        && entry.gestureFlatPoints !== null;
+      const incomingEnd = pointOffset + points.length;
+      if (!sameStream || pointOffset > entry.gestureStreamNextOffset) {
+        entry.gesturePreview?.destroy();
+        const line = renderGesturePreviewNode(
+          { kind: gesture.kind, points, ...(style ? { style } : {}) },
+          color,
+          this.currentTheme,
+        );
+        entry.gesturePreview = line;
+        if (line) this.presenceWorld.add(line);
+        entry.gesturePoints = points.map((point) => ({ ...point }));
+        entry.gestureFlatPoints = flattenedPoints(entry.gesturePoints);
+        if (line instanceof Konva.Line) line.points(entry.gestureFlatPoints);
+        entry.gestureStreamId = streamId;
+        entry.gestureStreamNextOffset = incomingEnd;
+      } else if (incomingEnd >= entry.gestureStreamNextOffset) {
+        const accumulated = entry.gesturePoints!;
+        const flat = entry.gestureFlatPoints!;
+        const overlap = Math.max(0, entry.gestureStreamNextOffset - pointOffset);
+        let pointsChanged = false;
+        if (overlap > 0 && points.length > 0 && accumulated.length > 0) {
+          const overlappingEnd = points[Math.min(overlap, points.length) - 1];
+          const previousEnd = accumulated[accumulated.length - 1];
+          if (
+            previousEnd.x !== overlappingEnd.x
+            || previousEnd.y !== overlappingEnd.y
+          ) {
+            accumulated[accumulated.length - 1] = { ...overlappingEnd };
+            flat[flat.length - 2] = overlappingEnd.x;
+            flat[flat.length - 1] = overlappingEnd.y;
+            pointsChanged = true;
+          }
+        }
+        for (let index = overlap; index < points.length; index += 1) {
+          const point = points[index];
+          accumulated.push({ ...point });
+          flat.push(point.x, point.y);
+          pointsChanged = true;
+        }
+        entry.gestureStreamNextOffset = incomingEnd;
+        if (accumulated.length > MAX_BOARD_ACCUMULATED_PREVIEW_POINTS) {
+          const compacted = [accumulated[0]];
+          for (let index = 2; index < accumulated.length - 1; index += 2) {
+            compacted.push(accumulated[index]);
+          }
+          compacted.push(accumulated.at(-1)!);
+          entry.gesturePoints = compacted;
+          entry.gestureFlatPoints = flattenedPoints(compacted);
+          pointsChanged = true;
+        }
+        if (pointsChanged && entry.gesturePreview instanceof Konva.Line) {
+          entry.gesturePreview.points(entry.gestureFlatPoints!);
+        }
+      }
+      entry.gesturePreview?.position(offset);
+      entry.gestureKind = gesture.kind;
+      entry.gestureColor = color;
+      entry.gestureStyle = style ?? null;
+      return;
+    }
+
     if (
       entry.gesturePreview
+      && entry.gestureStreamId === null
       && entry.gestureKind === gesture.kind
       && entry.gestureColor === color
       && equalPoints(entry.gesturePoints, points)
@@ -5293,9 +5703,13 @@ export class KonvaBoardRenderer implements BoardRenderer {
       this.currentTheme,
     );
     if (entry.gesturePreview) this.presenceWorld.add(entry.gesturePreview);
+    entry.gesturePreview?.position(offset);
     entry.gestureKind = gesture.kind;
     entry.gestureColor = color;
     entry.gesturePoints = points;
+    entry.gestureFlatPoints = null;
+    entry.gestureStreamId = null;
+    entry.gestureStreamNextOffset = 0;
     entry.gestureStyle = style ?? null;
   }
 
@@ -5369,9 +5783,12 @@ export class KonvaBoardRenderer implements BoardRenderer {
         });
         entry.laser.add(line);
       }
-      const points = flattenedPoints(stroke.points);
-      if (points.length === 2) points.push(points[0], points[1]);
-      line.points(points);
+      if (stroke.pointsChanged || line.points().length === 0) {
+        const points = flattenedPoints(stroke.points);
+        if (points.length === 2) points.push(points[0], points[1]);
+        line.points(points);
+        stroke.pointsChanged = false;
+      }
       applyLaserStrokeAppearance(
         line,
         sanitizeBoardGesturePreviewStyle(stroke.style) ?? {
@@ -5448,6 +5865,22 @@ export class KonvaBoardRenderer implements BoardRenderer {
         entry.cursor.visible(Boolean(cursorPoint));
         if (cursorPoint) entry.cursor.position(cursorPoint);
       }
+      if (entry.cursorLabel) {
+        const labelDeadline = cursorMotion
+          ? cursorMotion.lastMovedAt + REMOTE_CURSOR_LABEL_IDLE_MS
+          : Number.POSITIVE_INFINITY;
+        const interacting = Boolean(presence.gesturePreview || presence.laser);
+        const labelVisible = Boolean(
+          cursorPoint
+          && !interacting
+          && entry.cursorText?.text()
+          && now >= labelDeadline,
+        );
+        entry.cursorLabel.visible(labelVisible);
+        if (cursorPoint && !interacting && now < labelDeadline) {
+          nextExpiry = Math.min(nextExpiry, labelDeadline);
+        }
+      }
       const laser = this.remoteLaserTrails.get(presence.clientId);
       if (laser && !laser.active && laser.expiresAt > now) {
         nextExpiry = Math.min(nextExpiry, laser.expiresAt);
@@ -5476,7 +5909,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
       this.presenceExpiryTimer = window.setTimeout(() => {
         this.presenceExpiryTimer = null;
         this.renderPresence();
-      }, Math.max(1, nextExpiry - Date.now() + 1));
+      }, Math.max(1, nextExpiry - Date.now()));
     }
   }
 

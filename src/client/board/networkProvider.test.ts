@@ -2678,6 +2678,8 @@ describe("BoardNetworkProvider CRDT sync and awareness", () => {
     const splitPoint = Math.floor(points.length / 2);
     const strokes = [
       {
+        streamId: "laser-stroke-1",
+        pointOffset: 40,
         points: points.slice(0, splitPoint),
         style: {
           stroke: "rgb(10, 20, 30)",
@@ -2686,6 +2688,8 @@ describe("BoardNetworkProvider CRDT sync and awareness", () => {
         },
       },
       {
+        streamId: "laser-stroke-2",
+        pointOffset: 0,
         points: points.slice(splitPoint),
         style: {
           stroke: "#d33f49",
@@ -2732,11 +2736,47 @@ describe("BoardNetworkProvider CRDT sync and awareness", () => {
         }],
       },
     })).toThrow(/laser stroke 0 style is invalid/u);
+    expect(() => sender.provider.setPresence({
+      gesturePreview: {
+        kind: "laser",
+        sessionId: "",
+        strokes: [{ points: points.slice(0, 2) }],
+      },
+    })).toThrow(/sessionId is invalid/u);
+    expect(() => sender.provider.setPresence({
+      gesturePreview: {
+        kind: "laser",
+        sessionId: "s".repeat(97),
+        strokes: [{ points: points.slice(0, 2) }],
+      },
+    })).toThrow(/sessionId is invalid/u);
+    expect(() => sender.provider.setPresence({
+      gesturePreview: {
+        kind: "laser",
+        strokes: [{
+          streamId: "",
+          points: points.slice(0, 2),
+        }],
+      },
+    })).toThrow(/streamId is invalid/u);
+    expect(() => sender.provider.setPresence({
+      gesturePreview: {
+        kind: "laser",
+        strokes: [{
+          pointOffset: -1,
+          points: points.slice(0, 2),
+        }],
+      },
+    })).toThrow(/pointOffset is invalid/u);
 
     sender.provider.setPresence({
       laserPointer: points.at(-1),
       laserClearMode: null,
-      gesturePreview: { kind: "laser", strokes },
+      gesturePreview: {
+        kind: "laser",
+        sessionId: "laser-session-1",
+        strokes,
+      },
     });
     sender.timers.advance(40);
     await settle();
@@ -2753,8 +2793,11 @@ describe("BoardNetworkProvider CRDT sync and awareness", () => {
       laserClearMode: null,
       gesturePreview: {
         kind: "laser",
+        sessionId: "laser-session-1",
         strokes: [
           {
+            streamId: "laser-stroke-1",
+            pointOffset: 40,
             points: points.slice(0, splitPoint),
             style: {
               stroke: "rgb(10,20,30)",
@@ -2834,10 +2877,29 @@ describe("BoardNetworkProvider CRDT sync and awareness", () => {
         },
       },
     })).toThrow(/style is invalid/u);
+    expect(() => sender.provider.setPresence({
+      gesturePreview: { kind: "pen", streamId: "", points },
+    })).toThrow(/streamId is invalid/u);
+    expect(() => sender.provider.setPresence({
+      gesturePreview: {
+        kind: "pen",
+        streamId: "p".repeat(97),
+        points,
+      },
+    })).toThrow(/streamId is invalid/u);
+    expect(() => sender.provider.setPresence({
+      gesturePreview: { kind: "pen", pointOffset: -1, points },
+    })).toThrow(/pointOffset is invalid/u);
+    expect(() => sender.provider.setPresence({
+      gesturePreview: { kind: "pen", pointOffset: 1.5, points },
+    })).toThrow(/pointOffset is invalid/u);
 
     sender.provider.setPresence({
       gesturePreview: {
         kind: "pen",
+        streamId: "pen-stream-1",
+        pointOffset: 320,
+        offset: { x: 15, y: -8 },
         points,
         style: {
           stroke: "rgb(10, 20, 30)",
@@ -2859,6 +2921,9 @@ describe("BoardNetworkProvider CRDT sync and awareness", () => {
     expect(receiver.provider.awareness.getStates().get(77)).toMatchObject({
       gesturePreview: {
         kind: "pen",
+        streamId: "pen-stream-1",
+        pointOffset: 320,
+        offset: { x: 15, y: -8 },
         points,
         style: {
           stroke: "rgb(10,20,30)",

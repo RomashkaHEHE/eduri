@@ -117,6 +117,10 @@ function GuestRoomPageContent() {
     }),
     [deviceId, profile, shareId],
   );
+  const requestParticipants = useCallback(
+    () => api.guestRooms.callParticipants(shareId),
+    [shareId],
+  );
   const updateParticipantProfile = useCallback(
     (nextProfile: CollaborationProfile) => (
       api.guestRooms.updateCallProfile(shareId, deviceId, nextProfile)
@@ -303,6 +307,7 @@ function GuestRoomPageContent() {
           <aside className="guest-room__call" aria-label="Звонок">
             <CallWorkspace
               requestCredentials={requestCredentials}
+              requestParticipants={requestParticipants}
               profile={profile}
               updateParticipantProfile={updateParticipantProfile}
               autoJoin={autoJoinCall}

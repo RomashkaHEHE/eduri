@@ -3,7 +3,7 @@
 Status: public guest-room foundation implemented; production acceptance in
 progress.
 
-Date: 2026-08-09.
+Date: 2026-08-21.
 
 ## Product model
 
@@ -52,6 +52,96 @@ guest room. Resource IDs are stable UUIDs but are not access credentials.
 The guest-room call shell and every custom LiveKit surface follow the global
 document theme. Switching presentation theme only changes inherited palette
 tokens; it must not reconnect, remount, or otherwise disturb the media room.
+
+Before admission, the shared lesson/guest Call lobby reads a bounded roster from
+the application server instead of joining LiveKit as a hidden participant. The
+authenticated lesson endpoint rechecks lesson membership; the guest endpoint
+reauthorizes the active share capability and is rate-limited. Both use the
+private LiveKit management API and return only stable participant identity,
+normalized display name/color, and three booleans derived from unmuted
+microphone, camera, and screen-share publications. No track, media payload,
+token, metadata, or network statistic is exposed. A missing ephemeral LiveKit
+room is an empty roster. The client refreshes immediately, every five seconds
+while the lobby is visible, and when the tab becomes visible again; it stops
+polling after admission and retains its last known roster across transient
+refresh failures. Lobby presentation shows Mic Off only for a missing/muted
+microphone and shows Camera or Screen Share only when the respective publication
+is active.
+
+The lesson and guest Call routes share one web media adapter. Microphone,
+camera, and screen-share controls are large circles; each media circle has a
+smaller overlapping circular source trigger instead of forming a split pill.
+The Settings action opens a full modal with separate Audio, Camera, and Screen
+Share sections and only currently implemented controls. Audio exposes input
+and, where `setSinkId` is supported, output selection; camera exposes video
+input selection. The first camera activation on a browser profile must open the
+camera menu and wait for an explicit choice before publishing. That choice,
+audio preferences, voice threshold, and screen quality are best-effort local
+presentation state in the bounded `eduri-call-devices-v1` local-storage record;
+subsequent camera activations may reuse it. Device IDs are not identity,
+authorization, room, or activity data. Device enumeration runs on mount, after
+successful media/device actions, and after browser `devicechange`; there is no
+manual refresh control.
+
+Microphone and camera controls observe the browser Permissions API where it is
+available, without triggering a prompt on mount. `prompt`, `denied`, missing
+device, and unsupported states render the corresponding media control inactive,
+force its visible state to off, and expose an immediate anchored application
+tooltip instead of a native delayed `title`. Activating an inactive but
+requestable control performs a short local-only `getUserMedia` probe, stops all
+probe tracks, refreshes devices, and changes the control to available only after
+the requested track type exists. It does not publish the probe to LiveKit or
+implicitly enable media; the next activation follows the normal toggle flow.
+PermissionStatus `change` events update the controls when access is changed in
+browser settings. Browsers without Permissions API support remain in the prompt
+state until a successful explicit probe.
+
+The Audio section can start a second local-only microphone capture, render its
+frequency levels, and play it through the selected output using `setSinkId`.
+Closing Settings or stopping the check stops every test track and releases its
+audio graph; test audio is never published to LiveKit. The voice-activation
+threshold controls a local Web Audio gate on the published microphone track.
+The participant avatar speaking outline observes the resulting transmitted
+track directly and has no second display threshold: any non-zero transmitted
+audio activates it.
+
+Screen sharing stays behind the browser-native `getDisplayMedia` picker. The
+screen-share menu starts a fresh picker so the user can replace the current
+screen, window, or tab; Eduri does not fabricate a device list or persist a
+display-source identifier. Settings persist 720p/1080p and 15/30 FPS capture
+and matching publish-encoding presets. The adapter requests screen audio and
+browser surface switching where supported, but the browser and operating
+system remain authoritative and may expose fewer choices or clamp quality.
+Display capture has no portable durable permission to query: if
+`getDisplayMedia` exists, its action remains available and each start or source
+change is simultaneously the permission request and native source selection.
+If the API is absent, the screen control uses the same inactive treatment and
+explains that the browser does not support screen sharing.
+
+Call layout is derived from LiveKit camera placeholders and active camera or
+screen-share tracks. With no selected track it uses the adaptive paginated
+grid. Selecting an active tile by pointer, `Enter`, or `Space` moves that track
+to the focus area and leaves every other track in the carousel; selecting the
+focused tile again returns to the equal grid, and selecting a carousel tile
+transfers focus. Focus clears automatically if its media disappears. A
+participant without active camera or screen media remains visible as a compact,
+non-focusable identity card instead of an empty full-stage rectangle. This
+preserves a participant target for later participant-specific actions without
+claiming that unavailable media is interactive. Every participant tile also
+keeps a bottom-left connection indicator. Its hover/focus popover reports the
+LiveKit aggregate quality plus WebRTC RTT, jitter, packet loss, and current
+media bitrate when the browser exposes those stats; missing values are shown as
+unavailable rather than estimated. RTC stats are polled only while the popover
+is open.
+
+A pointer context menu on a remote participant tile exposes participant-local
+playback volume. The same integer percentage applies to microphone and screen
+share audio through LiveKit's Web Audio mixer, including tracks published after
+the value changes. The range control covers 0-200%; direct numeric input and
+wheel adjustment cover 0-400%. Values above 200% leave the range thumb at its
+maximum and add a proportional warning-color overlay: 300% covers half of the
+range and 400% covers all of it. This is local playback state and is never sent
+to the room or treated as participant metadata.
 
 The initial HTTP foundation stores rooms and resources independently from
 authenticated lessons. `owner_user_id` is nullable so an authenticated user
@@ -191,6 +281,15 @@ Board and Code content must not be stored as whole-scene last-write-wins JSON.
 Their resource tables point to granular CRDT documents and immutable assets.
 The room layer owns lifecycle; each resource layer owns validation,
 persistence, quotas, compaction, and sync.
+
+The canonical local room check is `npm run dev`. It runs the built web adapter,
+guest-room HTTP API, Board WebSocket, Code Socket.IO namespaces, persistent
+SQLite state, and real loopback LiveKit through the same application services
+used by deployment. Local testing must not substitute an in-memory room or a
+second sync implementation. Use separate browser profiles for participants so
+device identity, profile, awareness, reconnect, terminal host election, and
+shared run behavior are exercised independently. `npm run dev:fast` is only a
+Vite/HMR authoring mode and is not sufficient evidence for room acceptance.
 
 ## Current status and remaining gates
 

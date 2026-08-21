@@ -5010,6 +5010,29 @@ describe("BoardSurface theme and standard controls", () => {
     expect(renderer.camera.zoom).toBeCloseTo(1);
   });
 
+  it("publishes camera changes through frame-coalesced awareness", async () => {
+    const context = createBoardContext(PAGE_ONE);
+    contexts.push(context);
+    const factory = new FakeRendererFactory();
+    const onAwarenessChange = vi.fn();
+
+    await act(async () => {
+      root?.render(createElement(BoardSurface, surfaceProps(context, factory, {
+        onAwarenessChange,
+      })));
+    });
+    onAwarenessChange.mockClear();
+    const nextCamera = { x: 120, y: -45, zoom: 0.5 } as const;
+
+    await act(async () => {
+      factory.instances[0].callbacks.onCameraChange(nextCamera);
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
+
+    expect(onAwarenessChange).toHaveBeenCalledTimes(1);
+    expect(onAwarenessChange).toHaveBeenCalledWith({ viewport: nextCamera });
+  });
+
   it("clamps toolbar zoom to 2%-2000% without moving the viewport-center anchor", async () => {
     const context = createBoardContext(PAGE_ONE);
     contexts.push(context);

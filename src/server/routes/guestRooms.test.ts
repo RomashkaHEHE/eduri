@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import request from "supertest";
-import { TokenVerifier } from "livekit-server-sdk";
+import { TokenVerifier, TrackSource } from "livekit-server-sdk";
 import * as Y from "yjs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getPageObjects } from "../../board/core/index.js";
@@ -60,6 +60,59 @@ afterEach(() => {
 });
 
 describe("guest room HTTP API", () => {
+  it("exposes an activated guest call roster without leaking media", async () => {
+    const listParticipants = vi.fn(async () => [{
+      identity: "guest:participant",
+      name: "Guest participant",
+      attributes: { "eduri.color": "#2563EB" },
+      tracks: [
+        { source: TrackSource.MICROPHONE, muted: false },
+        { source: TrackSource.CAMERA, muted: true },
+        { source: TrackSource.SCREEN_SHARE, muted: false },
+      ],
+    }]);
+    const { app, context } = harness({
+      liveKit: true,
+      liveKitRoomService: {
+        createRoom: async () => undefined,
+        listRooms: async () => [],
+        deleteRoom: async () => undefined,
+        removeParticipant: async () => undefined,
+        listParticipants,
+      },
+    });
+    const created = await request(app)
+      .post("/api/guest/rooms")
+      .set("Origin", "http://eduri.test")
+      .send({ initialResource: "call" })
+      .expect(201);
+    const shareId = created.body.room.shareId as string;
+
+    await request(app)
+      .post(`/api/guest/rooms/${shareId}/call-token`)
+      .set("Origin", "http://eduri.test")
+      .send({ deviceId: "a".repeat(32) })
+      .expect(200);
+    const response = await request(app)
+      .get(`/api/guest/rooms/${shareId}/call-participants`)
+      .expect(200)
+      .expect("Cache-Control", "no-store");
+
+    expect(response.body).toEqual({
+      participants: [{
+        identity: "guest:participant",
+        displayName: "Guest participant",
+        color: "#2563eb",
+        microphoneEnabled: true,
+        cameraEnabled: false,
+        screenShareEnabled: true,
+      }],
+    });
+    expect(listParticipants).toHaveBeenCalledOnce();
+    context.stopGuestRoomMaintenance?.();
+    context.db.close();
+  });
+
   it("keeps the public creation throttle only in production", () => {
     expect(guestRoomCreationLimit("production")).toBe(5);
     expect(guestRoomCreationLimit("development")).toBe(10_000);

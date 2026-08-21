@@ -303,9 +303,11 @@ content. There is no visible marker or highlighter tool.
 ### Opening and target selection
 
 - A browser `contextmenu` event over the Konva canvas opens Eduri's menu and
-  suppresses the native browser menu. This normally means mouse right-click or
-  a pen barrel/right-click action. Toolbar DOM and inline textareas retain their
-  native context menus.
+  suppresses the native browser menu. This normally means a mouse right-click
+  released within the 4 CSS-pixel pan threshold or a pen barrel/right-click
+  action. A right-button drag which crosses that threshold pans instead and
+  suppresses its resulting context-menu event. Toolbar DOM and inline textareas
+  retain their native context menus.
 - The menu works independently of the selected tool and in read-only mode.
   Opening it cancels an unfinished renderer gesture and any object
   drag/resize/rotation, releases owned pointers, clears held nudge keys, and
@@ -458,10 +460,15 @@ group and all other mutation commands are omitted rather than shown disabled.
 
 - Primary mouse button, pen contact, or one touch pointer uses the current tool.
 - Middle-button drag always pans.
-- Right-click on the Konva canvas or an object opens the board context menu
-  described above. Button 2 itself does not begin the selected tool. The
-  browser menu remains available everywhere outside the drawing canvas,
-  including editors and controls.
+- Right-button pointer-down on the Konva canvas starts a click-or-pan candidate,
+  independently of the selected tool and read-only state. Movement below 4 CSS
+  pixels leaves the camera unchanged and the eventual release opens the board
+  context menu described above. Crossing the threshold activates pan from the
+  original down point, switches the cursor to `grabbing`, and suppresses the
+  context menu belonging to that drag. A later right-click opens the menu
+  normally. Button 2 never begins the selected tool. The browser menu remains
+  available everywhere outside the drawing canvas, including editors and
+  controls.
 - Hand plus primary drag pans.
 - Holding Space before primary pointer-down starts a temporary pan. Pressing
   Space after any gesture has already started changes only cursor feedback and
@@ -554,10 +561,19 @@ faded object. `Escape` explicitly invokes the same cancellation path.
 - Pressure is retained in stroke data, but the current renderer uses the
   selected constant width rather than pressure-varying width. Tilt, twist,
   azimuth, and stylus barrel-eraser modes are not used.
-- The preview, bounded remote awareness preview, and final draft use the same
-  sampled geometry and the same stroke color, width, and opacity.
-- A live awareness preview is capped at 256 points. This does not cap the final
-  durable stroke.
+- The local preview and final draft use the complete 0.5-screen-pixel sampled
+  geometry. The awareness stream uses a separate 1.5-screen-pixel live sample
+  spacing with the same stroke color, width, and opacity, reducing network and
+  remote-render work without changing the committed stroke.
+- One live awareness packet carries a rolling tail of at most 256 points, plus
+  a stable stream ID, its absolute point offset, and the current whole-stroke
+  translation. Successive tails overlap. A peer merges only the new suffix into
+  the existing Konva line and updates that node in place, so the remote preview
+  continues beyond 256 points and does not blink or rebuild on every packet.
+  An out-of-order duplicate is ignored; overlap normally repairs a skipped
+  packet, while a genuine gap restarts at the next window without drawing a
+  false bridge. Remote preview accumulation uses a 131,072-point emergency
+  compaction guard. This does not cap or simplify the final durable stroke.
 - Pointer-up commits the complete stroke as one object and one undo item.
   Freehand creation intentionally leaves it unselected.
 - A click with fewer than two stored points creates no object.
@@ -585,13 +601,17 @@ faded object. `Escape` explicitly invokes the same cancellation path.
   bridge between them.
 - Pointer-up while `Alt` remains held retains every local stroke in the
   session. Further primary gestures append separate paths, and no older local
-  path disappears before release. Individual local paths use the same
-  progressive 256-point compaction as other live previews, preserving their
-  start, end, and full visual span rather than truncating either end.
-- Awareness carries a separately derived, bounded projection: at most the
-  newest 16 strokes and 160 aggregate points. When geometry exceeds that point
-  budget, points are distributed across the included paths and sampled evenly
-  from start to end. This network guard never deletes or shortens a local path.
+  path disappears before release. Local point and flattened-preview buffers are
+  appended incrementally. Only an abnormal one-million-point uninterrupted
+  laser path triggers progressive emergency compaction.
+- Awareness carries rolling tails from at most the newest 16 strokes and 160
+  aggregate points. Stable session/stroke IDs and per-tail absolute offsets let
+  peers merge new suffixes into retained paths, including paths omitted from a
+  later newest-16 packet. The peer reuses each Konva line and updates geometry
+  only when points actually change. A remote session has hostile-input guards
+  of 1,024 accumulated strokes and 131,072 accumulated preview points, after
+  which old strokes or geometry are progressively compacted. These packet and
+  receiver guards never shorten a normal local laser session.
 - Releasing `Alt` after pointer-up clears awareness and
   fades every retained stroke together over 300 ms. If the modifier is released
   during an active laser stroke, release is remembered: that stroke remains
@@ -2000,6 +2020,7 @@ nudge is blocked by `Ctrl`/`Cmd` or `Alt`.
 | --- | --- |
 | Hold Space before primary drag | Temporary pan |
 | Middle-button drag | Pan |
+| Right-button drag past 4 CSS pixels | Pan; suppress that drag's context menu |
 | Wheel/trackpad | Pan |
 | `Ctrl`/`Cmd+wheel` | Zoom around pointer |
 | `Ctrl`/`Cmd+=` or numpad `+` | Zoom x1.1 around viewport center |
@@ -2094,17 +2115,32 @@ non-Select tool; those nested states can require multiple presses.
   falsely present the remote participant update as accepted.
 - Local cursor and live gesture updates are coalesced to animation frames, then
   network awareness is rate-limited to roughly one packet per 40 ms.
-- Remote cursor motion interpolates over 72 ms and shows the authenticated
-  display name/color. A jump above 600 screen pixels is shown immediately;
-  cursor arrow and name remain a constant screen size at every zoom.
+- Remote cursor motion interpolates over 72 ms and uses a compact asymmetric
+  navigation wedge with a precise hotspot, no stem or tail, and the
+  authenticated participant color. Its fixed-width outline contrasts with the
+  viewer's current board theme, while the idle name label chooses light or dark
+  text from the participant color's relative luminance. A jump above 600 screen
+  pixels is shown immediately. The pointer and its label remain a constant
+  screen size at every zoom. The authenticated display-name label is hidden on
+  first appearance and immediately after every position change; it appears
+  only after that cursor has remained stationary for 5 seconds. A remote live
+  gesture or laser is already visible as its own preview, adds no redundant
+  cursor ornament, and keeps the name hidden. Label timing is renderer-local and never adds an
+  awareness field or network update. Camera changes reuse the existing bounded
+  awareness viewport: a participant zooming out enlarges only their pointer,
+  while zooming in makes it smaller. Pointer scale is exactly the inverse of
+  sender zoom with no additional cursor-size limits across the supported
+  2%-2000% board zoom range; the name label stays readable at a constant screen
+  size.
 - Remote selections outline visible selected objects. Presence selection is
   capped at 256 IDs and is not the participant's complete local selection.
 - In-progress freehand/shapes and Drawing's temporary laser session are
   ephemeral awareness, never document content or undo history. Laser awareness
-  is a bounded ordered collection of separately styled strokes rather than one
-  connected polyline. Retained strokes stay visible to peers while the sender
-  continues holding `Alt`, then fade together after release; cancellation
-  removes them immediately.
+  is a bounded rolling packet of separately styled stroke tails rather than one
+  connected polyline. Stream IDs and point offsets let peers accumulate the
+  complete visible gesture while packet size remains fixed. Retained strokes
+  stay visible to peers while the sender continues holding `Alt`, then fade
+  together after release; cancellation removes them immediately.
 - Multiple devices for one user remain separate presence client IDs.
 - The server validates profile fields at Board-ticket or Code-handshake
   admission, binds them to the connection, and overwrites identity, display

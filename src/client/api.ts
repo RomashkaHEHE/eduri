@@ -7,6 +7,7 @@ import type {
   TutorSummary,
 } from "../shared/types";
 import type { CollaborationProfile } from "../shared/collaborationProfile";
+import type { CallLobbyParticipant } from "../shared/call";
 
 export class ApiError extends Error {
   status: number;
@@ -301,6 +302,12 @@ export const api = {
         },
       );
     },
+    callParticipants(shareId: string) {
+      return request<{ participants: CallLobbyParticipant[] }>(
+        `/api/guest/rooms/${encodeURIComponent(shareId)}/call-participants`,
+        { skipCsrf: true },
+      ).then((result) => result.participants);
+    },
     updateCallProfile(
       shareId: string,
       deviceId: string,
@@ -443,6 +450,11 @@ export const api = {
         method: "POST",
         body: jsonBody(profile ? { profile } : {}),
       });
+    },
+    callParticipants(id: string) {
+      return request<{ participants: CallLobbyParticipant[] }>(
+        `/api/lessons/${encodeURIComponent(id)}/call-participants`,
+      ).then((result) => result.participants);
     },
     updateCallProfile(id: string, profile: CollaborationProfile) {
       return request<void>(`/api/lessons/${encodeURIComponent(id)}/call-profile`, {

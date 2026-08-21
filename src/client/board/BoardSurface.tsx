@@ -196,6 +196,7 @@ export interface BoardServerMetrics {
 
 export interface BoardAwarenessState {
   readonly cursor?: BoardPoint | null;
+  readonly viewport?: BoardCamera | null;
   readonly selectionIds?: readonly string[];
   readonly activeTool?: BoardTool;
   readonly gesturePreview?: BoardGesturePreview | null;
@@ -3238,7 +3239,10 @@ export function BoardSurface({
     const host = hostRef.current;
     if (!host) return;
     const renderer = rendererFactory.create(host, {
-      onCameraChange: scheduleCameraState,
+      onCameraChange: (nextCamera) => {
+        scheduleCameraState(nextCamera);
+        scheduleLiveAwareness({ viewport: nextCamera });
+      },
       onCursorChange: (point) => sendCursor(point),
       onSelectionChange: (ids) => setSurfaceSelection(ids),
       onCreateObject: (draft) => {

@@ -35,7 +35,7 @@ export function PublicHomePage() {
     <main className="public-home">
       <header className="public-home__header">
         <Link className="public-brand" to="/" aria-label="Eduri">
-          <span className="brand-mark">E</span>
+          <span className="brand-mark" aria-hidden="true"><img src="/favicon.svg" alt="" /></span>
           <strong>Eduri</strong>
         </Link>
         <div className="public-home__account-actions">

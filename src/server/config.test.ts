@@ -43,6 +43,40 @@ describe("runtime environment and origin configuration", () => {
     });
   });
 
+  it("serves one built frontend origin only in production or explicit local replica mode", () => {
+    vi.stubEnv("PORT", "");
+    vi.stubEnv("APP_ORIGIN", "http://127.0.0.1:5173");
+    vi.stubEnv("EDURI_SERVE_FRONTEND", "");
+
+    expect(loadConfig({ nodeEnv: "development" })).toMatchObject({
+      port: 3020,
+      serveFrontend: false,
+      appOrigins: ["http://127.0.0.1:5173"],
+    });
+
+    vi.stubEnv("EDURI_SERVE_FRONTEND", "true");
+    expect(loadConfig({ nodeEnv: "development" })).toMatchObject({
+      port: 5173,
+      serveFrontend: true,
+      appOrigins: ["http://127.0.0.1:5173"],
+    });
+
+    vi.stubEnv("PORT", "5180");
+    vi.stubEnv("APP_ORIGIN", "http://127.0.0.1:5180");
+    expect(loadConfig({ nodeEnv: "development" })).toMatchObject({
+      port: 5180,
+      serveFrontend: true,
+      appOrigins: ["http://127.0.0.1:5180"],
+    });
+  });
+
+  it("rejects an invalid local frontend-serving flag", () => {
+    vi.stubEnv("EDURI_SERVE_FRONTEND", "sometimes");
+
+    expect(() => loadConfig({ nodeEnv: "development" }))
+      .toThrow(/EDURI_SERVE_FRONTEND must be true or false/u);
+  });
+
   it("still rejects a partial explicit LiveKit development configuration", () => {
     expect(() => loadConfig({
       nodeEnv: "development",

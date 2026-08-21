@@ -3,7 +3,7 @@ import http, { type Server as HttpServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { io as createSocketClient, type Socket } from "socket.io-client";
-import { TokenVerifier } from "livekit-server-sdk";
+import { TokenVerifier, TrackSource } from "livekit-server-sdk";
 import request from "supertest";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
@@ -578,6 +578,50 @@ describe("tenant isolation and learning workflows", () => {
       })
       .expect(400);
     expect(updateParticipant).toHaveBeenCalledTimes(1);
+  });
+
+  it("exposes the current call roster only to lesson participants", async () => {
+    const listParticipants = vi.fn(async () => [{
+      identity: `student:${studentA1.id}`,
+      name: studentA1.displayName,
+      attributes: { "eduri.color": "#D33F49" },
+      tracks: [
+        { source: TrackSource.MICROPHONE, muted: true },
+        { source: TrackSource.CAMERA, muted: false },
+        { source: TrackSource.SCREEN_SHARE, muted: false },
+      ],
+    }]);
+    harness.context.livekitRoomService!.listParticipants = listParticipants;
+
+    await request(harness.app)
+      .get(`/api/lessons/${resourcesA1.lessonId}/call-participants`)
+      .expect(401);
+    await tutorB.agent
+      .get(`/api/lessons/${resourcesA1.lessonId}/call-participants`)
+      .expect(404);
+    await studentA2.session.agent
+      .get(`/api/lessons/${resourcesA1.lessonId}/call-participants`)
+      .expect(404);
+    const response = await tutorA.agent
+      .get(`/api/lessons/${resourcesA1.lessonId}/call-participants`)
+      .expect(200)
+      .expect("Cache-Control", "no-store");
+
+    expect(listParticipants).toHaveBeenCalledWith(
+      lessonCallRoomName(String((harness.context.db.prepare(
+        "SELECT meeting_key FROM lessons WHERE id = ?",
+      ).get(resourcesA1.lessonId) as { meeting_key: string }).meeting_key)),
+    );
+    expect(response.body).toEqual({
+      participants: [{
+        identity: `student:${studentA1.id}`,
+        displayName: studentA1.displayName,
+        color: "#d33f49",
+        microphoneEnabled: false,
+        cameraEnabled: true,
+        screenShareEnabled: true,
+      }],
+    });
   });
 
   it("shows a student only lessons, materials, and assignments assigned to that account", async () => {

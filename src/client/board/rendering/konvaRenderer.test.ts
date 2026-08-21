@@ -19,6 +19,7 @@ import {
   MAX_DECODED_IMAGE_CACHE_ENTRIES,
   MAX_DECODED_IMAGE_CACHE_PIXELS,
   MAX_LOCAL_SELECTION_OUTLINES,
+  REMOTE_CURSOR_LABEL_IDLE_MS,
   renderGesturePreviewNode,
   renderObjectNode,
 } from "./konvaRenderer";
@@ -39,6 +40,7 @@ import {
 } from "./pluginRegistry";
 import { spatialItemForObject } from "./spatialIndex";
 import {
+  MAX_BOARD_GESTURE_PREVIEW_POINTS,
   MAX_BOARD_LASER_POINTS,
   MAX_BOARD_LASER_STROKES,
   type BoardLaserStroke,
@@ -253,6 +255,12 @@ function expectedSelectionOutlinePoints(
   });
 }
 
+interface TestRemoteLaserStroke extends BoardLaserStroke {
+  readonly streamId: string;
+  readonly nextPointOffset: number;
+  readonly pointsChanged: boolean;
+}
+
 interface RendererInternals {
   readonly stage: Konva.Stage;
   readonly gridLayer: Konva.Layer;
@@ -273,12 +281,22 @@ interface RendererInternals {
   readonly presenceWorld: Konva.Group;
   readonly presenceRenderEntries: Map<number, {
     readonly cursor: Konva.Group | null;
+    readonly cursorPointer: Konva.Group | null;
+    readonly cursorArrow: Konva.Path | null;
+    readonly cursorLabel: Konva.Label | null;
+    readonly cursorText: Konva.Text | null;
     readonly gesturePreview: Konva.Shape | null;
+    readonly gesturePoints: readonly BoardPoint[] | null;
+    readonly gestureStreamId: string | null;
+    readonly gestureStreamNextOffset: number;
     readonly laser: Konva.Group | null;
     readonly selections: Map<string, Konva.Rect>;
   }>;
   readonly remoteLaserTrails: Map<number, {
-    readonly strokes: readonly BoardLaserStroke[];
+    readonly sessionId: string;
+    readonly strokes: readonly TestRemoteLaserStroke[];
+    readonly strokesById: ReadonlyMap<string, TestRemoteLaserStroke>;
+    readonly totalPoints: number;
     readonly expiresAt: number;
     readonly active: boolean;
   }>;
@@ -286,6 +304,7 @@ interface RendererInternals {
     readonly group: Konva.Group;
     readonly strokes: readonly {
       readonly points: readonly BoardPoint[];
+      readonly previewPoints: readonly number[];
       readonly preview: Konva.Line;
     }[];
     readonly releaseRequested: boolean;
@@ -301,6 +320,8 @@ interface RendererInternals {
   readonly pressedPointerIds: ReadonlySet<number>;
   readonly activeGesture: {
     readonly kind: string;
+    readonly button?: number;
+    readonly activated?: boolean;
     readonly preview?: Konva.Shape;
     readonly trail?: Konva.Group;
     readonly trailBody?: Konva.Shape;
@@ -315,6 +336,7 @@ interface RendererInternals {
     readonly points?: readonly (BoardPoint & { readonly pressure: number })[];
     readonly tool?: string;
     readonly previewAwarenessPoints?: readonly BoardPoint[];
+    readonly previewStreamPoints?: readonly BoardPoint[];
     readonly previewPoints?: readonly number[];
     readonly style?: Readonly<Record<string, unknown>>;
     readonly strokeOffset?: BoardPoint;
@@ -2121,6 +2143,274 @@ describe("Konva pointer gesture input", () => {
     renderer.destroy();
   });
 
+  it("keeps a short right-button gesture as an ordinary context click", () => {
+    const { callbacks, renderer, internals } = rendererHarness();
+    renderer.setReadOnly(true);
+    renderer.setCamera({ x: 0, y: 0, zoom: 1 });
+    vi.mocked(callbacks.onCameraChange).mockClear();
+    const down = pointerEvent(307, 100, 100, {
+      button: 2,
+      buttons: 2,
+      type: "pointerdown",
+    });
+
+    internals.onPointerDown(konvaPointerEvent(internals, "pointerdown", down));
+    expect(down.preventDefault).not.toHaveBeenCalled();
+    expect(internals.activeGesture).toMatchObject({
+      kind: "pan",
+      button: 2,
+      activated: false,
+    });
+    expect(renderer.element.style.cursor).toBe("default");
+
+    const smallMove = pointerEvent(307, 103, 102, {
+      button: 2,
+      buttons: 2,
+    });
+    internals.onPointerMove(konvaPointerEvent(
+      internals,
+      "pointermove",
+      smallMove,
+    ));
+    expect(smallMove.preventDefault).not.toHaveBeenCalled();
+    expect(renderer.camera).toEqual({ x: 0, y: 0, zoom: 1 });
+    expect(callbacks.onCameraChange).not.toHaveBeenCalled();
+
+    const up = pointerEvent(307, 103, 102, {
+      button: 2,
+      buttons: 0,
+      type: "pointerup",
+    });
+    internals.onPointerUp(konvaPointerEvent(internals, "pointerup", up));
+    expect(up.preventDefault).not.toHaveBeenCalled();
+    expect(internals.activeGesture).toBeNull();
+
+    const contextMenu = pointerEvent(307, 103, 102, {
+      button: 2,
+      buttons: 0,
+      type: "contextmenu",
+    });
+    internals.onContextMenu(konvaContextMenuEvent(internals, contextMenu));
+    expect(contextMenu.preventDefault).toHaveBeenCalledOnce();
+    expect(callbacks.onContextMenu).toHaveBeenCalledOnce();
+    renderer.destroy();
+  });
+
+  it("activates right-button pan only past the movement threshold and suppresses its menu", () => {
+    const { callbacks, renderer, internals } = rendererHarness();
+    renderer.setCamera({ x: 0, y: 0, zoom: 1 });
+    vi.mocked(callbacks.onCameraChange).mockClear();
+    const down = pointerEvent(308, 100, 100, {
+      button: 2,
+      buttons: 2,
+      type: "pointerdown",
+    });
+    internals.onPointerDown(konvaPointerEvent(internals, "pointerdown", down));
+
+    const smallMove = pointerEvent(308, 103, 102, {
+      button: 2,
+      buttons: 2,
+    });
+    internals.onPointerMove(konvaPointerEvent(
+      internals,
+      "pointermove",
+      smallMove,
+    ));
+    expect(internals.activeGesture?.activated).toBe(false);
+    expect(renderer.camera).toEqual({ x: 0, y: 0, zoom: 1 });
+
+    const panMove = pointerEvent(308, 120, 130, {
+      button: 2,
+      buttons: 2,
+    });
+    internals.onPointerMove(konvaPointerEvent(
+      internals,
+      "pointermove",
+      panMove,
+    ));
+    expect(panMove.preventDefault).toHaveBeenCalledOnce();
+    expect(internals.activeGesture?.activated).toBe(true);
+    expect(renderer.camera).toEqual({ x: 20, y: 30, zoom: 1 });
+    expect(renderer.element.style.cursor).toBe("grabbing");
+
+    const up = pointerEvent(308, 120, 130, {
+      button: 2,
+      buttons: 0,
+      type: "pointerup",
+    });
+    internals.onPointerUp(konvaPointerEvent(internals, "pointerup", up));
+    expect(up.preventDefault).toHaveBeenCalledOnce();
+    expect(renderer.element.style.cursor).toBe("default");
+
+    const suppressedMenu = pointerEvent(308, 120, 130, {
+      button: 2,
+      buttons: 0,
+      type: "contextmenu",
+    });
+    internals.onContextMenu(konvaContextMenuEvent(internals, suppressedMenu));
+    expect(suppressedMenu.preventDefault).toHaveBeenCalledOnce();
+    expect(callbacks.onContextMenu).not.toHaveBeenCalled();
+
+    const nextDown = pointerEvent(309, 40, 40, {
+      button: 2,
+      buttons: 2,
+      type: "pointerdown",
+    });
+    internals.onPointerDown(konvaPointerEvent(internals, "pointerdown", nextDown));
+    internals.onPointerUp(konvaPointerEvent(
+      internals,
+      "pointerup",
+      pointerEvent(309, 40, 40, {
+        button: 2,
+        buttons: 0,
+        type: "pointerup",
+      }),
+    ));
+    internals.onContextMenu(konvaContextMenuEvent(
+      internals,
+      pointerEvent(309, 40, 40, {
+        button: 2,
+        buttons: 0,
+        type: "contextmenu",
+      }),
+    ));
+    expect(callbacks.onContextMenu).toHaveBeenCalledOnce();
+    renderer.destroy();
+  });
+
+  it("does not leave stale suppression when contextmenu arrives before right-button release", () => {
+    const { callbacks, renderer, internals } = rendererHarness();
+    renderer.setCamera({ x: 0, y: 0, zoom: 1 });
+    internals.onPointerDown(konvaPointerEvent(
+      internals,
+      "pointerdown",
+      pointerEvent(310, 10, 10, {
+        button: 2,
+        buttons: 2,
+        type: "pointerdown",
+      }),
+    ));
+    internals.onPointerMove(konvaPointerEvent(
+      internals,
+      "pointermove",
+      pointerEvent(310, 30, 40, { button: 2, buttons: 2 }),
+    ));
+    internals.onContextMenu(konvaContextMenuEvent(
+      internals,
+      pointerEvent(310, 30, 40, {
+        button: 2,
+        buttons: 2,
+        type: "contextmenu",
+      }),
+    ));
+    expect(callbacks.onContextMenu).not.toHaveBeenCalled();
+    expect(internals.activeGesture?.kind).toBe("pan");
+
+    internals.onPointerUp(konvaPointerEvent(
+      internals,
+      "pointerup",
+      pointerEvent(310, 30, 40, {
+        button: 2,
+        buttons: 0,
+        type: "pointerup",
+      }),
+    ));
+    internals.onContextMenu(konvaContextMenuEvent(
+      internals,
+      pointerEvent(311, 60, 60, {
+        button: 2,
+        buttons: 0,
+        type: "contextmenu",
+      }),
+    ));
+    expect(callbacks.onContextMenu).toHaveBeenCalledOnce();
+    renderer.destroy();
+  });
+
+  it("pans with legacy right-button mouse movement and cancels safely on capture loss", () => {
+    const { callbacks, renderer, internals } = rendererHarness();
+    renderer.setCamera({ x: 0, y: 0, zoom: 1 });
+    internals.onPointerDown(konvaPointerEvent(
+      internals,
+      "pointerdown",
+      pointerEvent(312, 10, 10, {
+        button: 2,
+        buttons: 2,
+        type: "pointerdown",
+      }),
+    ));
+
+    window.dispatchEvent(new MouseEvent("mousemove", {
+      bubbles: true,
+      buttons: 2,
+      cancelable: true,
+      clientX: 40,
+      clientY: 30,
+    }));
+    expect(renderer.camera).toEqual({ x: 30, y: 20, zoom: 1 });
+    expect(internals.activeGesture).toMatchObject({
+      kind: "pan",
+      activated: true,
+    });
+
+    window.dispatchEvent(new MouseEvent("mouseup", {
+      bubbles: true,
+      button: 2,
+      buttons: 0,
+      cancelable: true,
+      clientX: 40,
+      clientY: 30,
+    }));
+    expect(internals.activeGesture).toBeNull();
+    expect(internals.activeMousePointerId).toBeNull();
+    internals.onContextMenu(konvaContextMenuEvent(
+      internals,
+      pointerEvent(312, 40, 30, {
+        button: 2,
+        buttons: 0,
+        type: "contextmenu",
+      }),
+    ));
+    expect(callbacks.onContextMenu).not.toHaveBeenCalled();
+
+    internals.onPointerDown(konvaPointerEvent(
+      internals,
+      "pointerdown",
+      pointerEvent(313, 40, 30, {
+        button: 2,
+        buttons: 2,
+        type: "pointerdown",
+      }),
+    ));
+    window.dispatchEvent(new MouseEvent("mousemove", {
+      bubbles: true,
+      buttons: 2,
+      cancelable: true,
+      clientX: 60,
+      clientY: 50,
+    }));
+
+    internals.lostPointerCapture(pointerEvent(313, 60, 50, {
+      button: 2,
+      buttons: 2,
+      type: "lostpointercapture",
+    }));
+    expect(internals.activeGesture).toBeNull();
+    expect(internals.activeMousePointerId).toBeNull();
+    expect(renderer.camera).toEqual({ x: 50, y: 40, zoom: 1 });
+
+    internals.onContextMenu(konvaContextMenuEvent(
+      internals,
+      pointerEvent(313, 60, 50, {
+        button: 2,
+        buttons: 0,
+        type: "contextmenu",
+      }),
+    ));
+    expect(callbacks.onContextMenu).not.toHaveBeenCalled();
+    renderer.destroy();
+  });
+
   it("cancels draft and node interactions before requesting a context menu", () => {
     const { callbacks, renderer, internals } = rendererHarness();
     renderer.setTool("pen");
@@ -2548,6 +2838,7 @@ describe("Konva pointer gesture input", () => {
         type: "pointerdown",
       }),
     ));
+    const localPreviewPoints = internals.laserSession?.strokes[0].previewPoints;
     for (let index = 1; index <= MAX_BOARD_LASER_POINTS + 20; index += 1) {
       internals.onPointerMove(konvaPointerEvent(
         internals,
@@ -2559,13 +2850,18 @@ describe("Konva pointer gesture input", () => {
     const preview = vi.mocked(callbacks.onLaserChange).mock.calls.at(-1)?.[0];
     expect(preview?.strokes).toHaveLength(1);
     expect(preview?.strokes[0].points).toHaveLength(MAX_BOARD_LASER_POINTS);
-    expect(preview?.strokes[0].points[0]).toEqual({ x: 0, y: 10 });
+    expect(preview?.strokes[0].points[0]).toEqual({ x: 63, y: 10 });
+    expect(preview?.strokes[0].pointOffset).toBe(21);
+    expect(preview?.sessionId).toBeTruthy();
+    expect(preview?.strokes[0].streamId).toBeTruthy();
     expect(preview?.strokes[0].points.at(-1)).toEqual({
       x: (MAX_BOARD_LASER_POINTS + 20) * 3,
       y: 10,
     });
     expect(internals.laserSession?.strokes[0].points)
       .toHaveLength(MAX_BOARD_LASER_POINTS + 21);
+    expect(internals.laserSession?.strokes[0].previewPoints)
+      .toBe(localPreviewPoints);
     expect(internals.laserSession?.strokes[0].preview.points().slice(0, 2))
       .toEqual([0, 10]);
     expect(internals.activeGesture?.kind).toBe("laser");
@@ -3179,10 +3475,11 @@ describe("Konva pointer gesture input", () => {
     expect(internals.activeGesture?.points?.map(({ x, y }) => ({ x, y })))
       .toEqual([{ x: 10, y: 10 }, { x: 30, y: 10 }]);
     expect(previewChanges).toHaveBeenCalledTimes(changesBeforeMove + 2);
-    expect(previewChanges.mock.calls.at(-1)?.[0]?.points).toEqual([
-      { x: 50, y: 30 },
-      { x: 70, y: 30 },
-    ]);
+    expect(previewChanges.mock.calls.at(-1)?.[0]).toMatchObject({
+      points: [{ x: 10, y: 10 }, { x: 30, y: 10 }],
+      offset: { x: 40, y: 20 },
+      pointOffset: 0,
+    });
     expect((internals.activeGesture?.preview as Konva.Line).points())
       .toEqual([10, 10, 30, 10]);
     expect((internals.activeGesture?.preview as Konva.Line).position())
@@ -3217,7 +3514,7 @@ describe("Konva pointer gesture input", () => {
         { x: 30, y: 10 },
         { x: 40, y: 10 },
       ]);
-    expect(internals.activeGesture?.previewAwarenessPoints).toEqual([
+    expect(internals.activeGesture?.previewStreamPoints).toEqual([
       { x: 10, y: 10 },
       { x: 30, y: 10 },
       { x: 40, y: 10 },
@@ -3227,10 +3524,14 @@ describe("Konva pointer gesture input", () => {
     expect((internals.activeGesture?.preview as Konva.Line).position())
       .toEqual({ x: 40, y: 20 });
     expect(previewChanges.mock.calls.at(-1)?.[0]?.points).toEqual([
-      { x: 50, y: 30 },
-      { x: 70, y: 30 },
-      { x: 80, y: 30 },
+      { x: 10, y: 10 },
+      { x: 30, y: 10 },
+      { x: 40, y: 10 },
     ]);
+    expect(previewChanges.mock.calls.at(-1)?.[0]?.offset).toEqual({
+      x: 40,
+      y: 20,
+    });
     expect(renderer.element.style.cursor).toBe("crosshair");
 
     internals.onPointerUp(konvaPointerEvent(
@@ -3288,12 +3589,12 @@ describe("Konva pointer gesture input", () => {
     expect((internals.activeGesture?.preview as Konva.Line).position())
       .toEqual({ x: 10, y: 10 });
     expect(
-      vi.mocked(callbacks.onGesturePreviewChange!).mock.calls.at(-1)?.[0]
-        ?.points,
-    ).toEqual([
-      { x: 20, y: 20 },
-      { x: 30, y: 20 },
-    ]);
+      vi.mocked(callbacks.onGesturePreviewChange!).mock.calls.at(-1)?.[0],
+    ).toMatchObject({
+      points: [{ x: 10, y: 10 }, { x: 20, y: 10 }],
+      offset: { x: 10, y: 10 },
+      pointOffset: 0,
+    });
 
     internals.onPointerUp(konvaPointerEvent(
       internals,
@@ -3359,7 +3660,7 @@ describe("Konva pointer gesture input", () => {
     ]);
     expect(internals.activeGesture?.previewPoints)
       .toEqual([10, 10, 20, 20, 80, 60]);
-    expect(internals.activeGesture?.previewAwarenessPoints).toEqual([
+    expect(internals.activeGesture?.previewStreamPoints).toEqual([
       { x: 10, y: 10 },
       { x: 20, y: 20 },
       { x: 80, y: 60 },
@@ -4041,7 +4342,7 @@ describe("Konva pointer gesture input", () => {
       opacity: 0.35,
     });
     expect(livePreview?.points.length).toBeLessThanOrEqual(256);
-    expect(livePreview?.points[0]).toEqual({ x: 10, y: 10 });
+    expect(livePreview?.pointOffset).toBeGreaterThan(0);
     expect(livePreview?.points.at(-1)).toEqual({ x: 710, y: 184.75 });
 
     internals.lostPointerCapture({ pointerId: 7 } as PointerEvent);
@@ -6843,6 +7144,122 @@ describe("Konva pointer gesture input", () => {
 });
 
 describe("Konva remote gesture previews", () => {
+  it("shows an idle-only remote name and a theme-aware modern cursor", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000);
+    const { renderer, internals } = rendererHarness();
+    const basePresence = {
+      clientId: 91,
+      userId: "remote-user",
+      displayName: "Remote user",
+      color: "#0a7f59",
+      selectionIds: [],
+      cursor: { x: 120, y: 80 },
+    } as const;
+
+    try {
+      renderer.setPresence([basePresence]);
+      const entry = internals.presenceRenderEntries.get(91);
+      if (
+        !entry?.cursor
+        || !entry.cursorPointer
+        || !entry.cursorArrow
+        || !entry.cursorLabel
+        || !entry.cursorText
+      ) {
+        throw new Error("Remote cursor was not rendered");
+      }
+
+      expect(entry.cursor.getChildren()).toEqual([
+        entry.cursorPointer,
+        entry.cursorLabel,
+      ]);
+      expect(entry.cursorPointer.getChildren()).toEqual([
+        entry.cursorArrow,
+      ]);
+      expect(entry.cursorArrow.fill()).toBe("#0a7f59");
+      expect(entry.cursorArrow.stroke()).toBe("#18202b");
+      expect(entry.cursorArrow.strokeWidth()).toBe(1.25);
+      expect(entry.cursorArrow.strokeScaleEnabled()).toBe(false);
+      expect(entry.cursorArrow.getClientRect({ skipTransform: true })).toMatchObject({
+        width: expect.any(Number),
+        height: expect.any(Number),
+      });
+      expect(entry.cursorArrow.getClientRect({ skipTransform: true }).width)
+        .toBeLessThan(18);
+      expect(entry.cursorArrow.getClientRect({ skipTransform: true }).height)
+        .toBeLessThan(18);
+      expect(entry.cursorText.text()).toBe("Remote user");
+      expect(entry.cursorText.fill()).toBe("#ffffff");
+      expect(entry.cursorLabel.visible()).toBe(false);
+
+      vi.advanceTimersByTime(REMOTE_CURSOR_LABEL_IDLE_MS - 1);
+      expect(entry.cursorLabel.visible()).toBe(false);
+      vi.advanceTimersByTime(1);
+      expect(entry.cursorLabel.visible()).toBe(true);
+
+      renderer.setPresence([{
+        ...basePresence,
+        cursor: { x: 180, y: 120 },
+        gesturePreview: {
+          kind: "pen" as const,
+          points: [{ x: 170, y: 110 }, { x: 180, y: 120 }],
+        },
+      }]);
+      expect(entry.cursorLabel.visible()).toBe(false);
+      vi.advanceTimersByTime(REMOTE_CURSOR_LABEL_IDLE_MS);
+      expect(entry.cursorLabel.visible()).toBe(false);
+
+      renderer.setPresence([{
+        ...basePresence,
+        cursor: { x: 180, y: 120 },
+        viewport: { x: 40, y: 20, zoom: 0.5 },
+      }]);
+      expect(entry.cursorLabel.visible()).toBe(true);
+      expect(entry.cursorPointer.scaleX()).toBe(2);
+      expect(entry.cursorPointer.scaleY()).toBe(2);
+
+      renderer.setCamera({ x: 0, y: 0, zoom: 2 });
+      expect(entry.cursor.scaleX()).toBe(0.5);
+      expect(entry.cursor.scaleY()).toBe(0.5);
+      expect(entry.cursorPointer.scaleX()).toBe(2);
+      expect(entry.cursorLabel.scaleX()).toBe(1);
+
+      renderer.setPresence([{
+        ...basePresence,
+        cursor: { x: 180, y: 120 },
+        viewport: { x: 0, y: 0, zoom: 2 },
+      }]);
+      expect(entry.cursorPointer.scaleX()).toBe(0.5);
+
+      renderer.setPresence([{
+        ...basePresence,
+        color: "#f7d154",
+        cursor: { x: 180, y: 120 },
+      }]);
+      expect(entry.cursorText.fill()).toBe("#101828");
+      renderer.setTheme("dark");
+      expect(entry.cursorArrow.stroke()).toBe("#f8fafc");
+
+      renderer.setPresence([{
+        ...basePresence,
+        cursor: { x: 180, y: 120 },
+        viewport: { x: 0, y: 0, zoom: 20 },
+      }]);
+      expect(entry.cursorPointer.scaleX()).toBe(0.05);
+
+      renderer.setPresence([{
+        ...basePresence,
+        cursor: { x: 180, y: 120 },
+        viewport: { x: 0, y: 0, zoom: 0.02 },
+      }]);
+      expect(entry.cursorPointer.scaleX()).toBe(50);
+    } finally {
+      renderer.destroy();
+      vi.useRealTimers();
+    }
+  });
+
   it("bounds a long freehand preview and renders it from presence", () => {
     const points = Array.from({ length: 1_000 }, (_, index) => ({
       x: index,
@@ -6916,6 +7333,115 @@ describe("Konva remote gesture previews", () => {
     renderer.destroy();
   });
 
+  it("accumulates rolling freehand windows while reusing the remote Konva line", () => {
+    const { renderer, internals } = rendererHarness();
+    const presence = {
+      clientId: 921,
+      userId: "remote-stream-user",
+      displayName: "Remote stream",
+      color: "#0a7f59",
+      selectionIds: [],
+    } as const;
+    const allPoints = Array.from({ length: 456 }, (_, index) => ({
+      x: index,
+      y: index % 23,
+    }));
+
+    renderer.setPresence([{
+      ...presence,
+      gesturePreview: {
+        kind: "pen",
+        streamId: "pen-stream-1",
+        pointOffset: 0,
+        offset: { x: 0, y: 0 },
+        points: allPoints.slice(0, 256),
+      },
+    }]);
+    const entry = internals.presenceRenderEntries.get(presence.clientId)!;
+    const line = entry.gesturePreview as Konva.Line;
+    expect(line).toBeInstanceOf(Konva.Line);
+    expect(entry.gestureStreamNextOffset).toBe(256);
+
+    renderer.setPresence([{
+      ...presence,
+      gesturePreview: {
+        kind: "pen",
+        streamId: "pen-stream-1",
+        pointOffset: 200,
+        offset: { x: 30, y: 20 },
+        points: allPoints.slice(200),
+      },
+    }]);
+    expect(entry.gesturePreview).toBe(line);
+    expect(entry.gesturePoints).toHaveLength(allPoints.length);
+    expect(entry.gesturePoints?.[0]).toEqual(allPoints[0]);
+    expect(entry.gesturePoints?.at(-1)).toEqual(allPoints.at(-1));
+    expect(entry.gestureStreamNextOffset).toBe(allPoints.length);
+    expect(line.points()).toHaveLength(allPoints.length * 2);
+    expect(line.position()).toEqual({ x: 30, y: 20 });
+
+    const revisedEnd = { x: 500, y: 70 };
+    renderer.setPresence([{
+      ...presence,
+      gesturePreview: {
+        kind: "pen",
+        streamId: "pen-stream-1",
+        pointOffset: 455,
+        offset: { x: 30, y: 20 },
+        points: [revisedEnd],
+      },
+    }]);
+    expect(entry.gesturePreview).toBe(line);
+    expect(entry.gesturePoints?.at(-1)).toEqual(revisedEnd);
+    expect(line.points().slice(-2)).toEqual([500, 70]);
+    renderer.destroy();
+  });
+
+  it("merges a long rolling freehand stream incrementally without redundant geometry writes", () => {
+    const { renderer, internals } = rendererHarness();
+    const presence = {
+      clientId: 922,
+      userId: "remote-long-stream-user",
+      displayName: "Remote long stream",
+      color: "#0a7f59",
+      selectionIds: [],
+    } as const;
+    const allPoints = Array.from({ length: 2_656 }, (_, index) => ({
+      x: index * 0.75,
+      y: Math.sin(index / 20) * 30,
+    }));
+    const preview = (end: number) => ({
+      kind: "pen" as const,
+      streamId: "pen-stream-long",
+      pointOffset: Math.max(0, end - MAX_BOARD_GESTURE_PREVIEW_POINTS),
+      points: allPoints.slice(
+        Math.max(0, end - MAX_BOARD_GESTURE_PREVIEW_POINTS),
+        end,
+      ),
+    });
+
+    renderer.setPresence([{ ...presence, gesturePreview: preview(256) }]);
+    const entry = internals.presenceRenderEntries.get(presence.clientId)!;
+    const line = entry.gesturePreview as Konva.Line;
+    const pointsWrite = vi.spyOn(line, "points");
+
+    for (let end = 276; end <= allPoints.length; end += 20) {
+      renderer.setPresence([{ ...presence, gesturePreview: preview(end) }]);
+      expect(entry.gesturePreview).toBe(line);
+    }
+
+    expect(entry.gesturePoints).toHaveLength(allPoints.length);
+    expect(entry.gesturePoints?.at(-1)).toEqual(allPoints.at(-1));
+    expect(line.points()).toHaveLength(allPoints.length * 2);
+    const writesAfterGrowth = pointsWrite.mock.calls.length;
+    renderer.setPresence([{
+      ...presence,
+      gesturePreview: preview(allPoints.length),
+    }]);
+    expect(pointsWrite).toHaveBeenCalledTimes(writesAfterGrowth);
+    renderer.destroy();
+  });
+
   it("renders retained styled laser paths and distinguishes fade from cancellation", () => {
     const { renderer, internals } = rendererHarness();
     const presence = {
@@ -6968,6 +7494,76 @@ describe("Konva remote gesture previews", () => {
     renderer.setPresence([{ ...presence, laserClearMode: "immediate" }]);
     expect(internals.remoteLaserTrails.has(presence.clientId)).toBe(false);
     expect(entry?.laser?.visible()).toBe(false);
+    renderer.destroy();
+  });
+
+  it("accumulates rolling laser windows without replacing retained lines", () => {
+    const { renderer, internals } = rendererHarness();
+    const presence = {
+      clientId: 931,
+      userId: "remote-laser-stream-user",
+      displayName: "Remote laser stream",
+      color: "#0a7f59",
+      selectionIds: [],
+    } as const;
+    const points = Array.from({ length: 260 }, (_, index) => ({
+      x: index * 2,
+      y: index % 19,
+    }));
+    const style = { stroke: "#d33f49", strokeWidth: 7, opacity: 0.45 };
+
+    renderer.setPresence([{
+      ...presence,
+      laser: {
+        sessionId: "laser-session-1",
+        strokes: [{
+          streamId: "laser-stroke-1",
+          pointOffset: 0,
+          points: points.slice(0, 160),
+          style,
+        }],
+      },
+    }]);
+    const entry = internals.presenceRenderEntries.get(presence.clientId)!;
+    const line = entry.laser?.getChildren()[0] as Konva.Line;
+
+    renderer.setPresence([{
+      ...presence,
+      laser: {
+        sessionId: "laser-session-1",
+        strokes: [{
+          streamId: "laser-stroke-1",
+          pointOffset: 100,
+          points: points.slice(100),
+          style,
+        }],
+      },
+    }]);
+    const trail = internals.remoteLaserTrails.get(presence.clientId)!;
+    expect(entry.laser?.getChildren()[0]).toBe(line);
+    expect(trail.sessionId).toBe("laser-session-1");
+    expect(trail.strokes[0].points).toHaveLength(points.length);
+    expect(trail.strokes[0].points.at(-1)).toEqual(points.at(-1));
+    expect(line.points()).toHaveLength(points.length * 2);
+
+    const afterGap = [{ x: 900, y: 40 }, { x: 904, y: 44 }];
+    renderer.setPresence([{
+      ...presence,
+      laser: {
+        sessionId: "laser-session-1",
+        strokes: [{
+          streamId: "laser-stroke-1",
+          pointOffset: 500,
+          points: afterGap,
+          style,
+        }],
+      },
+    }]);
+    expect(entry.laser?.getChildren()[0]).toBe(line);
+    expect(trail.strokes).toHaveLength(1);
+    expect(trail.strokesById.get("laser-stroke-1")).toBe(trail.strokes[0]);
+    expect(trail.strokes[0].points).toEqual(afterGap);
+    expect(line.points()).toEqual([900, 40, 904, 44]);
     renderer.destroy();
   });
 

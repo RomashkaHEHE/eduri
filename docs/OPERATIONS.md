@@ -232,13 +232,24 @@ Pyodide. После изменения любого runtime/static маршру�
 Сертификат `eduri.ru` монтируется read-only из `/etc/letsencrypt`; отдельный
 поддомен не требуется.
 
-Локальный `npm run dev` не использует production Compose, сертификаты или TURN.
-Он загружает закреплённый LiveKit `1.13.4` с проверкой SHA-256 в игнорируемый
-`.cache/livekit/`, запускает `ops/livekit/livekit.dev.yaml` только на loopback и
-использует в development API отдельную локальную пару ключей по умолчанию. Для ручного запуска только
-SFU используйте `npm run dev:call`; совместимый заранее установленный бинарник
-можно указать через `LIVEKIT_DEV_BINARY`. Проверка production TURN/NAT остаётся
-обязательной на staging и не заменяется локальным звонком.
+Локальный `npm run dev` сначала собирает deployment bundles, затем одним
+Express-процессом обслуживает web, HTTP API, Board WebSocket и Socket.IO на
+`127.0.0.1:5173`. Поэтому проверка комнат не проходит через Vite proxy, HMR или
+отдельную локальную реализацию синхронизации. Команда загружает закреплённый
+LiveKit `1.13.4` с проверкой SHA-256 в игнорируемый `.cache/livekit/`, запускает
+`ops/livekit/livekit.dev.yaml` только на loopback, ждёт готовности SFU и API и
+использует в development API отдельную локальную пару ключей по умолчанию.
+Проверять двух участников нужно в разных browser profiles. `npm run dev:fast`
+оставляет Vite/HMR для быстрой UI-разработки, но не является sync acceptance
+стендом. Для ручного запуска только SFU используйте `npm run dev:call`;
+совместимый заранее установленный бинарник можно указать через
+`LIVEKIT_DEV_BINARY`.
+
+Локальный replica намеренно не подменяет ClamAV: при отсутствии реального
+`clamd` blob/material publication остаётся fail-closed. Также он не имитирует
+nginx TLS headers, edge budgets, production TURN/NAT и Linux container limits;
+эти проверки остаются обязательными на staging и не заменяются локальным
+звонком.
 
 `room.auto_create` обязательно остаётся `false`. App после проверки
 session/capability и membership явно создаёт lesson/guest room через management
@@ -567,9 +578,56 @@ image до smoke tests. Никогда не используйте `docker compo
   `RATE_LIMITED`/`rate-limited` и disconnect до protocol parse; parallel socket и
   reconnect того же user/workspace остаются ограничены до конца минутного окна,
   а Code revision/другие persisted данные не меняются;
-- LiveKit camera/microphone/screen-share из двух браузерных сессий; проверить, что
-  room не появляется от join JWT без предварительного app provisioning и не
-  воссоздаётся старым JWT после удаления;
+- LiveKit camera/microphone/screen-share из двух браузерных сессий; рядом с
+  каждой увеличенной круглой media-кнопкой находится отдельный маленький круглый
+  source trigger, audio позволяет выбрать input/output при поддержке браузером,
+  а Settings открывает полноценный modal с отдельными Audio, Camera и Screen
+  Share секциями;
+- до входа во второй браузер его lobby показывает уже подключённых участников,
+  но сам не появляется участником LiveKit и не получает media tracks; выключенный
+  microphone даёт только Mic Off, включённые camera/screen share дают свои
+  индикаторы, а обратные состояния не создают значков; roster обновляется после
+  смены состояния не позднее следующего пятисекундного poll и при возврате во
+  вкладку;
+- на чистом `eduri-call-devices-v1` первое нажатие Camera не публикует видео до
+  явного выбора камеры; повторное выключение/включение использует сохранённый
+  выбор, недоступное сохранённое устройство отображается явно, а browser
+  `devicechange` и успешные media actions обновляют список без manual refresh;
+- при Permissions API `prompt`/`denied` microphone и camera выглядят выключенными
+  и приглушёнными, показывают мгновенный anchored tooltip без native `title`, а
+  первое нажатие делает local-only permission probe и останавливает его tracks;
+  media не публикуется до следующего обычного нажатия после подтверждённого
+  доступа, revoke через PermissionStatus снова переводит control в inactive;
+- microphone check захватывает выбранный input, показывает живой frequency
+  visualizer и воспроизводит loopback строго в выбранный output; Stop и закрытие
+  modal останавливают test tracks, а test stream не появляется в LiveKit;
+- voice activation slider сохраняет threshold, опубликованный microphone получает
+  Web Audio gate, а зелёный avatar outline следует любому ненулевому звуку уже
+  передаваемого track без второго порога отображения;
+- Screen Share и действие выбора другого источника открывают нативный browser
+  picker экрана/окна/вкладки; отмена не уничтожает звонок и показывает bounded
+  ошибку, поддерживаемое browser surface switching остаётся доступным, а
+  720p/1080p и 15/30 FPS дают соответствующие capture/encoding параметры;
+- браузер без `getDisplayMedia` показывает inactive Screen Share с собственным
+  tooltip; при наличии API control остаётся доступным, поскольку долговременный
+  display-capture permission browser не предоставляет и каждый start сам
+  открывает permission/source picker;
+- при нескольких camera/screen tracks клик и `Enter`/`Space` переводят media в
+  focus+carousel, выбор другого tile переносит focus, повторный выбор focused
+  tile возвращает equal grid, исчезновение track автоматически снимает focus,
+  а большие grid-наборы перелистываются без потери participant tile;
+- участники без camera/screen остаются компактными identity cards и никогда не
+  растягиваются пустым прямоугольником на весь call stage; проверить desktop,
+  узкий mobile viewport и fullscreen;
+- bottom-left connection indicator каждого tile показывает aggregate quality;
+  hover и keyboard focus открывают RTT, jitter, packet loss и media bitrate,
+  корректно показывая отсутствие browser stats без выдуманных значений;
+- ПКМ по remote participant открывает локальную настройку playback volume;
+  slider и wheel дают целые значения, numeric input ограничен 400%, значения
+  выше 200% оставляют thumb справа и заполняют жёлтым пропорциональную долю
+  шкалы (300% = половина), а gain применяется к microphone и screen-share audio;
+- проверить, что LiveKit room не появляется от join JWT без предварительного app
+  provisioning и не воссоздаётся старым JWT после удаления;
 - семь независимых IP создают guest call resources без расходования media slots;
   slot появляется лишь при call-token activation, а для 33-го activation `429`
   содержит `Retry-After` до ближайшего lease; никогда не занятая room освобождается

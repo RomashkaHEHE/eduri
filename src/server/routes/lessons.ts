@@ -12,6 +12,7 @@ import {
   ensureLiveKitCallRoom,
   isLiveKitNotFoundError,
   lessonCallRoomName,
+  listCallLobbyParticipants,
   liveKitParticipantIdentity,
 } from "../livekit.js";
 import { enqueueLessonRoomRevocation } from "../livekit-revocation.js";
@@ -240,6 +241,30 @@ export function createLessonsRouter(context: AppContext): Router {
     const lesson = lessonRow(context, req.params.id);
     if (!lesson || !canReadLesson(lesson, auth.role, auth.id)) return next(new HttpError(404, "Урок не найден"));
     res.json({ lesson: serializeLessonDetail(context, lesson, auth.role === "tutor") });
+  });
+
+  router.get("/:id/call-participants", async (req, res, next) => {
+    try {
+      const auth = currentAuth(res).user;
+      const lesson = lessonRow(context, req.params.id);
+      if (!lesson || !canReadLesson(lesson, auth.role, auth.id)) {
+        throw new HttpError(404, "Урок не найден");
+      }
+      if (lesson.status === "completed" || lesson.status === "cancelled") {
+        throw new HttpError(409, "Звонок для этого урока недоступен");
+      }
+      if (!context.livekitRoomService?.listParticipants) {
+        throw new HttpError(503, "Сервис звонков временно недоступен");
+      }
+      const participants = await listCallLobbyParticipants(
+        context.livekitRoomService,
+        lessonCallRoomName(String(lesson.meeting_key)),
+      );
+      res.setHeader("Cache-Control", "no-store");
+      res.json({ participants });
+    } catch (error) {
+      next(error);
+    }
   });
 
   router.post("/:id/call-token", async (req, res, next) => {

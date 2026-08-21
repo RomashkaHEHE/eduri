@@ -5,7 +5,13 @@ import { resolve } from "node:path";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { renderToStaticMarkup } from "react-dom/server";
-import { ConnectionError, ConnectionState, Room, Track } from "livekit-client";
+import {
+  ConnectionError,
+  ConnectionState,
+  LocalAudioTrack,
+  Room,
+  Track,
+} from "livekit-client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LessonSummary } from "../../shared/types";
 import { CallWorkspace, LessonCall } from "./LessonCall";
@@ -14,6 +20,7 @@ const PROFILE = { displayName: "Call user", color: "#2563eb" as const };
 
 const mocks = vi.hoisted(() => ({
   callToken: vi.fn(),
+  callParticipants: vi.fn(),
   updateCallProfile: vi.fn(),
   liveKitRoomProps: undefined as Record<string, unknown> | undefined,
   connectionState: "connected",
@@ -26,18 +33,31 @@ const mocks = vi.hoisted(() => ({
     setMicrophoneEnabled: vi.fn(),
     setCameraEnabled: vi.fn(),
     setScreenShareEnabled: vi.fn(),
+    getTrackPublication: vi.fn(),
+    getTrackPublications: vi.fn(() => []),
   },
   isMicrophoneEnabled: false,
   isCameraEnabled: false,
   isScreenShareEnabled: false,
   visualTracks: [] as Array<Record<string, unknown>>,
   participants: [] as Array<Record<string, unknown>>,
+  trackVolume: 0,
+  connectionQuality: "excellent",
+  permissionStates: {
+    microphone: "granted" as PermissionState,
+    camera: "granted" as PermissionState,
+  },
+  permissionChangeHandlers: {
+    microphone: undefined as EventListener | undefined,
+    camera: undefined as EventListener | undefined,
+  },
 }));
 
 vi.mock("../api", () => ({
   api: {
     lessons: {
       callToken: mocks.callToken,
+      callParticipants: mocks.callParticipants,
       updateCallProfile: mocks.updateCallProfile,
     },
   },
@@ -86,6 +106,7 @@ vi.mock("@livekit/components-react", async () => {
   StartAudio: () => null,
   isTrackReference: (track: Record<string, unknown> | undefined) => Boolean(track?.publication),
   useConnectionState: () => mocks.connectionState,
+  useConnectionQualityIndicator: () => ({ quality: mocks.connectionQuality }),
   useLocalParticipant: () => ({
     localParticipant: mocks.localParticipant,
     isMicrophoneEnabled: mocks.isMicrophoneEnabled,
@@ -95,6 +116,7 @@ vi.mock("@livekit/components-react", async () => {
   useMaybeTrackRefContext: () => React.useContext(trackContext),
   useParticipants: () => mocks.participants.length ? mocks.participants : [mocks.localParticipant],
   useRoomContext: () => mocks.room,
+  useTrackVolume: () => mocks.trackVolume,
   useTracks: () => mocks.visualTracks,
   };
 });
@@ -102,6 +124,7 @@ vi.mock("@livekit/components-react", async () => {
 let container: HTMLDivElement | undefined;
 let root: Root | undefined;
 const originalMediaDevices = Object.getOwnPropertyDescriptor(navigator, "mediaDevices");
+const originalPermissions = Object.getOwnPropertyDescriptor(navigator, "permissions");
 const originalSetSinkId = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, "setSinkId");
 
 function setAudioOutputSupport(supported: boolean) {
@@ -126,7 +149,15 @@ function mediaDevice(kind: MediaDeviceKind, deviceId: string, label: string): Me
 }
 
 function callParticipant(identity: string, name: string, isLocal = false) {
-  return { identity, name, isLocal };
+  return {
+    identity,
+    name,
+    isLocal,
+    connectionQuality: mocks.connectionQuality,
+    setVolume: vi.fn(),
+    getTrackPublication: vi.fn(),
+    getTrackPublications: vi.fn(() => []),
+  };
 }
 
 function visualTrack(
@@ -174,6 +205,19 @@ async function selectOption(label: string, value: string) {
   });
 }
 
+async function changeRange(label: string, value: string) {
+  const input = document.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`);
+  expect(input).not.toBeNull();
+  await act(async () => {
+    if (input) {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+    await Promise.resolve();
+  });
+}
+
 async function clickDeviceOption(groupLabel: string, optionLabel: string) {
   const group = document.querySelector(`[role="radiogroup"][aria-label="${groupLabel}"]`);
   const button = Array.from(group?.querySelectorAll<HTMLButtonElement>("button") ?? [])
@@ -200,6 +244,7 @@ beforeEach(() => {
     IS_REACT_ACT_ENVIRONMENT?: boolean;
   }).IS_REACT_ACT_ENVIRONMENT = true;
   mocks.callToken.mockReset();
+  mocks.callParticipants.mockReset().mockResolvedValue([]);
   mocks.updateCallProfile.mockReset().mockResolvedValue(undefined);
   mocks.liveKitRoomProps = undefined;
   mocks.connectionState = ConnectionState.Connected;
@@ -208,19 +253,57 @@ beforeEach(() => {
   mocks.localParticipant.setMicrophoneEnabled.mockReset().mockResolvedValue(undefined);
   mocks.localParticipant.setCameraEnabled.mockReset().mockResolvedValue(undefined);
   mocks.localParticipant.setScreenShareEnabled.mockReset().mockResolvedValue(undefined);
+  mocks.localParticipant.getTrackPublication.mockReset();
+  mocks.localParticipant.getTrackPublications.mockReset().mockReturnValue([]);
   mocks.isMicrophoneEnabled = false;
   mocks.isCameraEnabled = false;
   mocks.isScreenShareEnabled = false;
   mocks.visualTracks = [];
   mocks.participants = [];
+  mocks.trackVolume = 0;
+  mocks.connectionQuality = "excellent";
+  mocks.permissionStates.microphone = "granted";
+  mocks.permissionStates.camera = "granted";
+  mocks.permissionChangeHandlers.microphone = undefined;
+  mocks.permissionChangeHandlers.camera = undefined;
   vi.spyOn(Room, "getLocalDevices").mockResolvedValue([]);
   setAudioOutputSupport(false);
+  Object.defineProperty(navigator, "permissions", {
+    configurable: true,
+    value: {
+      query: vi.fn(async ({ name }: PermissionDescriptor) => {
+        const kind = name as "microphone" | "camera";
+        return {
+          get state() {
+            return mocks.permissionStates[kind];
+          },
+          onchange: null,
+          addEventListener: vi.fn((_type: string, listener: EventListener) => {
+            mocks.permissionChangeHandlers[kind] = listener;
+          }),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(),
+        };
+      }),
+    },
+  });
   Object.defineProperty(navigator, "mediaDevices", {
     configurable: true,
     value: {
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
       getDisplayMedia: vi.fn(),
+      getUserMedia: vi.fn(async (constraints: MediaStreamConstraints) => {
+        const audioTrack = { stop: vi.fn() };
+        const videoTrack = { stop: vi.fn() };
+        const audioTracks = constraints.audio ? [audioTrack] : [];
+        const videoTracks = constraints.video ? [videoTrack] : [];
+        return {
+          getTracks: () => [...audioTracks, ...videoTracks],
+          getAudioTracks: () => audioTracks,
+          getVideoTracks: () => videoTracks,
+        };
+      }),
     },
   });
   window.localStorage.removeItem("eduri-call-devices-v1");
@@ -239,6 +322,11 @@ afterEach(async () => {
     Object.defineProperty(navigator, "mediaDevices", originalMediaDevices);
   } else {
     Reflect.deleteProperty(navigator, "mediaDevices");
+  }
+  if (originalPermissions) {
+    Object.defineProperty(navigator, "permissions", originalPermissions);
+  } else {
+    Reflect.deleteProperty(navigator, "permissions");
   }
   if (originalSetSinkId) {
     Object.defineProperty(HTMLMediaElement.prototype, "setSinkId", originalSetSinkId);
@@ -289,6 +377,49 @@ async function joinActiveCall() {
 }
 
 describe("LessonCall", () => {
+  it("shows lobby participants with media indicators using the expected inverted rules", async () => {
+    mocks.callParticipants.mockResolvedValue([
+      {
+        identity: "tutor:1",
+        displayName: "Tutor One",
+        color: "#2563eb",
+        microphoneEnabled: false,
+        cameraEnabled: true,
+        screenShareEnabled: true,
+      },
+      {
+        identity: "student:1",
+        displayName: "Student Two",
+        color: "#d33f49",
+        microphoneEnabled: true,
+        cameraEnabled: false,
+        screenShareEnabled: false,
+      },
+    ]);
+    container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(createElement(LessonCall, {
+        lessonId: "lesson-id",
+        status: "active",
+        profile: PROFILE,
+      }));
+      await Promise.resolve();
+    });
+
+    expect(mocks.callParticipants).toHaveBeenCalledWith("lesson-id");
+    const participants = container.querySelectorAll(".call-lobby-participant");
+    expect(participants).toHaveLength(2);
+    expect(participants[0]?.textContent).toContain("Tutor One");
+    expect(participants[0]?.querySelector('[aria-label="Микрофон выключен"]')).not.toBeNull();
+    expect(participants[0]?.querySelector('[aria-label="Камера включена"]')).not.toBeNull();
+    expect(participants[0]?.querySelector('[aria-label="Демонстрация экрана включена"]')).not.toBeNull();
+    expect(participants[1]?.textContent).toContain("Student Two");
+    expect(participants[1]?.querySelector(".call-lobby-participant__media")?.children).toHaveLength(0);
+  });
+
   it("requests a LiveKit token with the selected collaboration profile", async () => {
     await joinActiveCall();
 
@@ -485,6 +616,99 @@ describe("LessonCall", () => {
     expect(container?.querySelector(".call-layout-grid")).not.toBeNull();
   });
 
+  it("requests microphone and camera access before enabling their controls", async () => {
+    mocks.permissionStates.microphone = "prompt";
+    mocks.permissionStates.camera = "denied";
+    const stopAudio = vi.fn();
+    const stopVideo = vi.fn();
+    const getUserMedia = vi.fn(async (constraints: MediaStreamConstraints) => {
+      const audioTracks = constraints.audio ? [{ stop: stopAudio }] : [];
+      const videoTracks = constraints.video ? [{ stop: stopVideo }] : [];
+      return {
+        getTracks: () => [...audioTracks, ...videoTracks],
+        getAudioTracks: () => audioTracks,
+        getVideoTracks: () => videoTracks,
+      };
+    });
+    Object.assign(navigator.mediaDevices, { getUserMedia });
+    await joinActiveCall();
+
+    const microphone = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Запросить доступ к микрофону"]',
+    );
+    const camera = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Запросить доступ к камере"]',
+    );
+    expect(microphone?.classList.contains("is-access-inactive")).toBe(true);
+    expect(microphone?.getAttribute("title")).toBeNull();
+    expect(microphone?.querySelector('[role="tooltip"]')?.textContent)
+      .toBe("Браузер не дал доступ к микрофону");
+    expect(camera?.classList.contains("is-access-inactive")).toBe(true);
+    expect(camera?.querySelector('[role="tooltip"]')?.textContent)
+      .toBe("Браузер не дал доступ к камере");
+
+    await clickButton("Запросить доступ к микрофону");
+    expect(getUserMedia).toHaveBeenCalledWith({ audio: true, video: false });
+    expect(stopAudio).toHaveBeenCalledOnce();
+    expect(mocks.localParticipant.setMicrophoneEnabled).not.toHaveBeenCalled();
+    expect(document.querySelector('button[aria-label="Включить микрофон"]'))
+      .not.toBeNull();
+
+    await clickButton("Включить микрофон");
+    expect(mocks.localParticipant.setMicrophoneEnabled).toHaveBeenCalledWith(true);
+
+    await clickButton("Запросить доступ к камере");
+    expect(getUserMedia).toHaveBeenCalledWith({ audio: false, video: true });
+    expect(stopVideo).toHaveBeenCalledOnce();
+    expect(document.querySelector('button[aria-label="Включить камеру"]'))
+      .not.toBeNull();
+    expect(mocks.localParticipant.setCameraEnabled).not.toHaveBeenCalled();
+  });
+
+  it("keeps denied capture controls inactive and explains unsupported screen sharing", async () => {
+    mocks.permissionStates.microphone = "denied";
+    const getUserMedia = vi.fn().mockRejectedValue(
+      new DOMException("Permission denied", "NotAllowedError"),
+    );
+    Object.assign(navigator.mediaDevices, { getUserMedia });
+    Reflect.deleteProperty(navigator.mediaDevices, "getDisplayMedia");
+    await joinActiveCall();
+
+    await clickButton("Запросить доступ к микрофону");
+    expect(document.querySelector('button[aria-label="Запросить доступ к микрофону"]'))
+      .not.toBeNull();
+    expect(mocks.localParticipant.setMicrophoneEnabled).not.toHaveBeenCalled();
+    expect(container?.textContent).toContain("Нет доступа к камере или микрофону");
+
+    const screen = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Демонстрация экрана недоступна"]',
+    );
+    expect(screen?.disabled).toBe(false);
+    expect(screen?.getAttribute("title")).toBeNull();
+    expect(screen?.querySelector('[role="tooltip"]')?.textContent)
+      .toBe("Браузер не поддерживает демонстрацию экрана");
+    await clickButton("Демонстрация экрана недоступна");
+    expect(mocks.localParticipant.setScreenShareEnabled).not.toHaveBeenCalled();
+  });
+
+  it("reacts when microphone permission is revoked in browser settings", async () => {
+    await joinActiveCall();
+    expect(document.querySelector('button[aria-label="Включить микрофон"]')).not.toBeNull();
+
+    mocks.permissionStates.microphone = "denied";
+    await act(async () => {
+      mocks.permissionChangeHandlers.microphone?.(new Event("change"));
+      await Promise.resolve();
+    });
+
+    const microphone = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Запросить доступ к микрофону"]',
+    );
+    expect(microphone?.classList.contains("is-access-inactive")).toBe(true);
+    expect(microphone?.querySelector('[role="tooltip"]')?.textContent)
+      .toBe("Браузер не дал доступ к микрофону");
+  });
+
   it("enters muted and asks for a camera choice before its first activation", async () => {
     await joinActiveCall();
 
@@ -539,9 +763,25 @@ describe("LessonCall", () => {
     expect(mocks.localParticipant.setMicrophoneEnabled).not.toHaveBeenCalled();
     expect(mocks.localParticipant.setCameraEnabled).not.toHaveBeenCalled();
 
-    await clickButton("Выбрать камеру");
-    await clickButton("Разрешить доступ и обновить устройства");
-    expect(Room.getLocalDevices).toHaveBeenLastCalledWith(undefined, true);
+    expect(document.querySelector('button[aria-label="Разрешить доступ и обновить устройства"]'))
+      .toBeNull();
+  });
+
+  it("keeps the device list current without a manual refresh action", async () => {
+    await joinActiveCall();
+    const addEventListener = vi.mocked(navigator.mediaDevices.addEventListener);
+    const deviceChange = addEventListener.mock.calls
+      .find(([type]) => type === "devicechange")?.[1] as EventListener | undefined;
+    expect(deviceChange).toBeDefined();
+
+    await act(async () => {
+      deviceChange?.(new Event("devicechange"));
+      await Promise.resolve();
+    });
+
+    expect(Room.getLocalDevices).toHaveBeenCalledTimes(2);
+    expect(Room.getLocalDevices).toHaveBeenLastCalledWith(undefined, false);
+    expect(document.querySelector(".call-device-refresh")).toBeNull();
   });
 
   it("restores device choices but still enters muted and supports speaker selection", async () => {
@@ -568,7 +808,7 @@ describe("LessonCall", () => {
     });
 
     await clickButton("Выбрать микрофон и наушники");
-    await clickDeviceOption("Наушники", "Headphones");
+    await clickDeviceOption("Наушники или динамики", "Headphones");
     expect(mocks.room.switchActiveDevice).toHaveBeenCalledWith("audiooutput", "speaker-two", true);
   });
 
@@ -580,9 +820,210 @@ describe("LessonCall", () => {
     await clickButton("Открыть настройки звонка");
     expect(document.querySelector('[role="dialog"][aria-modal="true"]')?.textContent)
       .toContain("Настройки звонка");
-    const speakers = document.querySelector<HTMLSelectElement>('select[aria-label="Наушники"]');
+    const speakers = document.querySelector<HTMLSelectElement>('select[aria-label="Наушники или динамики"]');
     expect(speakers?.disabled).toBe(true);
     expect(speakers?.textContent).toContain("Не поддерживается");
+  });
+
+  it("organizes settings by media type and applies screen-share quality", async () => {
+    await joinActiveCall();
+    await clickButton("Открыть настройки звонка");
+
+    const dialog = document.querySelector('[role="dialog"][aria-modal="true"]');
+    expect(dialog?.textContent).toContain("Звук");
+    expect(dialog?.textContent).toContain("Камера");
+    expect(dialog?.textContent).toContain("Демонстрация экрана");
+    expect(dialog?.textContent).toContain("Порог активации голоса");
+    expect(dialog?.textContent).toContain("Проверить микрофон и звук");
+
+    await selectOption("Разрешение демонстрации", "720p");
+    await selectOption("Частота кадров демонстрации", "15");
+    await changeRange("Порог активации голоса", "-44");
+
+    expect(JSON.parse(window.localStorage.getItem("eduri-call-devices-v1") ?? "null"))
+      .toMatchObject({
+        screenResolution: "720p",
+        screenFrameRate: 15,
+        voiceActivationThreshold: -44,
+      });
+
+    await clickButton("Начать демонстрацию");
+    expect(mocks.localParticipant.setScreenShareEnabled).toHaveBeenCalledWith(true, {
+      audio: true,
+      video: true,
+      contentHint: "detail",
+      resolution: { width: 1280, height: 720, frameRate: 15 },
+      selfBrowserSurface: "include",
+      surfaceSwitching: "include",
+      systemAudio: "include",
+      preferCurrentTab: false,
+    }, {
+      screenShareEncoding: {
+        maxBitrate: 1_500_000,
+        maxFramerate: 15,
+        priority: "medium",
+      },
+    });
+  });
+
+  it("loops a microphone test through the selected output and stops its capture", async () => {
+    setAudioOutputSupport(true);
+    const stopTrack = vi.fn();
+    const getUserMedia = vi.fn().mockResolvedValue({
+      getTracks: () => [{ stop: stopTrack }],
+    });
+    Object.assign(navigator.mediaDevices, { getUserMedia });
+    vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => undefined);
+    window.localStorage.setItem("eduri-call-devices-v1", JSON.stringify({
+      version: 1,
+      audioInput: "test-mic",
+      audioOutput: "test-headphones",
+      videoInput: "default",
+      videoInputSelected: false,
+    }));
+    await joinActiveCall();
+    await clickButton("Открыть настройки звонка");
+    await clickButtonWithText("Проверить микрофон и звук");
+
+    expect(getUserMedia).toHaveBeenCalledWith({
+      audio: {
+        deviceId: { exact: "test-mic" },
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      },
+      video: false,
+    });
+    expect(HTMLMediaElement.prototype.setSinkId).toHaveBeenCalledWith("test-headphones");
+    expect(document.querySelectorAll(".call-microphone-test__visualizer span")).toHaveLength(12);
+
+    await clickButtonWithText("Остановить проверку");
+    expect(stopTrack).toHaveBeenCalledOnce();
+  });
+
+  it("installs a voice-activation processor when the microphone starts", async () => {
+    const setProcessor = vi.fn().mockResolvedValue(undefined);
+    const localTrack = Object.assign(Object.create(LocalAudioTrack.prototype), {
+      getProcessor: vi.fn(() => undefined),
+      setProcessor,
+    }) as LocalAudioTrack;
+    mocks.localParticipant.getTrackPublication.mockReturnValue({
+      track: localTrack,
+      isMuted: false,
+    });
+    await joinActiveCall();
+
+    await clickButton("Включить микрофон");
+
+    expect(setProcessor).toHaveBeenCalledOnce();
+    expect(setProcessor.mock.calls[0]?.[0]).toMatchObject({
+      name: "eduri-voice-activation",
+    });
+  });
+
+  it("marks any transmitted microphone audio around the participant avatar", async () => {
+    const local = callParticipant("local-user", "Call user", true);
+    local.getTrackPublication.mockReturnValue({
+      track: { kind: Track.Kind.Audio },
+      isMuted: false,
+    });
+    mocks.trackVolume = 0.01;
+    mocks.participants = [local];
+    mocks.visualTracks = [visualTrack(local, Track.Source.Camera)];
+    await joinActiveCall();
+
+    expect(container?.querySelector(".call-track-tile.is-transmitting-audio")).not.toBeNull();
+    expect(container?.querySelector(".call-participant-idle > span")).not.toBeNull();
+  });
+
+  it("reveals connection quality and WebRTC metrics from the tile indicator", async () => {
+    const local = callParticipant("local-user", "Call user", true);
+    mocks.participants = [local];
+    mocks.visualTracks = [visualTrack(local, Track.Source.Camera)];
+    await joinActiveCall();
+
+    const trigger = container?.querySelector<HTMLButtonElement>(
+      'button[aria-label="Качество соединения: Отличное"]',
+    );
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      trigger?.focus();
+      await Promise.resolve();
+    });
+
+    const popover = container?.querySelector(".call-connection__popover");
+    expect(popover?.textContent).toContain("Задержка");
+    expect(popover?.textContent).toContain("Джиттер");
+    expect(popover?.textContent).toContain("Потери");
+    expect(popover?.textContent).toContain("Медиапоток");
+  });
+
+  it("adjusts a remote participant from the context menu up to 400 percent", async () => {
+    const tutor = callParticipant("tutor", "Tutor");
+    mocks.participants = [mocks.localParticipant, tutor];
+    mocks.visualTracks = [visualTrack(tutor, Track.Source.Camera)];
+    await joinActiveCall();
+
+    const tile = container?.querySelector<HTMLElement>('[data-participant-identity="tutor"]');
+    await act(async () => {
+      tile?.dispatchEvent(new MouseEvent("contextmenu", {
+        bubbles: true,
+        clientX: 120,
+        clientY: 80,
+      }));
+      await Promise.resolve();
+    });
+
+    expect(document.querySelector('[role="dialog"][aria-label="Громкость участника Tutor"]'))
+      .not.toBeNull();
+    expect(document.querySelector(".call-participant-menu header")).toBeNull();
+    const textbox = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Громкость участника Tutor"]',
+    );
+    expect(textbox?.value).toBe("100");
+
+    await act(async () => {
+      if (textbox) {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")
+          ?.set?.call(textbox, "300");
+        textbox.dispatchEvent(new Event("input", { bubbles: true }));
+        textbox.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      await Promise.resolve();
+    });
+
+    expect(tutor.setVolume).toHaveBeenCalledWith(3, Track.Source.Microphone);
+    expect(tutor.setVolume).toHaveBeenCalledWith(3, Track.Source.ScreenShareAudio);
+    const slider = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Громкость участника Tutor: слайдер"]',
+    );
+    expect(slider?.value).toBe("200");
+    expect(slider?.style.getPropertyValue("--call-volume-boost")).toBe("50%");
+
+    await act(async () => {
+      textbox?.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -1 }));
+      await Promise.resolve();
+    });
+    expect(textbox?.value).toBe("301");
+
+    await act(async () => {
+      slider?.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: 1 }));
+      await Promise.resolve();
+    });
+    expect(textbox?.value).toBe("300");
+
+    await act(async () => {
+      if (textbox) {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")
+          ?.set?.call(textbox, "999");
+        textbox.dispatchEvent(new Event("input", { bubbles: true }));
+        textbox.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+      await Promise.resolve();
+    });
+    expect(textbox?.value).toBe("400");
+    expect(slider?.style.getPropertyValue("--call-volume-boost")).toBe("100%");
   });
 
   it("does not save a device when LiveKit rejects the switch", async () => {
@@ -607,10 +1048,17 @@ describe("LessonCall", () => {
       audio: true,
       video: true,
       contentHint: "detail",
+      resolution: { width: 1920, height: 1080, frameRate: 30 },
       selfBrowserSurface: "include",
       surfaceSwitching: "include",
       systemAudio: "include",
       preferCurrentTab: false,
+    }, {
+      screenShareEncoding: {
+        maxBitrate: 5_000_000,
+        maxFramerate: 30,
+        priority: "medium",
+      },
     });
   });
 

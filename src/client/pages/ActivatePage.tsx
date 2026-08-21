@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { CheckCircle2, GraduationCap, KeyRound } from "lucide-react";
+import { CheckCircle2, KeyRound } from "lucide-react";
 import { Link, useNavigate } from "react-router-dom";
 import type { InvitePreview } from "../api";
 import { api } from "../api";
@@ -60,7 +60,7 @@ export function ActivatePage() {
     <main className="auth-page">
       <ThemeToggle className="theme-toggle--floating" />
       <section className="auth-panel" aria-labelledby="activate-title">
-        <div className="auth-brand"><span className="brand-mark"><GraduationCap size={23} /></span><span>Eduri</span></div>
+        <div className="auth-brand"><span className="brand-mark" aria-hidden="true"><img src="/favicon.svg" alt="" /></span><span>Eduri</span></div>
         <div className="auth-heading">
           <h1 id="activate-title">Активация аккаунта</h1>
           <p>{isStaff ? "Задайте пароль, который будете использовать для входа." : "Задайте кодовое слово, которое будете использовать для входа."}</p>

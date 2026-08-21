@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { GraduationCap, KeyRound, LogIn, UserRound } from "lucide-react";
+import { KeyRound, LogIn, UserRound } from "lucide-react";
 import { Navigate, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { homeForRole, useAuth } from "../auth";
@@ -48,7 +48,7 @@ export function LoginPage() {
     <main className="auth-page">
       <ThemeToggle className="theme-toggle--floating" />
       <section className="auth-panel" aria-labelledby="login-title">
-        <div className="auth-brand"><span className="brand-mark"><GraduationCap size={23} /></span><span>Eduri</span></div>
+        <div className="auth-brand"><span className="brand-mark" aria-hidden="true"><img src="/favicon.svg" alt="" /></span><span>Eduri</span></div>
         <div className="auth-heading">
           <h1 id="login-title">Вход в кабинет</h1>
           <p>Используйте данные, которые вы получили от репетитора или администратора.</p>

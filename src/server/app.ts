@@ -525,7 +525,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
   app.use("/api/board-v2", createBoardSyncRouter(context));
 
   const frontendDir = path.resolve("dist");
-  if (config.nodeEnv === "production" && fs.existsSync(frontendDir)) {
+  if (config.serveFrontend && fs.existsSync(frontendDir)) {
     app.use(express.static(frontendDir, {
       index: false,
       maxAge: "1h",

@@ -14,6 +14,10 @@ import {
 
 const OFFLINE_PUBLIC_ASSETS = [
   {
+    fileName: "favicon.svg",
+    url: "/favicon.svg",
+  },
+  {
     fileName: PYTHON_RUNNER_PUBLIC_FILE,
     url: PYTHON_RUNNER_WORKER_URL,
   },

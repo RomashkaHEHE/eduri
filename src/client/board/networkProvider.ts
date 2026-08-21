@@ -141,6 +141,10 @@ export interface BoardGesturePreview {
   readonly points?: readonly BoardPoint[];
   readonly style?: BoardGesturePreviewStyle;
   readonly strokes?: readonly BoardLaserStroke[];
+  readonly streamId?: string;
+  readonly pointOffset?: number;
+  readonly offset?: BoardPoint;
+  readonly sessionId?: string;
 }
 
 export interface BoardLocalPresence {
@@ -715,13 +719,48 @@ export class BoardNetworkProvider {
             if (stroke.style !== undefined && !style) {
               throw new TypeError(`laser stroke ${index} style is invalid`);
             }
+            const streamId = stroke.streamId;
+            if (
+              streamId !== undefined
+              && (
+                typeof streamId !== "string"
+                || streamId.length === 0
+                || streamId.length > 96
+              )
+            ) {
+              throw new TypeError(`laser stroke ${index} streamId is invalid`);
+            }
+            const pointOffset = stroke.pointOffset;
+            if (
+              pointOffset !== undefined
+              && (!Number.isSafeInteger(pointOffset) || pointOffset < 0)
+            ) {
+              throw new TypeError(`laser stroke ${index} pointOffset is invalid`);
+            }
             return {
               points: stroke.points.map((point) =>
                 finitePoint(point, `laser stroke ${index}`)),
               ...(style ? { style } : {}),
+              ...(streamId !== undefined ? { streamId } : {}),
+              ...(pointOffset !== undefined ? { pointOffset } : {}),
             };
           });
-          next.gesturePreview = { kind: "laser", strokes };
+          const sessionId = presence.gesturePreview.sessionId;
+          if (
+            sessionId !== undefined
+            && (
+              typeof sessionId !== "string"
+              || sessionId.length === 0
+              || sessionId.length > 96
+            )
+          ) {
+            throw new TypeError("laser gesturePreview sessionId is invalid");
+          }
+          next.gesturePreview = {
+            kind: "laser",
+            strokes,
+            ...(sessionId !== undefined ? { sessionId } : {}),
+          };
         } else {
           const points = presence.gesturePreview.points;
           if (!points) {
@@ -738,10 +777,34 @@ export class BoardNetworkProvider {
           if (presence.gesturePreview.style !== undefined && !style) {
             throw new TypeError("gesturePreview style is invalid");
           }
+          const streamId = presence.gesturePreview.streamId;
+          if (
+            streamId !== undefined
+            && (
+              typeof streamId !== "string"
+              || streamId.length === 0
+              || streamId.length > 96
+            )
+          ) {
+            throw new TypeError("gesturePreview streamId is invalid");
+          }
+          const pointOffset = presence.gesturePreview.pointOffset;
+          if (
+            pointOffset !== undefined
+            && (!Number.isSafeInteger(pointOffset) || pointOffset < 0)
+          ) {
+            throw new TypeError("gesturePreview pointOffset is invalid");
+          }
+          const offset = presence.gesturePreview.offset === undefined
+            ? undefined
+            : finitePoint(presence.gesturePreview.offset, "gesturePreview offset");
           next.gesturePreview = {
             kind: presence.gesturePreview.kind,
             points: points.map((point) => finitePoint(point, "gesturePreview")),
             ...(style ? { style } : {}),
+            ...(streamId !== undefined ? { streamId } : {}),
+            ...(pointOffset !== undefined ? { pointOffset } : {}),
+            ...(offset ? { offset } : {}),
           };
         }
       }

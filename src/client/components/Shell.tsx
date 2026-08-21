@@ -5,7 +5,6 @@ import {
   BookOpen,
   CalendarDays,
   ClipboardCheck,
-  GraduationCap,
   Home,
   LogOut,
   Menu,
@@ -89,7 +88,7 @@ export function Shell() {
       {menuOpen && <button className="sidebar-backdrop" aria-label="Закрыть навигацию" onClick={() => setMenuOpen(false)} />}
       <aside className={`sidebar ${menuOpen ? "sidebar--open" : ""}`}>
         <div className="sidebar__brand">
-          <span className="brand-mark"><GraduationCap size={22} /></span>
+          <span className="brand-mark" aria-hidden="true"><img src="/favicon.svg" alt="" /></span>
           <span className="brand-name">Eduri</span>
           <IconButton label="Закрыть навигацию" className="sidebar__close" onClick={() => setMenuOpen(false)}>
             <X size={20} />

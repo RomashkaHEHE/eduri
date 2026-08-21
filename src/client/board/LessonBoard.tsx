@@ -36,6 +36,7 @@ import {
   BOARD_METRICS_REFRESH_MS,
   fetchBoardServerMetrics,
 } from "./boardMetrics";
+import { clampBoardZoom } from "./boardZoom";
 import {
   getBoardCatalogEntry,
   putBoardCatalogEntry,
@@ -78,6 +79,7 @@ export { browserImageDimensions } from "./localBoardAssets";
 export { validateForeignFragmentImageAssets };
 import type {
   BoardGesturePreview,
+  BoardCamera,
   BoardLaserClearMode,
   BoardLaserPreview,
   BoardLaserStroke,
@@ -634,10 +636,29 @@ function finitePoint(value: unknown): BoardPoint | undefined {
   return { x: value.x, y: value.y };
 }
 
-function finitePoints(value: unknown): BoardPoint[] {
+function finiteViewport(value: unknown): BoardCamera | undefined {
+  const point = finitePoint(value);
+  if (
+    !point
+    || !value
+    || typeof value !== "object"
+    || !("zoom" in value)
+    || typeof value.zoom !== "number"
+    || !Number.isFinite(value.zoom)
+    || value.zoom <= 0
+  ) {
+    return undefined;
+  }
+  return { ...point, zoom: clampBoardZoom(value.zoom) };
+}
+
+function finitePoints(
+  value: unknown,
+  limit = MAX_BOARD_LASER_POINTS,
+): BoardPoint[] {
   if (!Array.isArray(value)) return [];
   const points: BoardPoint[] = [];
-  for (const entry of value.slice(-MAX_BOARD_LASER_POINTS)) {
+  for (const entry of value.slice(-limit)) {
     const point = finitePoint(entry);
     if (point) points.push(point);
   }
@@ -686,6 +707,8 @@ function copyLaserStrokes(
   return preview.strokes.map((stroke) => ({
     points: stroke.points.map((point) => ({ ...point })),
     ...(stroke.style ? { style: { ...stroke.style } } : {}),
+    ...(stroke.streamId ? { streamId: stroke.streamId } : {}),
+    ...(stroke.pointOffset !== undefined ? { pointOffset: stroke.pointOffset } : {}),
   }));
 }
 
@@ -723,6 +746,10 @@ function remotePresences(
       && "style" in gesture
         ? sanitizeBoardGesturePreviewStyle(gesture.style)
         : undefined;
+    const gestureRecord = gesture && typeof gesture === "object"
+      ? gesture as Record<string, unknown>
+      : null;
+    const gestureOffset = finitePoint(gestureRecord?.offset);
     const gesturePreview =
       gesture
       && typeof gesture === "object"
@@ -732,8 +759,18 @@ function remotePresences(
       && "points" in gesture
         ? {
             kind: gesture.kind as BoardGesturePreview["kind"],
-            points: finitePoints(gesture.points),
+            points: finitePoints(
+              gesture.points,
+              MAX_BOARD_GESTURE_PREVIEW_POINTS,
+            ),
             ...(gestureStyle ? { style: gestureStyle } : {}),
+            ...(typeof gestureRecord?.streamId === "string" && gestureRecord.streamId.length <= 96
+              ? { streamId: gestureRecord.streamId }
+              : {}),
+            ...(Number.isSafeInteger(gestureRecord?.pointOffset) && Number(gestureRecord?.pointOffset) >= 0
+              ? { pointOffset: gestureRecord!.pointOffset as number }
+              : {}),
+            ...(gestureOffset ? { offset: gestureOffset } : {}),
           }
         : undefined;
     const activeTool = typeof state.activeTool === "string" && BOARD_TOOLS.has(state.activeTool as BoardTool)
@@ -754,6 +791,7 @@ function remotePresences(
       displayName: state.displayName,
       color: state.color,
       cursor: finitePoint(state.cursor),
+      viewport: finiteViewport(state.viewport),
       selectionIds,
       activeTool,
       gesturePreview:
@@ -996,6 +1034,7 @@ function ActiveCollaborativeBoard({
       : undefined;
     session.provider.setPresence({
       cursor: "cursor" in change ? change.cursor ?? null : undefined,
+      viewport: "viewport" in change ? change.viewport ?? null : undefined,
       activeTool: "activeTool" in change ? change.activeTool ?? null : undefined,
       laserPointer: "laser" in change
         ? laserPreview ? lastLaserPoint(laserPreview) ?? null : null
@@ -1010,6 +1049,7 @@ function ActiveCollaborativeBoard({
           ? {
               kind: "laser",
               strokes: copyLaserStrokes(laserPreview),
+              ...(laserPreview.sessionId ? { sessionId: laserPreview.sessionId } : {}),
             }
           : null
         : "gesturePreview" in change
@@ -1021,6 +1061,15 @@ function ActiveCollaborativeBoard({
                 ),
                 ...(change.gesturePreview.style
                   ? { style: change.gesturePreview.style }
+                  : {}),
+                ...(change.gesturePreview.streamId
+                  ? { streamId: change.gesturePreview.streamId }
+                  : {}),
+                ...(change.gesturePreview.pointOffset !== undefined
+                  ? { pointOffset: change.gesturePreview.pointOffset }
+                  : {}),
+                ...(change.gesturePreview.offset
+                  ? { offset: change.gesturePreview.offset }
                   : {}),
               }
             : null

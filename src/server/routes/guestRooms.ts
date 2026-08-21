@@ -27,6 +27,7 @@ import {
   deleteGuestCallRoomsBestEffort,
   ensureLiveKitCallRoom,
   isLiveKitNotFoundError,
+  listCallLobbyParticipants,
 } from "../livekit.js";
 import {
   BOARD_PROTOCOL_LIMITS,
@@ -159,6 +160,12 @@ export function createGuestRoomsRouter(context: AppContext): Router {
   const callTokenLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     limit: context.config.nodeEnv === "test" ? 10_000 : 12,
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+  });
+  const callRosterLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    limit: context.config.nodeEnv === "test" ? 10_000 : 240,
     standardHeaders: "draft-7",
     legacyHeaders: false,
   });
@@ -314,6 +321,47 @@ export function createGuestRoomsRouter(context: AppContext): Router {
         created: result.created,
         room: serializeRoom(result.room),
       });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get("/:shareKey/call-participants", callRosterLimiter, async (req, res, next) => {
+    try {
+      const shareKey = req.params.shareKey;
+      if (!SHARE_KEY_PATTERN.test(shareKey)) {
+        sendLookupFailure(res, { status: "missing" });
+        return;
+      }
+      const lookup = context.guestRooms.lookup(shareKey);
+      if (lookup.status !== "active") {
+        sendLookupFailure(res, lookup);
+        return;
+      }
+      const call = lookup.room.resources.find((resource) => (
+        resource.kind === "call" && resource.ordinal === 1
+      ));
+      if (!call) {
+        res.status(409).json({
+          code: "CALL_NOT_ENABLED",
+          error: "Звонок не добавлен в эту комнату",
+        });
+        return;
+      }
+      const listParticipants = context.livekitRoomService?.listParticipants;
+      if (!listParticipants) {
+        res.status(503).json({ error: "Сервис звонков временно недоступен" });
+        return;
+      }
+      const roomName = context.guestRooms.resolveCallRoomName(
+        lookup.room.id,
+        call.id,
+      );
+      const participants = roomName
+        ? await listCallLobbyParticipants(context.livekitRoomService, roomName)
+        : [];
+      res.setHeader("Cache-Control", "no-store");
+      res.json({ participants });
     } catch (error) {
       next(error);
     }

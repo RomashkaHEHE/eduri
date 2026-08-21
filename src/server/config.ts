@@ -4,6 +4,7 @@ import { isIP } from "node:net";
 export interface AppConfig {
   nodeEnv: "development" | "test" | "production";
   port: number;
+  serveFrontend: boolean;
   appOrigins: string[];
   dataDir: string;
   databasePath: string;
@@ -159,6 +160,18 @@ function enabledByDefault(value: string | undefined): boolean {
   return value?.trim().toLowerCase() !== "false";
 }
 
+function explicitBoolean(
+  name: string,
+  value: string | undefined,
+  fallback: boolean,
+): boolean {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return fallback;
+  if (normalized === "true") return true;
+  if (normalized === "false") return false;
+  throw new Error(`${name} must be true or false`);
+}
+
 function resolveTrustProxy(
   value: AppConfig["trustProxy"] | undefined,
   nodeEnv: AppConfig["nodeEnv"],
@@ -245,9 +258,23 @@ function normalizeLiveKitApiUrl(
 
 export function loadConfig(overrides: AppConfigOverrides = {}): AppConfig {
   const nodeEnv = resolveNodeEnv(overrides.nodeEnv ?? process.env.NODE_ENV);
+  const serveFrontend = nodeEnv === "production" || (
+    overrides.serveFrontend
+    ?? explicitBoolean(
+      "EDURI_SERVE_FRONTEND",
+      process.env.EDURI_SERVE_FRONTEND,
+      false,
+    )
+  );
+  const port = overrides.port ?? positiveNumber(
+    process.env.PORT,
+    nodeEnv === "development" && serveFrontend ? 5173 : 3020,
+  );
   const dataDir = path.resolve(overrides.dataDir ?? process.env.DATA_DIR ?? "./data");
   const configuredOrigins = overrides.appOrigins
-    ?? (process.env.APP_ORIGIN ?? "http://127.0.0.1:5173").split(",");
+    ?? (process.env.APP_ORIGIN ?? `http://127.0.0.1:${
+      nodeEnv === "development" && serveFrontend ? port : 5173
+    }`).split(",");
   const origins = [...new Set(configuredOrigins
     .map((origin) => origin.trim())
     .filter(Boolean)
@@ -372,7 +399,8 @@ export function loadConfig(overrides: AppConfigOverrides = {}): AppConfig {
 
   return {
     nodeEnv,
-    port: overrides.port ?? positiveNumber(process.env.PORT, 3020),
+    port,
+    serveFrontend,
     appOrigins: origins,
     dataDir,
     databasePath: configuredDatabasePath === ":memory:" ? configuredDatabasePath : path.resolve(configuredDatabasePath),

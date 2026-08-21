@@ -658,6 +658,19 @@ must distinguish stdout, stderr, prompts, exit status, timeout, truncation, and
 sandbox failure independently, and killing a run must revoke its input stream
 and sandbox immediately.
 
+## Local service replica
+
+`npm run dev` builds the deployment client/server bundles and serves them from
+one loopback Express origin. Guest and lesson Code use the normal Socket.IO
+namespaces, SQLite repository, state-vector protocol, awareness validation,
+terminal coordinator, run host election, ACK/idempotency path, and reconnect
+logic. There is no local-only sync provider or hardcoded terminal/run shortcut.
+The same share URL should be opened in separate browser profiles when testing
+multiple identities. `npm run dev:fast` keeps Vite HMR for UI iteration, but its
+extra proxy and remount behavior make it non-normative for synchronization
+acceptance. Binary publication still requires a real configured `clamd` and
+fails closed when it is absent.
+
 ## Acceptance gates
 
 - concurrent file content and tree operations converge under duplicate,

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <mask id="cuts" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+    <rect width="512" height="512" fill="#fff"/>
+    <g transform="translate(256 256) scale(1.8) translate(-256 -256)">
+      <path d="M287.19 277.1L464.5 217.8L438.48 385.72L282.34 462.21ZM92.06 137.84L233.18 111.69L234.91 240.25L107.58 277.2ZM287.19 277.1L92.06 137.84M464.5 217.8L233.18 111.69M438.48 385.72L234.91 240.25M282.34 462.21L107.58 277.2" fill="none" stroke="#000" stroke-width="42" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+  </mask>
+  <rect width="512" height="512" fill="#88aef2" mask="url(#cuts)"/>
+</svg>

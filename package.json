@@ -68,7 +68,7 @@
     "@types/ws": "8.18.1",
     "@vitejs/plugin-react": "^6.0.3",
     "concurrently": "^9.1.2",
-    "cross-env": "^7.0.3",
+    "cross-env": "^10.1.0",
     "esbuild": "^0.28.1",
     "fake-indexeddb": "6.2.5",
     "jsdom": "^29.1.1",

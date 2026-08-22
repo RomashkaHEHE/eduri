@@ -3254,9 +3254,9 @@ export function BoardSurface({
           )
         ) {
           beginPendingText(document, draft);
-          return;
+          return null;
         }
-        commitObjectDraftRef.current(document, draft);
+        return commitObjectDraftRef.current(document, draft);
       },
       onPlaceTool: placeToolAt,
       onDeleteObjects: (ids) => {
@@ -3529,7 +3529,7 @@ export function BoardSurface({
     }
   }, [closeContextMenu, contextMenu?.objectId, selection]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     rendererRef.current?.setPresence(presences);
   }, [presences]);
 

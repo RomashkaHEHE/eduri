@@ -43,7 +43,8 @@ Implemented in the Board v2 path:
   executable code blocks, click-anchored code/LaTeX/image placement tools,
   ordered-anchor smooth Line/Arrow geometry and renderer-local connector point
   editing, interpolated remote cursors with locally timed idle-only identity
-  labels, gesture activity indicators, and direct inverse sender-zoom scale,
+  labels, gesture activity indicators, and world-relative remote pointers whose
+  screen scale composes viewer zoom with direct inverse sender zoom,
   selections, Drawing-integrated multi-stroke laser sessions, bounded live
   gesture previews, hostile-style sanitization and bounded static text previews
   at the renderer boundary, a ref-aware
@@ -1198,6 +1199,16 @@ eviction or progressive geometry compaction. Each retained stroke keeps its own
 style snapshot. None of these awareness guards mutates the local session or a
 durable board object.
 
+Awareness transport remains rate-limited; visual frame rate is decoupled from
+packet rate. For streamed pen/highlighter and laser paths, the web renderer
+retargets the currently visible head toward each received endpoint with a 56 ms
+cubic ease-out driven by its existing presence RAF. Animation owns a separate
+Konva coordinate array and mutates only its final pair per frame; canonical
+accumulated points, stream offsets, and durable geometry are never interpolated
+or rebuilt. A genuine stream gap renders the new window directly instead of
+animating an invented bridge, and a new laser session never interpolates from
+the previous session.
+
 Releasing `Alt` after pointer-up clears laser awareness and fades the complete
 retained local session together over 300 ms. An `Alt` release during an active
 stroke defers that same action until pointer-up;
@@ -1246,6 +1257,20 @@ moves that provisional endpoint together with the rest of the stroke.
 Pointer-up honors the active mode, and the whole hybrid gesture remains one
 object and one local undo item. Wheel camera input is ignored while any pointer
 gesture, object drag, or resize/rotate transform is active.
+
+Freehand completion is an order-independent handoff between ephemeral
+awareness and the durable CRDT update. The final preview carries its committed
+object ID, and the durable stroke keeps the bounded source gesture stream ID.
+A receiver retains an awareness-first preview until the named object is
+materialized; an object-first update retires the matching active stream before
+the final awareness marker arrives. The renderer reconciles both layers in the
+same turn, avoiding either a blank frame or a transient double-render while
+preserving local-first durability.
+
+Remote laser groups are session-owned rather than reused across session IDs.
+When a new session arrives, the preceding group is destroyed and the new group
+is populated during layout reconciliation before paint. A first one-point
+window therefore cannot reveal coordinates retained by the previous session.
 
 The zoom toolbar has a state-based Home button. If the world origin is not at
 the viewport center, the first press centers it without changing zoom. Pressing

@@ -2893,6 +2893,9 @@ describe("BoardNetworkProvider CRDT sync and awareness", () => {
     expect(() => sender.provider.setPresence({
       gesturePreview: { kind: "pen", pointOffset: 1.5, points },
     })).toThrow(/pointOffset is invalid/u);
+    expect(() => sender.provider.setPresence({
+      gesturePreview: { kind: "pen", committedObjectId: "", points },
+    })).toThrow(/committedObjectId is invalid/u);
 
     sender.provider.setPresence({
       gesturePreview: {
@@ -2900,6 +2903,7 @@ describe("BoardNetworkProvider CRDT sync and awareness", () => {
         streamId: "pen-stream-1",
         pointOffset: 320,
         offset: { x: 15, y: -8 },
+        committedObjectId: "00000000-0000-4000-8000-000000000320",
         points,
         style: {
           stroke: "rgb(10, 20, 30)",
@@ -2924,6 +2928,7 @@ describe("BoardNetworkProvider CRDT sync and awareness", () => {
         streamId: "pen-stream-1",
         pointOffset: 320,
         offset: { x: 15, y: -8 },
+        committedObjectId: "00000000-0000-4000-8000-000000000320",
         points,
         style: {
           stroke: "rgb(10,20,30)",

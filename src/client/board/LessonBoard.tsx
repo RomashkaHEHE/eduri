@@ -771,6 +771,11 @@ function remotePresences(
               ? { pointOffset: gestureRecord!.pointOffset as number }
               : {}),
             ...(gestureOffset ? { offset: gestureOffset } : {}),
+            ...(typeof gestureRecord?.committedObjectId === "string"
+              && gestureRecord.committedObjectId.length > 0
+              && gestureRecord.committedObjectId.length <= 96
+              ? { committedObjectId: gestureRecord.committedObjectId }
+              : {}),
           }
         : undefined;
     const activeTool = typeof state.activeTool === "string" && BOARD_TOOLS.has(state.activeTool as BoardTool)
@@ -1070,6 +1075,9 @@ function ActiveCollaborativeBoard({
                   : {}),
                 ...(change.gesturePreview.offset
                   ? { offset: change.gesturePreview.offset }
+                  : {}),
+                ...(change.gesturePreview.committedObjectId
+                  ? { committedObjectId: change.gesturePreview.committedObjectId }
                   : {}),
               }
             : null

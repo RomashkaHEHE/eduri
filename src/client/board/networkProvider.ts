@@ -144,6 +144,7 @@ export interface BoardGesturePreview {
   readonly streamId?: string;
   readonly pointOffset?: number;
   readonly offset?: BoardPoint;
+  readonly committedObjectId?: string;
   readonly sessionId?: string;
 }
 
@@ -798,6 +799,17 @@ export class BoardNetworkProvider {
           const offset = presence.gesturePreview.offset === undefined
             ? undefined
             : finitePoint(presence.gesturePreview.offset, "gesturePreview offset");
+          const committedObjectId = presence.gesturePreview.committedObjectId;
+          if (
+            committedObjectId !== undefined
+            && (
+              typeof committedObjectId !== "string"
+              || committedObjectId.length === 0
+              || committedObjectId.length > 96
+            )
+          ) {
+            throw new TypeError("gesturePreview committedObjectId is invalid");
+          }
           next.gesturePreview = {
             kind: presence.gesturePreview.kind,
             points: points.map((point) => finitePoint(point, "gesturePreview")),
@@ -805,6 +817,7 @@ export class BoardNetworkProvider {
             ...(streamId !== undefined ? { streamId } : {}),
             ...(pointOffset !== undefined ? { pointOffset } : {}),
             ...(offset ? { offset } : {}),
+            ...(committedObjectId !== undefined ? { committedObjectId } : {}),
           };
         }
       }

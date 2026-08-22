@@ -80,6 +80,7 @@ const WHEEL_DELTA_MODE_LINE = 1;
 const WHEEL_DELTA_MODE_PAGE = 2;
 const VIEWPORT_OVERSCAN_PX = 480;
 const CURSOR_INTERPOLATION_MS = 72;
+export const REMOTE_GESTURE_INTERPOLATION_MS = 56;
 export const REMOTE_CURSOR_LABEL_IDLE_MS = 5_000;
 const LASER_FADE_MS = 300;
 const LASER_GLOW_PX = 8;
@@ -93,7 +94,7 @@ const ERASER_MARKED_OPACITY_FACTOR = 0.24;
 const ERASER_BROAD_PHASE_SEGMENT_PX = 64;
 const MAX_ERASER_BROAD_PHASE_SEGMENTS = 128;
 const MARQUEE_THRESHOLD_PX = 3;
-const RIGHT_BUTTON_PAN_THRESHOLD_PX = 4;
+const RIGHT_BUTTON_PAN_THRESHOLD_PX = 2;
 const RIGHT_BUTTON_CONTEXT_MENU_RESET_MS = 500;
 const PLACEMENT_CLICK_TOLERANCE_PX = 8;
 const LASSO_POINT_DISTANCE_PX = 1.5;
@@ -342,12 +343,20 @@ interface CursorMotion {
   readonly lastMovedAt: number;
 }
 
+interface RemotePointMotion {
+  readonly from: BoardPoint;
+  readonly target: BoardPoint;
+  readonly startedAt: number;
+}
+
 interface RemoteLaserStroke {
   readonly streamId: string;
   readonly points: BoardPoint[];
   style?: BoardGesturePreviewStyle;
   nextPointOffset: number;
   pointsChanged: boolean;
+  targetFlatPoints: number[];
+  headMotion: RemotePointMotion | null;
 }
 
 interface RemoteLaserTrail {
@@ -401,7 +410,11 @@ interface PresenceRenderEntry {
   gestureStreamId: string | null;
   gestureStreamNextOffset: number;
   gestureStyle: BoardGesturePreviewStyle | null;
+  gestureCommittedObjectId: string | null;
+  retiredGestureStreamId: string | null;
+  gestureHeadMotion: RemotePointMotion | null;
   laser: Konva.Group | null;
+  laserSessionId: string | null;
   readonly selections: Map<string, Konva.Rect>;
 }
 
@@ -1361,6 +1374,27 @@ function interpolateCursor(motion: CursorMotion, time: number): BoardPoint {
   return {
     x: motion.from.x + (motion.target.x - motion.from.x) * eased,
     y: motion.from.y + (motion.target.y - motion.from.y) * eased,
+  };
+}
+
+function interpolateRemotePoint(
+  motion: RemotePointMotion,
+  time: number,
+): { readonly point: BoardPoint; readonly complete: boolean } {
+  const progress = Math.max(
+    0,
+    Math.min(
+      1,
+      (time - motion.startedAt) / REMOTE_GESTURE_INTERPOLATION_MS,
+    ),
+  );
+  const eased = 1 - (1 - progress) ** 3;
+  return {
+    point: {
+      x: motion.from.x + (motion.target.x - motion.from.x) * eased,
+      y: motion.from.y + (motion.target.y - motion.from.y) * eased,
+    },
+    complete: progress >= 1,
   };
 }
 
@@ -2538,6 +2572,24 @@ export class KonvaBoardRenderer implements BoardRenderer {
     const replacementIndex = currentNode?.zIndex();
     const wasVisible = this.visibleIds.has(object.id);
     this.objects.set(object.id, object);
+    const sourceGestureStreamId = typeof object.props.sourceGestureStreamId === "string"
+      && object.props.sourceGestureStreamId.length > 0
+      && object.props.sourceGestureStreamId.length <= 96
+      ? object.props.sourceGestureStreamId
+      : null;
+    let committedPreviewChanged = false;
+    if (sourceGestureStreamId) {
+      for (const entry of this.presenceRenderEntries.values()) {
+        if (
+          entry.gestureStreamId !== sourceGestureStreamId
+          && entry.retiredGestureStreamId !== sourceGestureStreamId
+        ) {
+          continue;
+        }
+        this.clearPresenceGesture(entry, object.id, sourceGestureStreamId);
+        committedPreviewChanged = true;
+      }
+    }
     if (
       this.inlineEditingObjectId === object.id
       && object.kind !== BUILTIN_OBJECT_KINDS.text
@@ -2604,7 +2656,10 @@ export class KonvaBoardRenderer implements BoardRenderer {
       this.updateTransformer();
     }
     if (wasVisible || shouldBeVisible) this.objectLayer.batchDraw();
-    if (this.presences.some((presence) => presence.selectionIds.includes(object.id))) {
+    if (committedPreviewChanged || this.presences.some((presence) => (
+      presence.selectionIds.includes(object.id)
+      || presence.gesturePreview?.committedObjectId === object.id
+    ))) {
       this.syncPresenceScene();
       this.renderPresence();
     }
@@ -4525,10 +4580,6 @@ export class KonvaBoardRenderer implements BoardRenderer {
       return;
     }
 
-    gesture.preview.destroy();
-    if (isGesturePreviewTool(gesture.tool)) {
-      this.callbacks.onGesturePreviewChange?.(null);
-    }
     const draftPoints = (
       gesture.tool === "pen"
       || gesture.tool === "highlighter"
@@ -4542,14 +4593,37 @@ export class KonvaBoardRenderer implements BoardRenderer {
           y: point.y + gesture.strokeOffset.y,
         }))
       : gesture.points;
-    const draft = shapeDraft(
+    const rawDraft = shapeDraft(
       gesture.tool,
       gesture.start,
       point,
       draftPoints,
       gesture.style,
     );
-    if (draft) this.callbacks.onCreateObject(draft);
+    const draft = rawDraft
+      && (gesture.tool === "pen" || gesture.tool === "highlighter")
+      ? {
+          ...rawDraft,
+          props: {
+            ...rawDraft.props,
+            sourceGestureStreamId: gesture.previewStreamId,
+          },
+        }
+      : rawDraft;
+    const committedObjectId = draft
+      ? this.callbacks.onCreateObject(draft)
+      : null;
+    if (isGesturePreviewTool(gesture.tool)) {
+      if (
+        typeof committedObjectId === "string"
+        && committedObjectId.length > 0
+      ) {
+        this.emitDrawingGesturePreview(gesture, point, committedObjectId);
+      } else {
+        this.callbacks.onGesturePreviewChange?.(null);
+      }
+    }
+    gesture.preview.destroy();
     this.updatePenLaserPresentation();
     this.updateCursor();
     this.previewLayer.batchDraw();
@@ -4590,6 +4664,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
   private emitDrawingGesturePreview(
     gesture: DrawingGesture,
     end: BoardPoint,
+    committedObjectId?: string,
   ): void {
     if (!this.callbacks.onGesturePreviewChange || !isGesturePreviewTool(gesture.tool)) {
       return;
@@ -4619,8 +4694,9 @@ export class KonvaBoardRenderer implements BoardRenderer {
             streamId: gesture.previewStreamId,
             pointOffset: gesture.previewStreamPointOffset,
             offset: { ...gesture.strokeOffset },
-          }
+        }
         : {}),
+      ...(committedObjectId ? { committedObjectId } : {}),
     });
   }
 
@@ -5361,6 +5437,8 @@ export class KonvaBoardRenderer implements BoardRenderer {
             ...(stroke.style ? { style: { ...stroke.style } } : {}),
             nextPointOffset: (stroke.pointOffset ?? 0) + stroke.points.length,
             pointsChanged: true,
+            targetFlatPoints: [],
+            headMotion: null,
           }));
           this.remoteLaserTrails.set(presence.clientId, {
             sessionId,
@@ -5385,6 +5463,8 @@ export class KonvaBoardRenderer implements BoardRenderer {
                 ...(incomingStroke.style ? { style: { ...incomingStroke.style } } : {}),
                 nextPointOffset: incomingEnd,
                 pointsChanged: true,
+                targetFlatPoints: [],
+                headMotion: null,
               };
               existingTrail.strokes.push(stroke);
               existingTrail.strokesById.set(streamId, stroke);
@@ -5401,6 +5481,8 @@ export class KonvaBoardRenderer implements BoardRenderer {
                 : undefined;
               stroke.nextPointOffset = incomingEnd;
               stroke.pointsChanged = true;
+              stroke.targetFlatPoints = [];
+              stroke.headMotion = null;
               existingTrail.totalPoints += stroke.points.length;
             } else if (incomingEnd >= stroke.nextPointOffset) {
               const overlap = Math.max(0, stroke.nextPointOffset - pointOffset);
@@ -5437,7 +5519,11 @@ export class KonvaBoardRenderer implements BoardRenderer {
               existingTrail.totalPoints -= stroke.points.length;
             }
             // Children are positionally reused by syncPresenceLaser().
-            for (const stroke of existingTrail.strokes) stroke.pointsChanged = true;
+            for (const stroke of existingTrail.strokes) {
+              stroke.pointsChanged = true;
+              stroke.targetFlatPoints = [];
+              stroke.headMotion = null;
+            }
           }
           if (existingTrail.totalPoints > MAX_BOARD_ACCUMULATED_PREVIEW_POINTS) {
             let compactedTotal = 0;
@@ -5490,8 +5576,67 @@ export class KonvaBoardRenderer implements BoardRenderer {
       gestureStreamId: null,
       gestureStreamNextOffset: 0,
       gestureStyle: null,
+      gestureCommittedObjectId: null,
+      retiredGestureStreamId: null,
+      gestureHeadMotion: null,
       laser: null,
+      laserSessionId: null,
       selections: new Map(),
+    };
+  }
+
+  private clearPresenceGesture(
+    entry: PresenceRenderEntry,
+    committedObjectId: string | null = null,
+    retiredGestureStreamId: string | null = null,
+  ): void {
+    entry.gesturePreview?.destroy();
+    entry.gesturePreview = null;
+    entry.gestureKind = null;
+    entry.gestureColor = null;
+    entry.gesturePoints = null;
+    entry.gestureFlatPoints = null;
+    entry.gestureStreamId = null;
+    entry.gestureStreamNextOffset = 0;
+    entry.gestureStyle = null;
+    entry.gestureCommittedObjectId = committedObjectId;
+    entry.retiredGestureStreamId = retiredGestureStreamId;
+    entry.gestureHeadMotion = null;
+  }
+
+  private startRemoteHeadMotion(
+    line: Konva.Line,
+    targetFlatPoints: readonly number[],
+  ): RemotePointMotion | null {
+    const currentFlatPoints = line.points();
+    if (currentFlatPoints.length < 2 || targetFlatPoints.length < 2) {
+      line.points([...targetFlatPoints]);
+      return null;
+    }
+    const from = {
+      x: currentFlatPoints[currentFlatPoints.length - 2],
+      y: currentFlatPoints[currentFlatPoints.length - 1],
+    };
+    const target = {
+      x: targetFlatPoints[targetFlatPoints.length - 2],
+      y: targetFlatPoints[targetFlatPoints.length - 1],
+    };
+    if (
+      from.x === target.x
+      && from.y === target.y
+    ) {
+      line.points([...targetFlatPoints]);
+      return null;
+    }
+    const rendered = [...targetFlatPoints];
+    rendered[rendered.length - 2] = from.x;
+    rendered[rendered.length - 1] = from.y;
+    line.points(rendered);
+    this.schedulePresenceAnimation();
+    return {
+      from,
+      target,
+      startedAt: performance.now(),
     };
   }
 
@@ -5524,7 +5669,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
           "Z",
         ].join(" "),
         strokeWidth: 1.25,
-        strokeScaleEnabled: false,
+        strokeScaleEnabled: true,
         lineJoin: "round",
         listening: false,
         perfectDrawEnabled: false,
@@ -5549,8 +5694,8 @@ export class KonvaBoardRenderer implements BoardRenderer {
     }
     const inverseZoom = 1 / this.currentCamera.zoom;
     entry.cursor!.setAttrs({
-      scaleX: inverseZoom,
-      scaleY: inverseZoom,
+      scaleX: 1,
+      scaleY: 1,
     });
     const senderZoom = presence.viewport?.zoom;
     const pointerScale = senderZoom
@@ -5567,8 +5712,10 @@ export class KonvaBoardRenderer implements BoardRenderer {
       stroke: this.currentTheme === "dark" ? "#f8fafc" : "#18202b",
     });
     entry.cursorLabel!.setAttrs({
-      x: Math.max(12, 15 * pointerScale),
-      y: Math.max(13, 17 * pointerScale),
+      x: 15 * pointerScale + 4 * inverseZoom,
+      y: 17 * pointerScale + 4 * inverseZoom,
+      scaleX: inverseZoom,
+      scaleY: inverseZoom,
     });
     entry.cursorTag!.fill(color);
     entry.cursorText!.fill(contrastingTextColor(color));
@@ -5589,26 +5736,44 @@ export class KonvaBoardRenderer implements BoardRenderer {
   ): void {
     const gesture = presence.gesturePreview;
     if (!gesture) {
-      entry.gesturePreview?.destroy();
-      entry.gesturePreview = null;
-      entry.gestureKind = null;
-      entry.gestureColor = null;
-      entry.gesturePoints = null;
-      entry.gestureFlatPoints = null;
-      entry.gestureStreamId = null;
-      entry.gestureStreamNextOffset = 0;
-      entry.gestureStyle = null;
+      this.clearPresenceGesture(entry);
       return;
     }
-    const color = colorValue(presence.color, DEFAULT_ACCENT);
-    const points = boundedGesturePoints(gesture.points);
-    const style = sanitizeBoardGesturePreviewStyle(gesture.style);
     const streamId = typeof gesture.streamId === "string"
       && gesture.streamId.length > 0
       && gesture.streamId.length <= 96
       && (gesture.kind === "pen" || gesture.kind === "highlighter")
       ? gesture.streamId
       : null;
+    const committedObjectId = typeof gesture.committedObjectId === "string"
+      && gesture.committedObjectId.length > 0
+      && gesture.committedObjectId.length <= 96
+      ? gesture.committedObjectId
+      : null;
+    if (streamId && entry.retiredGestureStreamId === streamId) {
+      this.clearPresenceGesture(
+        entry,
+        committedObjectId ?? entry.gestureCommittedObjectId,
+        streamId,
+      );
+      return;
+    }
+    if (
+      committedObjectId
+      && (
+        this.objects.has(committedObjectId)
+        || (
+          entry.gesturePreview === null
+          && entry.gestureCommittedObjectId === committedObjectId
+        )
+      )
+    ) {
+      this.clearPresenceGesture(entry, committedObjectId, streamId);
+      return;
+    }
+    const color = colorValue(presence.color, DEFAULT_ACCENT);
+    const points = boundedGesturePoints(gesture.points);
+    const style = sanitizeBoardGesturePreviewStyle(gesture.style);
     const pointOffset = Number.isSafeInteger(gesture.pointOffset)
       && (gesture.pointOffset ?? -1) >= 0
       ? gesture.pointOffset!
@@ -5637,9 +5802,10 @@ export class KonvaBoardRenderer implements BoardRenderer {
         if (line) this.presenceWorld.add(line);
         entry.gesturePoints = points.map((point) => ({ ...point }));
         entry.gestureFlatPoints = flattenedPoints(entry.gesturePoints);
-        if (line instanceof Konva.Line) line.points(entry.gestureFlatPoints);
+        if (line instanceof Konva.Line) line.points([...entry.gestureFlatPoints]);
         entry.gestureStreamId = streamId;
         entry.gestureStreamNextOffset = incomingEnd;
+        entry.gestureHeadMotion = null;
       } else if (incomingEnd >= entry.gestureStreamNextOffset) {
         const accumulated = entry.gesturePoints!;
         const flat = entry.gestureFlatPoints!;
@@ -5676,13 +5842,18 @@ export class KonvaBoardRenderer implements BoardRenderer {
           pointsChanged = true;
         }
         if (pointsChanged && entry.gesturePreview instanceof Konva.Line) {
-          entry.gesturePreview.points(entry.gestureFlatPoints!);
+          entry.gestureHeadMotion = this.startRemoteHeadMotion(
+            entry.gesturePreview,
+            entry.gestureFlatPoints!,
+          );
         }
       }
       entry.gesturePreview?.position(offset);
       entry.gestureKind = gesture.kind;
       entry.gestureColor = color;
       entry.gestureStyle = style ?? null;
+      entry.gestureCommittedObjectId = committedObjectId;
+      entry.retiredGestureStreamId = null;
       return;
     }
 
@@ -5694,6 +5865,8 @@ export class KonvaBoardRenderer implements BoardRenderer {
       && equalPoints(entry.gesturePoints, points)
       && equalGesturePreviewStyles(entry.gestureStyle, style)
     ) {
+      entry.gestureCommittedObjectId = committedObjectId;
+      entry.retiredGestureStreamId = null;
       return;
     }
     entry.gesturePreview?.destroy();
@@ -5711,6 +5884,9 @@ export class KonvaBoardRenderer implements BoardRenderer {
     entry.gestureStreamId = null;
     entry.gestureStreamNextOffset = 0;
     entry.gestureStyle = style ?? null;
+    entry.gestureCommittedObjectId = committedObjectId;
+    entry.retiredGestureStreamId = null;
+    entry.gestureHeadMotion = null;
   }
 
   private syncPresenceSelections(
@@ -5762,10 +5938,15 @@ export class KonvaBoardRenderer implements BoardRenderer {
       entry.laser?.visible(false);
       return;
     }
+    if (entry.laser && entry.laserSessionId !== trail.sessionId) {
+      entry.laser.destroy();
+      entry.laser = null;
+    }
     if (!entry.laser) {
       entry.laser = new Konva.Group({ listening: false });
       this.presenceWorld.add(entry.laser);
     }
+    entry.laserSessionId = trail.sessionId;
     const children = entry.laser.getChildren();
     for (let index = 0; index < trail.strokes.length; index += 1) {
       const stroke = trail.strokes[index];
@@ -5786,7 +5967,13 @@ export class KonvaBoardRenderer implements BoardRenderer {
       if (stroke.pointsChanged || line.points().length === 0) {
         const points = flattenedPoints(stroke.points);
         if (points.length === 2) points.push(points[0], points[1]);
-        line.points(points);
+        const canInterpolate = child instanceof Konva.Line
+          && stroke.targetFlatPoints.length >= 2;
+        stroke.targetFlatPoints = points;
+        stroke.headMotion = canInterpolate
+          ? this.startRemoteHeadMotion(line, points)
+          : null;
+        if (!canInterpolate) line.points([...points]);
         stroke.pointsChanged = false;
       }
       applyLaserStrokeAppearance(
@@ -5865,11 +6052,33 @@ export class KonvaBoardRenderer implements BoardRenderer {
         entry.cursor.visible(Boolean(cursorPoint));
         if (cursorPoint) entry.cursor.position(cursorPoint);
       }
+      if (
+        entry.gestureHeadMotion
+        && entry.gesturePreview instanceof Konva.Line
+        && entry.gestureFlatPoints
+      ) {
+        const interpolated = interpolateRemotePoint(
+          entry.gestureHeadMotion,
+          animationTime,
+        );
+        if (interpolated.complete) {
+          entry.gesturePreview.points([...entry.gestureFlatPoints]);
+          entry.gestureHeadMotion = null;
+        } else {
+          const rendered = entry.gesturePreview.points();
+          rendered[rendered.length - 2] = interpolated.point.x;
+          rendered[rendered.length - 1] = interpolated.point.y;
+          animationPending = true;
+        }
+      }
       if (entry.cursorLabel) {
         const labelDeadline = cursorMotion
           ? cursorMotion.lastMovedAt + REMOTE_CURSOR_LABEL_IDLE_MS
           : Number.POSITIVE_INFINITY;
-        const interacting = Boolean(presence.gesturePreview || presence.laser);
+        const interacting = Boolean(
+          entry.gesturePreview?.visible()
+          || presence.laser,
+        );
         const labelVisible = Boolean(
           cursorPoint
           && !interacting
@@ -5887,6 +6096,27 @@ export class KonvaBoardRenderer implements BoardRenderer {
         animationPending = true;
       }
       if (entry.laser) {
+        if (laser) {
+          const children = entry.laser.getChildren();
+          for (let index = 0; index < laser.strokes.length; index += 1) {
+            const stroke = laser.strokes[index];
+            const line = children[index];
+            if (!stroke.headMotion || !(line instanceof Konva.Line)) continue;
+            const interpolated = interpolateRemotePoint(
+              stroke.headMotion,
+              animationTime,
+            );
+            if (interpolated.complete) {
+              line.points([...stroke.targetFlatPoints]);
+              stroke.headMotion = null;
+            } else {
+              const rendered = line.points();
+              rendered[rendered.length - 2] = interpolated.point.x;
+              rendered[rendered.length - 1] = interpolated.point.y;
+              animationPending = true;
+            }
+          }
+        }
         const visible = Boolean(
           laser
           && (laser.active || laser.expiresAt > now)

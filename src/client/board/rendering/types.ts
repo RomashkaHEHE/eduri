@@ -65,6 +65,7 @@ export interface BoardGesturePreview {
   readonly streamId?: string;
   readonly pointOffset?: number;
   readonly offset?: BoardPoint;
+  readonly committedObjectId?: string;
 }
 
 // These cap one rolling awareness packet, not the complete remote gesture.
@@ -309,7 +310,7 @@ export interface BoardRendererCallbacks {
   onCursorChange(point: BoardPoint | null): void;
   onSelectionChange(ids: readonly string[]): void;
   onContextMenu(request: BoardContextMenuRequest): void;
-  onCreateObject(draft: BoardObjectDraft): void;
+  onCreateObject(draft: BoardObjectDraft): string | null | void;
   onPlaceTool(tool: BoardPlacementTool, point: BoardPoint): void;
   onDeleteObjects(ids: readonly string[]): void;
   onTransformStart(): void;

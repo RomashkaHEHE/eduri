@@ -40,9 +40,16 @@ interface FakeAwarenessState {
     readonly kind: string;
     readonly points?: readonly unknown[];
     readonly style?: unknown;
+    readonly streamId?: string;
+    readonly pointOffset?: number;
+    readonly offset?: unknown;
+    readonly committedObjectId?: string;
+    readonly sessionId?: string;
     readonly strokes?: readonly {
       readonly points: readonly unknown[];
       readonly style?: unknown;
+      readonly streamId?: string;
+      readonly pointOffset?: number;
     }[];
   } | null;
 }
@@ -935,6 +942,7 @@ describe("LessonBoard laser awareness", () => {
         gesturePreview: {
           kind: "pen",
           points,
+          committedObjectId: "00000000-0000-4000-8000-000000000300",
           style: {
             stroke: "#d33f49",
             strokeWidth: 14,
@@ -947,6 +955,7 @@ describe("LessonBoard laser awareness", () => {
       gesturePreview: {
         kind: "pen",
         points: points.slice(-256),
+        committedObjectId: "00000000-0000-4000-8000-000000000300",
         style: {
           stroke: "#d33f49",
           strokeWidth: 14,
@@ -964,6 +973,7 @@ describe("LessonBoard laser awareness", () => {
       gesturePreview: {
         kind: "pen",
         points: [points[0], points.at(-1)!],
+        committedObjectId: "00000000-0000-4000-8000-000000000301",
         style: {
           stroke: "rgb(10, 20, 30)",
           strokeWidth: 1_000,
@@ -975,6 +985,7 @@ describe("LessonBoard laser awareness", () => {
     expect(mocks.surfaceProps?.presences?.[0]?.gesturePreview).toEqual({
       kind: "pen",
       points: [points[0], points.at(-1)],
+      committedObjectId: "00000000-0000-4000-8000-000000000301",
       style: {
         stroke: "rgb(10,20,30)",
         strokeWidth: 96,

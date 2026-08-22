@@ -304,7 +304,7 @@ content. There is no visible marker or highlighter tool.
 
 - A browser `contextmenu` event over the Konva canvas opens Eduri's menu and
   suppresses the native browser menu. This normally means a mouse right-click
-  released within the 4 CSS-pixel pan threshold or a pen barrel/right-click
+  released within the 2 CSS-pixel pan threshold or a pen barrel/right-click
   action. A right-button drag which crosses that threshold pans instead and
   suppresses its resulting context-menu event. Toolbar DOM and inline textareas
   retain their native context menus.
@@ -461,7 +461,7 @@ group and all other mutation commands are omitted rather than shown disabled.
 - Primary mouse button, pen contact, or one touch pointer uses the current tool.
 - Middle-button drag always pans.
 - Right-button pointer-down on the Konva canvas starts a click-or-pan candidate,
-  independently of the selected tool and read-only state. Movement below 4 CSS
+  independently of the selected tool and read-only state. Movement below 2 CSS
   pixels leaves the camera unchanged and the eventual release opens the board
   context menu described above. Crossing the threshold activates pan from the
   original down point, switches the cursor to `grabbing`, and suppresses the
@@ -574,8 +574,23 @@ faded object. `Escape` explicitly invokes the same cancellation path.
   packet, while a genuine gap restarts at the next window without drawing a
   false bridge. Remote preview accumulation uses a 131,072-point emergency
   compaction guard. This does not cap or simplify the final durable stroke.
+- The visible remote pen/highlighter head interpolates from its currently
+  rendered point to each newly received endpoint over 56 ms with cubic
+  ease-out. A newer packet retargets from the in-flight visible point instead
+  of snapping or waiting. RAF updates mutate only the final coordinate pair of
+  a renderer-owned Konva array; accumulated stream geometry and awareness
+  offsets remain authoritative and are not rebuilt per animation frame.
 - Pointer-up commits the complete stroke as one object and one undo item.
   Freehand creation intentionally leaves it unselected.
+- Completion uses a two-way preview-to-object handoff rather than clearing the
+  remote preview on pointer-up. The final awareness window names the committed
+  object, while the durable stroke records its source gesture stream. If
+  awareness arrives first, the peer retains the preview until that object is in
+  its local Y.Doc. If the CRDT update arrives first, the source stream removes
+  the preview immediately. The two canvas layers therefore never expose a
+  blank or doubled transition solely because the channels arrived in a
+  different order. The retained final awareness value is bounded to one
+  preview per participant and is replaced by their next gesture.
 - A click with fewer than two stored points creates no object.
 
 ### Temporary laser mode: `Alt` before a stroke
@@ -612,12 +627,21 @@ faded object. `Escape` explicitly invokes the same cancellation path.
   of 1,024 accumulated strokes and 131,072 accumulated preview points, after
   which old strokes or geometry are progressively compacted. These packet and
   receiver guards never shorten a normal local laser session.
+- Each visible remote laser-stroke head uses the same 56 ms RAF interpolation
+  and in-flight retargeting as freehand awareness. Separate retained strokes
+  animate independently. New session IDs still replace the old group
+  immediately, and a real offset gap bypasses interpolation so no false bridge
+  is animated.
 - Releasing `Alt` after pointer-up clears awareness and
   fades every retained stroke together over 300 ms. If the modifier is released
   during an active laser stroke, release is remembered: that stroke remains
   visible and drawable through pointer-up, then the complete session fades.
   Re-pressing `Alt` before that pointer-up does not cancel the remembered
   release or start a durable stroke.
+- A new laser `sessionId` replaces the previous remote Konva group as one
+  reconciliation operation before browser paint. Lines from a fading or
+  completed session are never positionally reused by the new session, so its
+  first one-point packet cannot briefly expose geometry from the prior laser.
 - The awareness clear carries `laserClearMode=fade` for that normal release.
   Explicit cancellation instead carries `laserClearMode=immediate`, so peers
   do not leave a 300 ms ghost after a cancelled gesture. Older senders without
@@ -2117,19 +2141,21 @@ non-Select tool; those nested states can require multiple presses.
   network awareness is rate-limited to roughly one packet per 40 ms.
 - Remote cursor motion interpolates over 72 ms and uses a compact asymmetric
   navigation wedge with a precise hotspot, no stem or tail, and the
-  authenticated participant color. Its fixed-width outline contrasts with the
-  viewer's current board theme, while the idle name label chooses light or dark
+  authenticated participant color. Its outline contrasts with the viewer's
+  current board theme and scales with the pointer, while the idle name label chooses light or dark
   text from the participant color's relative luminance. A jump above 600 screen
-  pixels is shown immediately. The pointer and its label remain a constant
-  screen size at every zoom. The authenticated display-name label is hidden on
+  pixels is shown immediately. The pointer lives in board space: its effective
+  screen scale is `viewerZoom / senderZoom`, so zooming the local camera out
+  shrinks remote pointers together with board content and zooming in enlarges
+  them. The authenticated display-name label remains constant screen size and is hidden on
   first appearance and immediately after every position change; it appears
   only after that cursor has remained stationary for 5 seconds. A remote live
   gesture or laser is already visible as its own preview, adds no redundant
   cursor ornament, and keeps the name hidden. Label timing is renderer-local and never adds an
   awareness field or network update. Camera changes reuse the existing bounded
   awareness viewport: a participant zooming out enlarges only their pointer,
-  while zooming in makes it smaller. Pointer scale is exactly the inverse of
-  sender zoom with no additional cursor-size limits across the supported
+  while zooming in makes it smaller relative to board space. Pointer scale is
+  exactly the inverse of sender zoom with no additional cursor-size limits across the supported
   2%-2000% board zoom range; the name label stays readable at a constant screen
   size.
 - Remote selections outline visible selected objects. Presence selection is

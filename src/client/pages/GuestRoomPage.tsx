@@ -182,7 +182,6 @@ function GuestRoomPageContent() {
       setState({ kind: "active", room: result.room });
       if (kind === "call") {
         setAutoJoinCall(true);
-        return;
       }
       navigate(`/room/${shareId}/${kind}`);
     } catch (reason) {
@@ -278,41 +277,42 @@ function GuestRoomPageContent() {
           {actionError}
         </div>
       )}
-      <section
-        className={`guest-room__content ${callResource ? "has-call" : ""} ${resourceKind === "call" ? "is-call-focused" : ""}`}
-      >
-        <div className="guest-room__stage">
-          {profile && resourceKind === "board" ? (
-            <GuestBoard
-              shareId={shareId}
-              deviceId={deviceId}
-              profile={profile}
-              onTerminal={(kind) => setState({
-                kind: kind === "expired" ? "expired" : "missing",
-              })}
-            />
-          ) : profile && resourceKind === "code" ? (
-            <GuestCodeWorkspace
-              shareId={shareId}
-              resourceId={activeResource.id}
-              deviceId={deviceId}
-              profile={profile}
-              onTerminal={(kind) => setState({
-                kind: kind === "expired" ? "expired" : "missing",
-              })}
-            />
-          ) : null}
-        </div>
-        {profile && callResource && (
-          <aside className="guest-room__call" aria-label="Звонок">
-            <CallWorkspace
-              requestCredentials={requestCredentials}
-              requestParticipants={requestParticipants}
-              profile={profile}
-              updateParticipantProfile={updateParticipantProfile}
-              autoJoin={autoJoinCall}
-            />
-          </aside>
+      <section className="guest-room__content">
+        {resourceKind === "call" ? (
+          profile && (
+            <div className="guest-room__call" aria-label="Звонок">
+              <CallWorkspace
+                requestCredentials={requestCredentials}
+                requestParticipants={requestParticipants}
+                profile={profile}
+                updateParticipantProfile={updateParticipantProfile}
+                autoJoin={autoJoinCall}
+              />
+            </div>
+          )
+        ) : (
+          <div className="guest-room__stage">
+            {profile && resourceKind === "board" ? (
+              <GuestBoard
+                shareId={shareId}
+                deviceId={deviceId}
+                profile={profile}
+                onTerminal={(kind) => setState({
+                  kind: kind === "expired" ? "expired" : "missing",
+                })}
+              />
+            ) : profile && resourceKind === "code" ? (
+              <GuestCodeWorkspace
+                shareId={shareId}
+                resourceId={activeResource.id}
+                deviceId={deviceId}
+                profile={profile}
+                onTerminal={(kind) => setState({
+                  kind: kind === "expired" ? "expired" : "missing",
+                })}
+              />
+            ) : null}
+          </div>
         )}
       </section>
       </main>
@@ -320,7 +320,7 @@ function GuestRoomPageContent() {
         open={leaveOpen}
         title="Покинуть комнату?"
         description={
-          callResource
+          resourceKind === "call"
             ? "Звонок будет отключён. Доска, код и материалы останутся в комнате — вернуться можно по этой ссылке."
             : "Доска, код и материалы останутся в комнате — вернуться можно по этой ссылке."
         }

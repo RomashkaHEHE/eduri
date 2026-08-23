@@ -12,20 +12,15 @@ import {
   ArrowLeft,
   BookOpen,
   Check,
-  ChevronLeft,
-  ChevronRight,
   CircleStop,
   Code2,
   ExternalLink,
   FileText,
   LibraryBig,
-  NotebookPen,
   PencilRuler,
-  Save,
   Search,
   Signal,
   SignalLow,
-  Video,
   X,
 } from "lucide-react";
 import { useNavigate, useParams } from "react-router-dom";
@@ -36,7 +31,6 @@ import { homeForRole, useAuth } from "../auth";
 import { getBoardCatalogEntry } from "../board/catalog";
 import { LessonBoard } from "../board/LessonBoard";
 import { useCriticalDataGuard } from "../board/criticalDataGuard";
-import { LessonCall } from "../components/LessonCall";
 import { Button, EmptyState, ErrorState, IconButton, LoadingBlock, Modal, Notice, formatDateTime, useAsyncData } from "../components/UI";
 import {
   OnlineProfileButton,
@@ -50,7 +44,6 @@ type ConnectionState = "connecting" | "connected" | "offline";
 
 interface LessonSocketState {
   materials?: MaterialDetail[];
-  notes?: string;
 }
 
 interface LessonJoinAck {
@@ -143,13 +136,9 @@ function LessonPageContent() {
   }, [lessonId, resource.setData, user?.id]);
   const [mode, setMode] = useState<WorkspaceMode>("board");
   const [codeActivated, setCodeActivated] = useState(false);
-  const [rightTab, setRightTab] = useState<"plan" | "notes">("plan");
-  const [dockOpen, setDockOpen] = useState(true);
   const [materialSearch, setMaterialSearch] = useState("");
   const [planMaterials, setPlanMaterials] = useState<MaterialDetail[]>([]);
   const [materials, setMaterials] = useState<MaterialDetail[]>([]);
-  const [notes, setNotes] = useState("");
-  const [notesState, setNotesState] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [boardDataAtRisk, setBoardDataAtRisk] = useState(false);
   const [endOpen, setEndOpen] = useState(false);
@@ -168,7 +157,6 @@ function LessonPageContent() {
     if (!resource.data) return;
     setMaterials(resource.data.materials);
     setPlanMaterials(resource.data.lesson.materials ?? resource.data.materials.filter((material) => material.progressLessonId === resource.data!.lesson.id));
-    setNotes(resource.data.lesson.notes ?? "");
   }, [resource.data]);
 
   useEffect(() => {
@@ -200,13 +188,8 @@ function LessonPageContent() {
       if (!payload.status || !["scheduled", "active", "completed", "cancelled"].includes(payload.status)) return;
       updateLessonStatus(payload.status);
     });
-    socket.on("lesson:note", (payload: { lessonId?: string; notes: string }) => {
-      if (payload.lessonId && payload.lessonId !== lessonId) return;
-      setNotes(payload.notes);
-    });
     socket.on("lesson:state", (payload: LessonSocketState) => {
       if (payload.materials) setPlanMaterials(payload.materials);
-      if (typeof payload.notes === "string") setNotes(payload.notes);
     });
     return () => {
       socket.emit("lesson:leave", { lessonId });
@@ -229,26 +212,6 @@ function LessonPageContent() {
       setPlanMaterials(previous);
       setActionError(reason instanceof Error ? reason.message : "Не удалось добавить материал в план");
     }
-  };
-
-  const setCovered = async (material: MaterialDetail) => {
-    if (!resource.data) return;
-    setActionError(null);
-    try {
-      const progress = await api.materials.setProgress(material.id, resource.data.lesson.studentId, "covered", lessonId);
-      const merge = (item: MaterialDetail): MaterialDetail => item.id === progress.materialId
-        ? { ...item, progressStatus: progress.progressStatus, progressLessonId: progress.lessonId ?? lessonId }
-        : item;
-      setMaterials((current) => current.map(merge));
-      setPlanMaterials((current) => current.map(merge));
-      socketRef.current?.emit("lesson:material", { lessonId, materials: planMaterials.map(merge) });
-    } catch (reason) { setActionError(reason instanceof Error ? reason.message : "Не удалось обновить прогресс"); }
-  };
-
-  const saveNotes = async () => {
-    setNotesState("saving");
-    try { await api.lessons.saveNotes(lessonId, notes); socketRef.current?.emit("lesson:note", { lessonId, notes }); setNotesState("saved"); }
-    catch { setNotesState("error"); }
   };
 
   const finishLesson = async () => {
@@ -283,7 +246,7 @@ function LessonPageContent() {
   const { lesson } = resource.data;
 
   return (
-    <main className={`lesson-shell ${dockOpen ? "lesson-shell--dock" : ""}`}>
+    <main className="lesson-shell">
       <header className="lesson-header">
         <IconButton label="Выйти из урока" onClick={leaveLesson}><ArrowLeft size={20} /></IconButton>
         <div className="lesson-header__title"><strong>{lesson.title}</strong><span>{lesson.studentName} · {formatDateTime(lesson.scheduledAt, { hour: "2-digit", minute: "2-digit" })}</span></div>
@@ -291,7 +254,6 @@ function LessonPageContent() {
         <time className="lesson-timer">{elapsed}</time>
         <OnlineProfileButton className="lesson-header__profile" />
         <ThemeToggle className="lesson-header__theme" />
-        <IconButton label={dockOpen ? "Скрыть звонок" : "Показать звонок"} onClick={() => setDockOpen((value) => !value)}>{dockOpen ? <ChevronRight size={19} /> : <Video size={19} />}</IconButton>
         {user.role === "tutor" ? <Button variant="danger" size="small" icon={<CircleStop size={17} />} onClick={() => setEndOpen(true)}>Завершить</Button> : <Button variant="secondary" size="small" icon={<X size={17} />} onClick={leaveLesson}>Выйти</Button>}
       </header>
 
@@ -330,20 +292,7 @@ function LessonPageContent() {
         </div>
       </section>
 
-      <aside className={`lesson-dock ${dockOpen ? "lesson-dock--open" : ""}`}>
-        {profile && (
-          <LessonCall
-            lessonId={lesson.id}
-            status={lesson.status}
-            profile={profile}
-          />
-        )}
-        <div className="dock-tabs" role="tablist"><button role="tab" aria-selected={rightTab === "plan"} className={rightTab === "plan" ? "is-active" : ""} onClick={() => setRightTab("plan")}><BookOpen size={17} /> План <span>{planMaterials.length}</span></button><button role="tab" aria-selected={rightTab === "notes"} className={rightTab === "notes" ? "is-active" : ""} onClick={() => setRightTab("notes")}><NotebookPen size={17} /> Заметки</button></div>
-        {rightTab === "plan" ? <div className="lesson-plan"><div className="lesson-plan__head"><strong>На занятии</strong><button onClick={() => setMode("materials")}>Добавить</button></div>{planMaterials.length ? <div className="lesson-plan__list">{planMaterials.map((material, index) => <article key={material.id}><span className="plan-index">{index + 1}</span><div><strong>{material.title}</strong><span className={`progress-tag progress-tag--${material.progressStatus ?? "assigned"}`}>{progressLabel(material.progressStatus)}</span></div>{user.role === "tutor" && material.progressStatus !== "covered" && material.progressStatus !== "completed" && <IconButton label="Отметить разобранным" onClick={() => void setCovered(material)}><Check size={17} /></IconButton>}</article>)}</div> : <EmptyState title="План пока пуст" description="Добавьте материалы из библиотеки." action={<Button variant="secondary" size="small" onClick={() => setMode("materials")}>Открыть материалы</Button>} />}</div> : <div className="lesson-notes"><div className="lesson-notes__head"><strong>{user.role === "tutor" ? "Заметки репетитора" : "Конспект урока"}</strong>{user.role === "tutor" && <span className={`save-state save-state--${notesState}`}>{notesState === "saving" ? "Сохраняем" : notesState === "saved" ? "Сохранено" : notesState === "error" ? "Ошибка" : ""}</span>}</div><textarea value={notes} onChange={(event) => { setNotes(event.target.value); setNotesState("idle"); }} readOnly={user.role !== "tutor"} placeholder="Краткие итоги, ошибки и план следующего занятия" />{user.role === "tutor" && <Button variant="secondary" size="small" icon={<Save size={16} />} disabled={notesState === "saving"} onClick={() => void saveNotes()}>Сохранить</Button>}</div>}
-      </aside>
-      {!dockOpen && <button className="dock-peek" onClick={() => setDockOpen(true)} aria-label="Показать видеозвонок"><ChevronLeft size={18} /><Video size={18} /></button>}
-
-      <Modal open={endOpen} title="Завершить занятие?" description="Доска, код и материалы останутся в истории урока." onClose={() => setEndOpen(false)} width="small"><div className="form-stack"><div className="finish-summary"><span><Check size={18} /> Материалов в плане: {planMaterials.length}</span><span><NotebookPen size={18} /> Заметки {notes.trim() ? "заполнены" : "пусты"}</span></div><div className="modal-actions"><Button variant="secondary" onClick={() => setEndOpen(false)}>Продолжить урок</Button><Button variant="danger" disabled={ending} onClick={() => void finishLesson()}>{ending ? "Завершаем…" : "Завершить"}</Button></div></div></Modal>
+      <Modal open={endOpen} title="Завершить занятие?" description="Доска, код и материалы останутся в истории урока." onClose={() => setEndOpen(false)} width="small"><div className="form-stack"><div className="finish-summary"><span><Check size={18} /> Материалов в плане: {planMaterials.length}</span></div><div className="modal-actions"><Button variant="secondary" onClick={() => setEndOpen(false)}>Продолжить урок</Button><Button variant="danger" disabled={ending} onClick={() => void finishLesson()}>{ending ? "Завершаем…" : "Завершить"}</Button></div></div></Modal>
     </main>
   );
 }

@@ -560,8 +560,12 @@ image до smoke tests. Никогда не используйте `docker compo
 - с чистым `eduri-online-profile-v1` открыть из двух браузеров guest room и
   authenticated lesson: обязательный Profile появляется только после успешного
   разрешения комнаты/ресурса, находится перед Theme, блокирует монтаж
-  Board/Code/Call до сохранения и не появляется на solo, loading, missing,
+  Board/Code и guest Call до сохранения и не появляется на solo, loading, missing,
   expired, error, empty-room или unknown-resource экранах;
+- в guest room с Board, Code и Call открыть по очереди все три маршрута: Board и
+  Code занимают всю сцену и не монтируют media workspace, а Call монтируется
+  только на `/call`; в authenticated lesson отсутствуют Call, план/заметки,
+  кнопка их показа и резервная боковая колонка;
 - изменить Display Name и color во время активных Board, Code, terminal и Call:
   второй браузер получает ту же server-authoritative identity без нового Board
   ticket/AUTH/READY, Code reconnect/Monaco remount, остановки run/terminal host,

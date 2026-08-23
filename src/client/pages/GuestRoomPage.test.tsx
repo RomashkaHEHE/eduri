@@ -181,7 +181,7 @@ describe("GuestRoomPage", () => {
     expect(mocks.boardProps).toMatchObject({
       profile: { displayName: "Гость", color: "#2563eb" },
     });
-    expect(mocks.callMounts).toBe(1);
+    expect(mocks.callMounts).toBe(0);
     expect(document.body.querySelector(".modal__header .icon-button")).not.toBeNull();
 
     await act(async () => {
@@ -195,7 +195,7 @@ describe("GuestRoomPage", () => {
     expect(mocks.boardProps).toMatchObject({
       profile: { displayName: "Гость", color: "#2563eb" },
     });
-    expect(mocks.callMounts).toBe(1);
+    expect(mocks.callMounts).toBe(0);
   });
 
   it("does not request a profile for an expired room link", async () => {
@@ -257,7 +257,7 @@ describe("GuestRoomPage", () => {
 
     const dialog = document.body.querySelector('[role="dialog"]');
     expect(dialog?.textContent).toContain("Покинуть комнату?");
-    expect(dialog?.textContent).toContain("Звонок будет отключён.");
+    expect(dialog?.textContent).not.toContain("Звонок будет отключён.");
     expect(mocks.navigate).not.toHaveBeenCalled();
 
     const leaveButton = Array.from(
@@ -269,6 +269,20 @@ describe("GuestRoomPage", () => {
     });
 
     expect(mocks.navigate).toHaveBeenCalledWith("/");
+  });
+
+  it("warns about disconnecting only when leaving the Call route", async () => {
+    mocks.params = { shareId: "share-id", resourceKind: "call" };
+    mocks.get.mockResolvedValue(room(["board", "call"]));
+    await renderPage();
+
+    await act(async () => {
+      container?.querySelector<HTMLButtonElement>(".public-workspace__back")?.click();
+      await Promise.resolve();
+    });
+
+    expect(document.body.querySelector('[role="dialog"]')?.textContent)
+      .toContain("Звонок будет отключён.");
   });
 
   it("keeps the user in the room when leaving is cancelled", async () => {
@@ -293,11 +307,12 @@ describe("GuestRoomPage", () => {
     expect(mocks.navigate).not.toHaveBeenCalled();
   });
 
-  it("keeps the same call mounted while Board and Code switch", async () => {
+  it("mounts Call only on its own route and never beside Board or Code", async () => {
     mocks.get.mockResolvedValue(room(["board", "code", "call"]));
     await renderPage();
     expect(container?.textContent).toContain("Board");
-    expect(mocks.callMounts).toBe(1);
+    expect(container?.querySelector(".guest-room__call")).toBeNull();
+    expect(mocks.callMounts).toBe(0);
 
     mocks.params = { shareId: "share-id", resourceKind: "code" };
     await renderPage();
@@ -307,16 +322,20 @@ describe("GuestRoomPage", () => {
       resourceId: "code-1",
       deviceId: "device-id-000000000000000000000000",
     });
-    expect(mocks.callMounts).toBe(1);
+    expect(container?.querySelector(".guest-room__call")).toBeNull();
+    expect(mocks.callMounts).toBe(0);
     expect(mocks.callUnmounts).toBe(0);
 
     mocks.params = { shareId: "share-id", resourceKind: "call" };
     await renderPage();
+    expect(container?.querySelector(".guest-room__stage")).toBeNull();
+    expect(container?.querySelector(".guest-room__call")).not.toBeNull();
     expect(mocks.callMounts).toBe(1);
     expect(mocks.callUnmounts).toBe(0);
   });
 
   it("requests guest call credentials with the selected profile", async () => {
+    mocks.params = { shareId: "share-id", resourceKind: "call" };
     mocks.get.mockResolvedValue(room(["board", "call"]));
     mocks.callToken.mockResolvedValue({
       url: "wss://livekit.eduri.test",
@@ -361,7 +380,7 @@ describe("GuestRoomPage", () => {
     );
   });
 
-  it("adds a linked call without leaving the active Board and auto-joins", async () => {
+  it("navigates to a newly linked Call and auto-joins there", async () => {
     mocks.get.mockResolvedValue(room(["board"]));
     mocks.ensureResource.mockResolvedValue({
       room: room(["board", "call"]),
@@ -376,8 +395,12 @@ describe("GuestRoomPage", () => {
     });
     expect(mocks.ensureResource).toHaveBeenCalledWith("share-id", "call");
     expect(container?.textContent).toContain("Board");
+    expect(mocks.navigate).toHaveBeenCalledWith("/room/share-id/call");
+    expect(mocks.callProps).toBeUndefined();
+
+    mocks.params = { shareId: "share-id", resourceKind: "call" };
+    await renderPage();
     expect(mocks.callProps?.autoJoin).toBe(true);
-    expect(mocks.navigate).not.toHaveBeenCalled();
   });
 
   it("navigates to a newly linked Code resource", async () => {

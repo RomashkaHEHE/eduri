@@ -179,7 +179,6 @@ describe("site theme CSS contract", () => {
       ".student-material-card:hover { border-color: var(--border-hover); box-shadow: var(--shadow-card-hover); }",
     );
     expect(siteStyles).toContain("box-shadow: var(--shadow-side-panel)");
-    expect(siteStyles).toContain("box-shadow: var(--shadow-dock)");
     expect(siteStyles).toContain("color: var(--sidebar-text); background: var(--sidebar)");
     expect(siteStyles).toContain(
       ".room-resource-gate span { color: var(--muted); font-size: 12px; }",

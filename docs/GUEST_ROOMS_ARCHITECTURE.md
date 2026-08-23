@@ -21,6 +21,12 @@ The public routes are:
 - `/room/:shareId/board`, `/code`, and `/call` - independently addressable
   room resources.
 
+Each resource owns the whole room stage. The Call media workspace mounts only
+on `/room/:shareId/call`; it is never kept alive beside Board or Code and must
+not reduce either tool's working area. Creating a Call from another room
+resource navigates to the Call route before joining. Returning to Board or Code
+unmounts the media workspace.
+
 Creating a room from a solo tool must promote the current resource, including
 its current durable state, rather than create an unrelated empty resource.
 Creating a Board or Code resource from Call follows the same rule in reverse.

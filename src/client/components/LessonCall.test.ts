@@ -342,7 +342,7 @@ function installCallThemeStyles() {
     "utf8",
   );
   const start = source.indexOf("/* Call / LiveKit colors follow");
-  const end = source.indexOf(".dock-tabs", start);
+  const end = source.indexOf(".finish-summary", start);
   if (start < 0 || end < 0) throw new Error("Call theme CSS block is unavailable");
   const style = document.createElement("style");
   style.dataset.lessonCallThemeTest = "true";
@@ -503,11 +503,11 @@ describe("LessonCall", () => {
       ".guest-room { position: relative; display: grid; grid-template-rows: 52px minmax(0, 1fr); color: var(--ink); background: var(--background); }",
     );
     expect(styles).toContain(
-      ".guest-room__call { color: var(--call-shell-text); border-left: 1px solid var(--call-shell-border); background: var(--call-shell-bg); }",
+      ".guest-room__call { color: var(--call-shell-text); background: var(--call-shell-bg); }",
     );
     const callStyles = styles.slice(
       styles.indexOf("/* Call / LiveKit colors follow"),
-      styles.indexOf(".dock-tabs"),
+      styles.indexOf(".finish-summary"),
     );
     const hardCodedCallColors = [...callStyles.matchAll(
       /(?:^|[;{]\s*)(?:color|background|border(?:-color)?|box-shadow|text-shadow)\s*:\s*(?:#[\da-f]{3,8}\b|rgba?\(|white\b|black\b)/gimu,

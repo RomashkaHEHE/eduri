@@ -82,10 +82,6 @@ vi.mock("../board/LessonBoard", () => ({
     createElement("div", { "data-testid": "board-v2-probe" }, lesson.title),
 }));
 
-vi.mock("../components/LessonCall", () => ({
-  LessonCall: () => createElement("div", null, "call"),
-}));
-
 vi.mock("../components/LessonCodeWorkspace", () => ({
   LessonCodeWorkspace: (props: CodeWorkspaceProps) => {
     codeWorkspaceProps = props;
@@ -164,7 +160,9 @@ describe("LessonPage local-first bootstrap", () => {
 
     expect(document.body.textContent).toContain("Display Name");
     expect(container?.querySelector('[data-testid="board-v2-probe"]')).not.toBeNull();
-    expect(container?.textContent).toContain("call");
+    expect(container?.querySelector(".lesson-dock")).toBeNull();
+    expect(container?.querySelector('[aria-label="Скрыть звонок"]')).toBeNull();
+    expect(container?.querySelector('[aria-label="Показать звонок"]')).toBeNull();
 
     await act(async () => {
       document.body.querySelector<HTMLButtonElement>(
@@ -173,7 +171,7 @@ describe("LessonPage local-first bootstrap", () => {
     });
 
     expect(document.body.querySelector('[role="dialog"]')).toBeNull();
-    expect(container?.textContent).toContain("call");
+    expect(container?.querySelector(".lesson-shell")?.className).toBe("lesson-shell");
   });
 
   it("does not request a profile when the lesson cannot be opened", async () => {

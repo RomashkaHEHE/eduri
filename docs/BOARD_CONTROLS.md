@@ -2629,14 +2629,23 @@ The panel reports:
 
 Displayed byte units use binary multiples of 1024.
 
-## Lesson call controls
+## Call controls
+
+- Call is currently a standalone guest-room resource. It mounts only on
+  `/room/:shareId/call` and occupies the whole room stage. Guest Board and Code
+  never mount a Call frame beside their workspace, even when the room contains
+  a Call resource. Creating a Call navigates to that route and then auto-joins.
+- The authenticated lesson workspace currently has no embedded Call, plan, or
+  notes dock. Board and Code always receive the full area to the right of the
+  mode rail. There is no hidden dock column, Call toggle, or reopen handle;
+  these surfaces remain unavailable until their replacement is designed.
 
 - Local `npm run dev` starts an isolated pinned LiveKit server and configures
   the development API to use it. Local calls retain the same application room
   authorization, two-participant limit, explicit capture controls, and muted
   entry behavior as production; no production media endpoint or credential is
   used.
-- Opening or joining a lesson call does not request capture permission and does
+- Opening or joining a call does not request capture permission and does
   not publish a microphone or camera track. Both controls start disabled on
   every entry and re-entry; each is enabled only by its own explicit button.
 - Device settings list microphone, speaker, and camera choices. Opening the

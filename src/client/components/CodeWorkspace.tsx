@@ -661,6 +661,7 @@ export function CodeWorkspace({
     automaticLayout: true,
     minimap: { enabled: false },
     fontSize: 14,
+    fontFamily: '"IBM Plex Mono", Consolas, monospace',
     lineHeight: 22,
     tabSize: 4,
     insertSpaces: true,
@@ -1969,6 +1970,9 @@ export function CodeWorkspace({
     destroyMainEditorBinding();
     editorRef.current = editor;
     monacoRef.current = monaco;
+    void document.fonts?.load('14px "IBM Plex Mono"', "AaБб").then(() => {
+      if (editorRef.current === editor) monaco.editor.remeasureFonts();
+    }).catch(() => { /* Keep the monospace fallback if font loading fails. */ });
     monaco.editor.setTheme(editorThemeRef.current);
     editorSubscriptionsRef.current = [
       editor.onDidChangeCursorSelection(publishMainEditorAwareness),

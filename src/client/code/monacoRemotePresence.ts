@@ -216,7 +216,7 @@ class RemoteCaretWidget implements Monaco.editor.IContentWidget {
     Object.assign(this.label.style, {
       borderRadius: "4px 4px 4px 0",
       display: "block",
-      fontFamily: "Inter, system-ui, sans-serif",
+      fontFamily: "IBM Plex Sans Variable, system-ui, sans-serif",
       fontSize: "11px",
       fontWeight: "600",
       left: "-1px",

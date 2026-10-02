@@ -299,7 +299,7 @@ function PresenceCaret({
           backgroundColor: color,
           borderRadius: "3px 3px 3px 0",
           color: readableTextColor(color),
-          fontFamily: "Inter, system-ui, sans-serif",
+          fontFamily: "IBM Plex Sans Variable, system-ui, sans-serif",
           fontSize: 9,
           fontStyle: "normal",
           fontWeight: 600,

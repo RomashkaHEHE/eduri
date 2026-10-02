@@ -332,7 +332,7 @@ export function SharedTerminal({
           && snapshotRef.current.inputOwnerParticipantId
             === localParticipantIdRef.current)
       ),
-      fontFamily: '"Cascadia Code", Consolas, monospace',
+      fontFamily: '"IBM Plex Mono", Consolas, monospace',
       fontSize: 12,
       lineHeight: 1.25,
       scrollback: 5_000,
@@ -355,6 +355,15 @@ export function SharedTerminal({
     terminal.open(host);
     fit.fit();
     terminalRef.current = terminal;
+    void document.fonts?.load('12px "IBM Plex Mono"', "AaБб").then(() => {
+      if (terminalRef.current === terminal) {
+        // Changing the option forces xterm to re-measure; assigning the same
+        // family alone is ignored by its options service.
+        terminal.options.fontFamily = "monospace";
+        terminal.options.fontFamily = '"IBM Plex Mono", Consolas, monospace';
+        fit.fit();
+      }
+    }).catch(() => { /* Keep the monospace fallback if font loading fails. */ });
     const caretOverlay = host.ownerDocument.createElement("span");
     caretOverlay.dataset.eduriTerminalRemoteCaret = "true";
     caretOverlay.dataset.hovered = "false";

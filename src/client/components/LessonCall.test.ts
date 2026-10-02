@@ -597,7 +597,9 @@ describe("LessonCall", () => {
     const remoteTile = container?.querySelector('[data-participant-identity="remote-user"]');
     expect(localTile?.querySelector('.call-track-label > span')?.textContent).toBe("Same Name");
     expect(remoteTile?.querySelector('.call-track-label > span')?.textContent).toBe("Same Name");
-    expect(localTile?.querySelector('.call-self-badge')?.textContent).toBe("Вы");
+    expect(localTile?.querySelector('.call-self-badge')?.textContent).toBe("");
+    expect(localTile?.querySelector('.call-self-badge svg')).not.toBeNull();
+    expect(localTile?.querySelector('.call-self-badge')?.getAttribute('aria-label')).toBe("Ваша карточка");
     expect(remoteTile?.querySelector('.call-self-badge')).toBeNull();
     expect(localTile?.getAttribute("aria-label")).toContain("Same Name (вы):");
     expect(remoteTile?.getAttribute("aria-label")).toContain("Same Name:");
@@ -612,7 +614,7 @@ describe("LessonCall", () => {
     });
     expect(localTile?.querySelector('.call-track-label > span')?.textContent).toBe("New Name");
     expect(remoteTile?.querySelector('.call-track-label > span')?.textContent).toBe("Same Name");
-    expect(localTile?.querySelector('.call-self-badge')?.textContent).toBe("Вы");
+    expect(localTile?.querySelector('.call-self-badge svg')).not.toBeNull();
     if (!sid) expect(localTile?.querySelector('.call-participant-idle > span')?.textContent).toBe("NN");
     expect(mocks.callToken).toHaveBeenCalledTimes(1);
   });
@@ -685,8 +687,9 @@ describe("LessonCall", () => {
     expect(grid?.classList.contains("is-media-empty")).toBe(true);
     expect(tile?.getAttribute("role")).toBe("group");
     expect(tile?.getAttribute("tabindex")).toBeNull();
-    expect(tile?.textContent).toContain("Вы");
-    expect(tile?.textContent).toContain("Без видео");
+    expect(tile?.textContent).toContain("Call user");
+    expect(tile?.querySelector('.call-self-badge svg')).not.toBeNull();
+    expect(tile?.textContent).not.toContain("Без видео");
     expect(tile?.classList.contains("is-joining")).toBe(false);
 
     await act(async () => tile?.click());
@@ -934,14 +937,26 @@ describe("LessonCall", () => {
 
     const dialog = document.querySelector('[role="dialog"][aria-modal="true"]');
     expect(dialog?.textContent).toContain("Звук");
-    expect(dialog?.textContent).toContain("Камера");
-    expect(dialog?.textContent).toContain("Демонстрация экрана");
+    expect(dialog?.textContent).toContain("Видео");
+    expect(dialog?.textContent).toContain("Экран");
     expect(dialog?.textContent).toContain("Порог активации голоса");
     expect(dialog?.textContent).toContain("Проверить микрофон и звук");
+    expect(dialog?.querySelectorAll('[role="tabpanel"]')).toHaveLength(1);
+    expect(dialog?.querySelector('select[aria-label="Камера"]')).toBeNull();
+    await changeRange("Порог активации голоса", "-44");
+
+    await clickButton("Видео");
+    expect(dialog?.querySelector('select[aria-label="Камера"]')).not.toBeNull();
+    expect(dialog?.querySelector('select[aria-label="Микрофон"]')).toBeNull();
+    await clickButton("Экран");
 
     await selectOption("Разрешение демонстрации", "720p");
     await selectOption("Частота кадров демонстрации", "15");
-    await changeRange("Порог активации голоса", "-44");
+    await clickButton("Звук");
+    expect(document.querySelector<HTMLInputElement>('input[aria-label="Порог активации голоса"]')?.value).toBe("-44");
+    expect(mocks.callToken).toHaveBeenCalledTimes(1);
+    expect(mocks.localParticipant.setMicrophoneEnabled).not.toHaveBeenCalled();
+    expect(mocks.localParticipant.setCameraEnabled).not.toHaveBeenCalled();
 
     expect(JSON.parse(window.localStorage.getItem("eduri-call-devices-v1") ?? "null"))
       .toMatchObject({
@@ -1001,8 +1016,35 @@ describe("LessonCall", () => {
     expect(HTMLMediaElement.prototype.setSinkId).toHaveBeenCalledWith("test-headphones");
     expect(document.querySelectorAll(".call-microphone-test__visualizer span")).toHaveLength(12);
 
-    await clickButtonWithText("Остановить проверку");
+    await clickButton("Видео");
     expect(stopTrack).toHaveBeenCalledOnce();
+    expect(document.querySelector('.call-microphone-test')).toBeNull();
+    await clickButton("Звук");
+    expect(getUserMedia).toHaveBeenCalledOnce();
+    expect(document.body.textContent).toContain("Проверить микрофон и звук");
+  });
+
+  it("supports keyboard navigation and focus across settings tabs", async () => {
+    await joinActiveCall();
+    await clickButton("Открыть настройки звонка");
+    // Let the modal finish its initial deferred focus before keyboard navigation.
+    await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 0)); });
+    const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>('.call-settings [role="tab"]'));
+    const key = async (index: number, key: string, expected: number) => {
+      await act(async () => {
+        tabs[index].focus();
+        tabs[index].dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+      });
+      expect(document.activeElement).toBe(tabs[expected]);
+      expect(tabs[expected].getAttribute("aria-selected")).toBe("true");
+      expect(tabs[expected].tabIndex).toBe(0);
+      expect(document.querySelector('[role="tabpanel"]')?.id).toBe(tabs[expected].getAttribute('aria-controls'));
+    };
+    await key(0, "ArrowRight", 1);
+    await key(1, "End", 2);
+    await key(2, "ArrowRight", 0);
+    await key(0, "ArrowLeft", 2);
+    await key(2, "Home", 0);
   });
 
   it("installs a voice-activation processor when the microphone starts", async () => {

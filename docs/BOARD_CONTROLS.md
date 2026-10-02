@@ -2732,8 +2732,13 @@ Displayed byte units use binary multiples of 1024.
 
 ## Call controls
 
+- Call Settings uses `Звук`, `Видео`, and `Экран` tabs, opening on `Звук`.
+  Only the selected panel is mounted. Left/Right arrows cycle tabs; Home/End
+  select the first/last tab and move focus. Switching tabs preserves preferences
+  without changing published media or reconnecting. Leaving `Звук` stops and
+  releases any local microphone test.
 - Call action buttons are 54px circles with 26px icons; microphone, camera,
-  and screen-share source arrows use 28px circles and 16px icons. The 76px
+  and screen-share source arrows use 24px circles and 14px icons. The 76px
   footer reserves room below the stage, including fullscreen. Right-clicking
   a media action or its arrow suppresses the browser context menu and opens
   the same source menu as the arrow. Repeated right-click keeps it open; it
@@ -2773,12 +2778,16 @@ Displayed byte units use binary multiples of 1024.
   shows a microphone badge in its top-right corner: Mic when enabled, Mic Off
   when muted or unpublished. Local and remote mute/unmute updates change the
   badge live, independently of whether the participant is currently speaking.
+- Compact participant cards omit the visible `Без видео` caption; the avatar,
+  name, and media indicators remain. Joining cards retain their joining status.
 - The local participant uses the same published display name and name-derived
-  initials as other participants, with a separate top-left `Вы` badge on each
+  initials as other participants, with a separate top-left circular person/check
+  icon (no visible text) on each
   of their camera, screen-share, or no-video tiles. The badge is based on the
   local LiveKit identity, so matching names/colors cannot mark a remote tile as
   local. Accessible tile and microphone labels also include `(вы)`. Published
-  name changes update the displayed name and initials live.
+  name changes update the displayed name and initials live. The icon has the
+  tooltip and accessible label `Ваша карточка`.
 - A remote participant announced by LiveKit whose connection is not yet active
   appears as a dashed, compact identity card with a spinner and `Присоединяется
   к звонку`. It cannot be focused or open the volume menu and shows no microphone
@@ -2810,6 +2819,10 @@ Displayed byte units use binary multiples of 1024.
 
 ## Theme and responsive behavior
 
+- Site chrome uses locally bundled IBM Plex Sans (including Cyrillic and
+  variable weights); code editor and terminal use IBM Plex Mono. These assets
+  are included in the offline shell. Stored board text font choices remain
+  unchanged; interface font changes do not rewrite collaborative documents.
 - Initial theme uses the strict saved `eduri-theme-v1` local value, otherwise a
   valid legacy `eduri-board-theme` value is migrated, otherwise the OS
   preference is used. A small inline bootstrap inside the same versioned HTML

@@ -80,7 +80,7 @@ is active.
 The lesson and guest Call routes share one web media adapter. Microphone,
 camera, and screen-share controls are large circles; each media circle has a
 smaller overlapping circular source trigger instead of forming a split pill.
-Action circles are 54px with 26px icons; source triggers are 28px with 16px
+Action circles are 54px with 26px icons; source triggers are 24px with 14px
 arrows. The stage reserves a 76px footer in normal and fullscreen presentation.
 Right-clicking a media circle or its source trigger opens the same available
 source menu and suppresses the browser context menu without toggling capture.
@@ -88,8 +88,12 @@ Repeated right-click leaves the menu open. Busy/unavailable source controls
 remain unavailable; menu options keep their normal context-menu behavior.
 The red hang-up action is independently anchored at the footer's bottom-right,
 including fullscreen; narrow screens reserve its space beside the other controls.
-The Settings action opens a full modal with separate Audio, Camera, and Screen
-Share sections and only currently implemented controls. Audio exposes input
+The Settings action opens a modal with Audio (`Звук`), Video (`Видео`), and
+Screen (`Экран`) tabs and only currently implemented controls. Audio is selected
+on opening. Only the selected panel is mounted; leaving Audio stops any local
+microphone test and releases its audio graph. Arrow Left/Right, Home, and End
+move focus and activate tabs; switching tabs preserves device/quality preferences
+without reconnecting or toggling published media. Audio exposes input
 and, where `setSinkId` is supported, output selection; camera exposes video
 input selection. The first camera activation on a browser profile must open the
 camera menu and wait for an explicit choice before publishing. That choice,
@@ -150,7 +154,8 @@ Mic for enabled, Mic Off for muted or unpublished. This applies to camera,
 screen-share, and compact no-video tiles, updates live for local and remote
 participants, and does not depend on voice activity or received audio level.
 The local participant uses the same published name and initials as a remote
-participant, with a separate top-left `Вы` badge on each of their tiles. Local
+participant, with a separate top-left circular person/check icon on each of
+their tiles, without visible text and with a `Ваша карточка` tooltip. Local
 identity, not matching names or colors, controls this marker. Accessible labels
 include `(вы)`, and published participant name changes update the tile live.
 Remote participants announced by LiveKit before their connection becomes active

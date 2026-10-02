@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useRef,
   useState,
 } from "react";
@@ -41,6 +42,7 @@ import {
   PhoneOff,
   RotateCcw,
   Settings,
+  UserRoundCheck,
   Video,
   VideoOff,
   Wifi,
@@ -736,12 +738,16 @@ function CallTrackTile({
       }}
     >
       {!joining && <ParticipantTile trackRef={trackRef} className="call-participant" />}
-      {isSelf && <span className="call-self-badge" aria-hidden="true">Вы</span>}
+      {isSelf && (
+        <span className="call-self-badge" role="img" aria-label="Ваша карточка" title="Ваша карточка">
+          <UserRoundCheck size={16} aria-hidden="true" />
+        </span>
+      )}
       {!mediaActive && (
         <div className="call-participant-idle" aria-hidden="true">
           <span>{participantInitials(name)}</span>
           <strong>{name}</strong>
-          <small>{joining ? <><LoaderCircle className="spin" size={12} /> Присоединяется к звонку</> : "Без видео"}</small>
+          {joining && <small><LoaderCircle className="spin" size={12} /> Присоединяется к звонку</small>}
         </div>
       )}
       <div className="call-track-label" aria-hidden="true">
@@ -1052,6 +1058,13 @@ function CallSettings({
   onPreferencesChange: (patch: Partial<CallDevicePreferences>) => void;
   onError: (message: string | null) => void;
 }) {
+  const [tab, setTab] = useState<"audio" | "camera" | "screen">("audio");
+  const tabId = useId();
+  const tabs = [
+    { key: "audio", label: "Звук", Icon: AudioLines },
+    { key: "camera", label: "Видео", Icon: Video },
+    { key: "screen", label: "Экран", Icon: MonitorUp },
+  ] as const;
   const rows = callDeviceRows(preferences);
   const microphone = rows.find((row) => row.kind === "audioinput")!;
   const output = rows.find((row) => row.kind === "audiooutput")!;
@@ -1059,7 +1072,33 @@ function CallSettings({
 
   return (
     <div className="call-settings">
-      <section className="call-settings-section" aria-labelledby="call-settings-audio-title">
+      <div className="call-settings-tabs" role="tablist" aria-label="Разделы настроек звонка">
+        {tabs.map(({ key, label, Icon }, index) => (
+          <button
+            key={key}
+            type="button"
+            role="tab"
+            id={`${tabId}-${key}-tab`}
+            aria-label={label}
+            aria-selected={tab === key}
+            aria-controls={`${tabId}-${key}-panel`}
+            tabIndex={tab === key ? 0 : -1}
+            onClick={() => setTab(key)}
+            onKeyDown={(event) => {
+              const next = event.key === "ArrowRight" ? (index + 1) % tabs.length
+                : event.key === "ArrowLeft" ? (index + tabs.length - 1) % tabs.length
+                  : event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : null;
+              if (next === null) return;
+              event.preventDefault();
+              setTab(tabs[next].key);
+              event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
+            }}
+          >
+            <Icon size={18} aria-hidden="true" />{label}
+          </button>
+        ))}
+      </div>
+      {tab === "audio" && <section className="call-settings-section" role="tabpanel" id={`${tabId}-audio-panel`} aria-labelledby={`${tabId}-audio-tab`} tabIndex={0}>
         <header>
           <AudioLines size={19} />
           <h3 id="call-settings-audio-title">Звук</h3>
@@ -1091,17 +1130,17 @@ function CallSettings({
             })}
           />
         </label>
-      </section>
+      </section>}
 
-      <section className="call-settings-section" aria-labelledby="call-settings-camera-title">
+      {tab === "camera" && <section className="call-settings-section" role="tabpanel" id={`${tabId}-camera-panel`} aria-labelledby={`${tabId}-camera-tab`} tabIndex={0}>
         <header>
           <Video size={19} />
           <h3 id="call-settings-camera-title">Камера</h3>
         </header>
         <DeviceSelect row={camera} devices={devices} disabled={disabled} onSelect={onSelectDevice} />
-      </section>
+      </section>}
 
-      <section className="call-settings-section" aria-labelledby="call-settings-screen-title">
+      {tab === "screen" && <section className="call-settings-section" role="tabpanel" id={`${tabId}-screen-panel`} aria-labelledby={`${tabId}-screen-tab`} tabIndex={0}>
         <header>
           <MonitorUp size={19} />
           <h3 id="call-settings-screen-title">Демонстрация экрана</h3>
@@ -1136,7 +1175,7 @@ function CallSettings({
             </select>
           </label>
         </div>
-      </section>
+      </section>}
     </div>
   );
 }
@@ -1321,7 +1360,6 @@ function ActiveCall({
     voiceGateRef.current = new VoiceActivationProcessor(devicePreferences.voiceActivationThreshold);
   }
   const localIdentity = localParticipant.identity;
-  const remoteCount = participants.filter((participant) => participant.identity !== localIdentity).length;
   const menuParticipant = participantMenu
     ? participants.find((participant) => participant.identity === participantMenu.participantIdentity)
     : undefined;
@@ -1689,11 +1727,9 @@ function ActiveCall({
     setSettingsOpen(true);
   }, [refreshDevices]);
 
-  const statusText = connectionState === ConnectionState.Connected
-    ? `${remoteCount + 1} в звонке`
-    : connectionState === ConnectionState.Reconnecting
-      ? "Восстанавливаем связь"
-      : "Подключаемся";
+  const statusText = connectionState === ConnectionState.Reconnecting
+    ? "Восстанавливаем связь"
+    : "Подключаемся";
   const controlsDisabled = connectionState !== ConnectionState.Connected;
   const mediaControlsDisabled = controlsDisabled || busyControl !== null || switchingDevice !== null;
   const screenShareSupported = typeof navigator.mediaDevices?.getDisplayMedia === "function";
@@ -1741,10 +1777,12 @@ function ActiveCall({
         )}
       </div>
 
-      <div className={`call-status ${connectionState === ConnectionState.Connected ? "is-connected" : "is-connecting"}`}>
-        {connectionState === ConnectionState.Connected ? <span className="call-status__dot" /> : <LoaderCircle className="spin" size={13} />}
-        <span>{statusText}</span>
-      </div>
+      {connectionState !== ConnectionState.Connected && (
+        <div className="call-status is-connecting">
+          <LoaderCircle className="spin" size={13} />
+          <span>{statusText}</span>
+        </div>
+      )}
 
       {mediaError && (
         <div className="call-alert" role="alert">

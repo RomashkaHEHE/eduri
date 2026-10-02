@@ -6,6 +6,7 @@ import { AuthProvider } from "./auth";
 import { configureMonacoRuntime } from "./monacoRuntime";
 import { registerOfflineAppShell } from "./offline";
 import { ThemeProvider } from "./theme";
+import "./fonts.css";
 import "./styles.css";
 
 configureMonacoRuntime();

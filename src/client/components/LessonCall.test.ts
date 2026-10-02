@@ -162,6 +162,7 @@ function callParticipant(identity: string, name: string, isLocal = false) {
     identity,
     name,
     isLocal,
+    isActive: true,
     connectionQuality: mocks.connectionQuality,
     setVolume: vi.fn(),
     getTrackPublication: vi.fn(),
@@ -616,6 +617,63 @@ describe("LessonCall", () => {
     expect(mocks.callToken).toHaveBeenCalledTimes(1);
   });
 
+  it("shows a non-interactive joining card until LiveKit activates the participant", async () => {
+    const local = callParticipant("local-user", "Call user", true);
+    const remote = callParticipant("remote-user", "Student");
+    remote.isActive = false;
+    mocks.participants = [local, remote];
+    mocks.visualTracks = [
+      visualTrack(local, Track.Source.Camera),
+      visualTrack(remote, Track.Source.Camera, "camera-remote"),
+    ];
+    await joinActiveCall();
+    const tile = container?.querySelector<HTMLElement>('[data-participant-identity="remote-user"]');
+    expect(tile?.classList.contains("is-joining")).toBe(true);
+    expect(tile?.getAttribute("aria-label")).toBe("Student: Присоединяется к звонку");
+    expect(tile?.getAttribute("role")).toBe("group");
+    expect(tile?.getAttribute("tabindex")).toBeNull();
+    expect(tile?.querySelector('.call-participant-idle small')?.textContent).toContain("Присоединяется к звонку");
+    expect(tile?.querySelector('.call-microphone-state')).toBeNull();
+    expect(tile?.querySelector('.call-connection')).toBeNull();
+    expect(tile?.querySelector('[data-testid="participant-media"]')).toBeNull();
+
+    await act(async () => {
+      tile?.click();
+      tile?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+      tile?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    expect(container?.querySelector('.call-focus-layout')).toBeNull();
+    expect(container?.querySelector('.call-participant-menu')).toBeNull();
+
+    // LiveKit emits Active before updating the participant's isActive getter.
+    await act(async () => remote.emit(ParticipantEvent.Active));
+    expect(tile?.classList.contains("is-joining")).toBe(false);
+    expect(tile?.getAttribute("aria-label")).toBe("Student: Камера");
+    expect(tile?.getAttribute("role")).toBe("button");
+    expect(tile?.querySelector('.call-microphone-state')).not.toBeNull();
+    await act(async () => tile?.click());
+    expect(container?.querySelector('.call-focus-layout')).not.toBeNull();
+  });
+
+  it("removes a joining card if the participant disconnects before activation", async () => {
+    const local = callParticipant("local-user", "Call user", true);
+    const remote = callParticipant("remote-user", "Student");
+    remote.isActive = false;
+    mocks.participants = [local, remote];
+    mocks.visualTracks = [visualTrack(local, Track.Source.Camera), visualTrack(remote, Track.Source.Camera)];
+    await joinActiveCall();
+    expect(container?.querySelector('.is-joining')).not.toBeNull();
+
+    mocks.participants = [local];
+    mocks.visualTracks = [visualTrack(local, Track.Source.Camera)];
+    await act(async () => {
+      root?.render(createElement(LessonCall, { lessonId: "lesson-id", status: "active", profile: PROFILE }));
+    });
+    expect(container?.querySelector('[data-participant-identity="remote-user"]')).toBeNull();
+    expect(container?.querySelector('.is-joining')).toBeNull();
+    expect(remote.emit(ParticipantEvent.Active)).toBe(false);
+  });
+
   it("keeps participants without media as compact non-focusable cards", async () => {
     const local = callParticipant("local-user", "Call user", true);
     mocks.participants = [local];
@@ -629,6 +687,7 @@ describe("LessonCall", () => {
     expect(tile?.getAttribute("tabindex")).toBeNull();
     expect(tile?.textContent).toContain("Вы");
     expect(tile?.textContent).toContain("Без видео");
+    expect(tile?.classList.contains("is-joining")).toBe(false);
 
     await act(async () => tile?.click());
     expect(container?.querySelector(".call-focus-layout")).toBeNull();
@@ -1118,6 +1177,50 @@ describe("LessonCall", () => {
     });
     expect(textbox?.value).toBe("400");
     expect(slider?.style.getPropertyValue("--call-volume-boost")).toBe("100%");
+  });
+
+  it.each([
+    ["Включить микрофон", "Выбрать микрофон и наушники", "Звук"],
+    ["Включить камеру", "Выбрать камеру", "Камера"],
+    ["Начать демонстрацию", "Выбрать экран или окно", "Демонстрация экрана"],
+  ])("opens the source menu on right-click of %s without toggling media", async (label, arrowLabel, menuLabel) => {
+    await joinActiveCall();
+    const button = document.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
+    expect(button).not.toBeNull();
+    const rightClick = async (target: Element) => {
+      const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+      await act(async () => { target.dispatchEvent(event); });
+      return event;
+    };
+    expect((await rightClick(button!.querySelector('svg')!)).defaultPrevented).toBe(true);
+    expect(document.querySelector(`[role="dialog"][aria-label="${menuLabel}"]`)).not.toBeNull();
+    expect(document.querySelector(`button[aria-label="${arrowLabel}"]`)?.getAttribute('aria-expanded')).toBe('true');
+    expect((await rightClick(button!)).defaultPrevented).toBe(true);
+    expect(document.querySelector(`[role="dialog"][aria-label="${menuLabel}"]`)).not.toBeNull();
+    const option = document.querySelector(`[role="dialog"][aria-label="${menuLabel}"] button`);
+    expect(option).not.toBeNull();
+    expect((await rightClick(option!)).defaultPrevented).toBe(false);
+    expect(mocks.localParticipant.setMicrophoneEnabled).not.toHaveBeenCalled();
+    expect(mocks.localParticipant.setCameraEnabled).not.toHaveBeenCalled();
+    expect(mocks.localParticipant.setScreenShareEnabled).not.toHaveBeenCalled();
+
+    await act(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    expect(document.querySelector(`[role="dialog"][aria-label="${menuLabel}"]`)).toBeNull();
+  });
+
+  it("does not open source menus on right-click while reconnecting", async () => {
+    mocks.connectionState = ConnectionState.Reconnecting;
+    await joinActiveCall();
+    for (const label of ["Включить микрофон", "Включить камеру", "Начать демонстрацию"]) {
+      const button = document.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
+      expect(button?.disabled).toBe(true);
+      await act(async () => {
+        button?.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+      });
+      expect(document.querySelector('.call-device-menu')).toBeNull();
+    }
   });
 
   it("does not save a device when LiveKit rejects the switch", async () => {

@@ -80,6 +80,14 @@ is active.
 The lesson and guest Call routes share one web media adapter. Microphone,
 camera, and screen-share controls are large circles; each media circle has a
 smaller overlapping circular source trigger instead of forming a split pill.
+Action circles are 54px with 26px icons; source triggers are 28px with 16px
+arrows. The stage reserves a 76px footer in normal and fullscreen presentation.
+Right-clicking a media circle or its source trigger opens the same available
+source menu and suppresses the browser context menu without toggling capture.
+Repeated right-click leaves the menu open. Busy/unavailable source controls
+remain unavailable; menu options keep their normal context-menu behavior.
+The red hang-up action is independently anchored at the footer's bottom-right,
+including fullscreen; narrow screens reserve its space beside the other controls.
 The Settings action opens a full modal with separate Audio, Camera, and Screen
 Share sections and only currently implemented controls. Audio exposes input
 and, where `setSinkId` is supported, output selection; camera exposes video
@@ -145,6 +153,11 @@ The local participant uses the same published name and initials as a remote
 participant, with a separate top-left `Вы` badge on each of their tiles. Local
 identity, not matching names or colors, controls this marker. Accessible labels
 include `(вы)`, and published participant name changes update the tile live.
+Remote participants announced by LiveKit before their connection becomes active
+use a compact dashed joining card with their name/initials, spinner, and
+`Присоединяется к звонку`. It has no focus or volume action and no microphone or
+quality indicator. LiveKit activation replaces it with the ordinary tile;
+disconnect removes it. Already active participants have no artificial delay.
 Every participant tile also
 keeps a bottom-left connection indicator. Its hover/focus popover reports the
 LiveKit aggregate quality plus WebRTC RTT, jitter, packet loss, and current

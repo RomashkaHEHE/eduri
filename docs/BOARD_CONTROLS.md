@@ -2732,6 +2732,21 @@ Displayed byte units use binary multiples of 1024.
 
 ## Call controls
 
+- Call action buttons are 54px circles with 26px icons; microphone, camera,
+  and screen-share source arrows use 28px circles and 16px icons. The 76px
+  footer reserves room below the stage, including fullscreen. Right-clicking
+  a media action or its arrow suppresses the browser context menu and opens
+  the same source menu as the arrow. Repeated right-click keeps it open; it
+  never toggles capture or launches the browser share picker. Unavailable/busy
+  source controls do not open a menu; menu options retain normal context-menu
+  behavior. Outside pointer-down and Escape dismiss the menu as before.
+- The red `Покинуть звонок` action sits separately at the bottom-right of the
+  call footer, in normal and fullscreen mode. Narrow screens align the other
+  controls left with reserved space for hang-up so their hit areas do not overlap.
+- A connected call shows the current participant count, including when only
+  one participant is present. There is no waiting-for-another-participant
+  message or overlay. Connecting and reconnecting retain their status labels.
+
 - The call controls have no fullscreen action.
 - Call is currently a standalone guest-room resource. It first mounts on
   `/room/:shareId/call` and occupies the whole room stage. After visiting Call,
@@ -2764,6 +2779,12 @@ Displayed byte units use binary multiples of 1024.
   local LiveKit identity, so matching names/colors cannot mark a remote tile as
   local. Accessible tile and microphone labels also include `(вы)`. Published
   name changes update the displayed name and initials live.
+- A remote participant announced by LiveKit whose connection is not yet active
+  appears as a dashed, compact identity card with a spinner and `Присоединяется
+  к звонку`. It cannot be focused or open the volume menu and shows no microphone
+  or quality indicator until LiveKit confirms activation. It then becomes the
+  ordinary participant tile; disconnecting removes it. Already active
+  participants are shown immediately without a simulated joining delay.
 - Device settings list microphone, speaker, and camera choices. Opening the
   settings only enumerates already visible browser devices and never turns a
   device on. The refresh button is the explicit permission-bearing action used

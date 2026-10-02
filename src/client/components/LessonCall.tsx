@@ -51,6 +51,7 @@ import {
   ConnectionState,
   LocalAudioTrack,
   LocalTrack,
+  ParticipantEvent,
   RemoteAudioTrack,
   RemoteTrack,
   Room,
@@ -677,15 +678,24 @@ function CallTrackTile({
   const trackRef = explicitTrackRef ?? contextTrackRef;
   if (!trackRef) return null;
 
+  const participant = trackRef.participant;
+  const isSelf = participant.identity === localIdentity;
+  const [activatedParticipant, setActivatedParticipant] = useState<Participant | null>(null);
+  const joining = !isSelf && !participant.isActive && activatedParticipant !== participant;
+  useEffect(() => {
+    const activate = () => setActivatedParticipant(participant);
+    participant.on(ParticipantEvent.Active, activate);
+    return () => { participant.off(ParticipantEvent.Active, activate); };
+  }, [participant]);
+
   const key = trackReferenceKey(trackRef);
-  const mediaActive = isTrackMediaActive(trackRef);
+  const mediaActive = !joining && isTrackMediaActive(trackRef);
   const focused = focusedTrackKey === key;
   const screenShare = trackRef.source === Track.Source.ScreenShare;
   const { name: participantName } = useParticipantInfo({ participant: trackRef.participant });
   const name = participantName || "Участник";
-  const isSelf = trackRef.participant.identity === localIdentity;
   const accessibleName = isSelf ? `${name} (вы)` : name;
-  const sourceLabel = screenShare ? "Демонстрация экрана" : mediaActive ? "Камера" : "Без видео";
+  const sourceLabel = joining ? "Присоединяется к звонку" : screenShare ? "Демонстрация экрана" : mediaActive ? "Камера" : "Без видео";
   const microphonePublication = trackRef.participant.getTrackPublication?.(Track.Source.Microphone);
   const microphoneMuted = useIsMuted({
     participant: trackRef.participant,
@@ -707,7 +717,7 @@ function CallTrackTile({
 
   return (
     <div
-      className={`call-track-tile ${mediaActive ? "call-track-tile--media" : "call-track-tile--no-media"} ${screenShare ? "call-track-tile--screen" : "call-track-tile--camera"} ${focused ? "is-focused" : ""} ${transmittingAudio ? "is-transmitting-audio" : ""}`}
+      className={`call-track-tile ${mediaActive ? "call-track-tile--media" : "call-track-tile--no-media"} ${screenShare ? "call-track-tile--screen" : "call-track-tile--camera"} ${joining ? "is-joining" : ""} ${focused ? "is-focused" : ""} ${!joining && transmittingAudio ? "is-transmitting-audio" : ""}`}
       data-call-track-key={key}
       data-participant-identity={trackRef.participant.identity}
       data-track-source={trackRef.source}
@@ -716,35 +726,37 @@ function CallTrackTile({
       aria-label={`${accessibleName}: ${sourceLabel}`}
       aria-pressed={mediaActive ? focused : undefined}
       onClick={select}
-      onContextMenu={(event) => onOpenParticipantMenu(event, trackRef.participant)}
+      onContextMenu={(event) => {
+        if (!joining) onOpenParticipantMenu(event, participant);
+      }}
       onKeyDown={(event) => {
         if (!mediaActive || (event.key !== "Enter" && event.key !== " ")) return;
         event.preventDefault();
         select();
       }}
     >
-      <ParticipantTile trackRef={trackRef} className="call-participant" />
+      {!joining && <ParticipantTile trackRef={trackRef} className="call-participant" />}
       {isSelf && <span className="call-self-badge" aria-hidden="true">Вы</span>}
       {!mediaActive && (
         <div className="call-participant-idle" aria-hidden="true">
           <span>{participantInitials(name)}</span>
           <strong>{name}</strong>
-          <small>Без видео</small>
+          <small>{joining ? <><LoaderCircle className="spin" size={12} /> Присоединяется к звонку</> : "Без видео"}</small>
         </div>
       )}
       <div className="call-track-label" aria-hidden="true">
         <span>{name}</span>
         {screenShare && <small>Экран</small>}
       </div>
-      <ParticipantConnectionIndicator participant={trackRef.participant} />
-      <span
+      {!joining && <ParticipantConnectionIndicator participant={trackRef.participant} />}
+      {!joining && <span
         className={`call-microphone-state ${microphoneMuted ? "is-muted" : "is-enabled"}`}
         role="img"
         aria-label={`${accessibleName}: микрофон ${microphoneMuted ? "выключен" : "включён"}`}
         title={`Микрофон ${microphoneMuted ? "выключен" : "включён"}`}
       >
         {microphoneMuted ? <MicOff size={16} aria-hidden="true" /> : <Mic size={16} aria-hidden="true" />}
-      </span>
+      </span>}
     </div>
   );
 }
@@ -1209,7 +1221,16 @@ function MediaControl({
   menu?: React.ReactNode;
 }) {
   return (
-    <div className={`call-media-control${menuOpen ? " is-open" : ""}`}>
+    <div
+      className={`call-media-control${menuOpen ? " is-open" : ""}`}
+      onContextMenu={(event) => {
+        // Only intercept the control buttons, not options inside their menu.
+        if (!(event.target instanceof Element)
+          || event.target.closest("button")?.parentElement !== event.currentTarget) return;
+        event.preventDefault();
+        if (!disabled && !menuOpen) onMenuClick();
+      }}
+    >
       {children}
       <button
         type="button"
@@ -1669,7 +1690,7 @@ function ActiveCall({
   }, [refreshDevices]);
 
   const statusText = connectionState === ConnectionState.Connected
-    ? remoteCount > 0 ? `${remoteCount + 1} в звонке` : "Ожидаем участника"
+    ? `${remoteCount + 1} в звонке`
     : connectionState === ConnectionState.Reconnecting
       ? "Восстанавливаем связь"
       : "Подключаемся";
@@ -1717,9 +1738,6 @@ function ActiveCall({
               onOpenParticipantMenu={openParticipantMenu}
             />
           </GridLayout>
-        )}
-        {remoteCount === 0 && connectionState === ConnectionState.Connected && (
-          <div className="call-waiting">Ожидаем второго участника</div>
         )}
       </div>
 

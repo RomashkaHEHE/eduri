@@ -753,7 +753,7 @@ button.public-workspace__back { padding: 0; border: 0; background: transparent; 
 .call-join-button:hover:not(:disabled) { background: var(--call-primary-hover); }
 .call-join-button:disabled { cursor: wait; opacity: .72; }
 .lesson-call--active { isolation: isolate; }
-.call-stage { position: absolute; inset: 0 0 56px; padding: 8px; overflow: hidden; background: var(--call-stage-bg); }
+.call-stage { position: absolute; inset: 0 0 76px; padding: 8px; overflow: hidden; background: var(--call-stage-bg); }
 .call-layout-grid { position: relative; width: 100%; height: 100%; min-width: 0; min-height: 0; display: grid; grid-template-columns: repeat(var(--lk-col-count, 1), minmax(0, 1fr)); grid-template-rows: repeat(var(--lk-row-count, 1), minmax(0, 1fr)); gap: 7px; }
 .call-layout-grid.is-media-empty { display: flex; align-content: center; align-items: center; justify-content: center; flex-wrap: wrap; }
 .call-layout-grid.is-media-empty .call-track-tile { width: min(210px, 100%); height: min(124px, 100%); flex: 0 1 210px; }
@@ -777,6 +777,8 @@ button.public-workspace__back { padding: 0; border: 0; background: transparent; 
 .call-track-tile.is-transmitting-audio .call-participant-idle > span { border-color: var(--call-speaking); box-shadow: 0 0 0 3px var(--call-speaking-ring); }
 .call-participant-idle strong { max-width: 100%; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .call-participant-idle small { color: var(--call-shell-muted); font-size: 9px; }
+.call-track-tile.is-joining { border-style: dashed; }
+.call-track-tile.is-joining .call-participant-idle small { display: flex; align-items: center; gap: 5px; }
 .call-track-label { position: absolute; z-index: 2; right: 7px; bottom: 7px; left: 34px; display: flex; align-items: center; justify-content: space-between; gap: 6px; pointer-events: none; }
 .call-track-label > span, .call-track-label > small { min-width: 0; padding: 3px 6px; overflow: hidden; border-radius: 4px; color: var(--call-overlay-text); background: var(--call-overlay-bg); font-size: 9px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .call-track-label > span { max-width: 100%; }
@@ -839,8 +841,8 @@ button.public-workspace__back { padding: 0; border: 0; background: transparent; 
 .call-status.is-connecting { color: var(--call-overlay-connecting); }
 .call-alert { position: absolute; z-index: 7; top: 38px; right: 9px; left: 9px; min-height: 36px; padding: 6px 7px; display: grid; grid-template-columns: 16px minmax(0, 1fr) 20px; align-items: center; gap: 5px; border: 1px solid var(--call-error-border); border-radius: 5px; color: var(--call-error-text); background: var(--call-error-bg); font-size: 9px; line-height: 1.25; }
 .call-alert button { width: 20px; height: 20px; padding: 0; border: 0; color: var(--call-error-button); background: transparent; cursor: pointer; font-size: 16px; }
-.call-controls { position: absolute; z-index: 8; right: 0; bottom: 0; left: 0; height: 56px; padding: 6px 4px; display: flex; align-items: center; justify-content: center; gap: 4px; background: var(--call-controls-bg); backdrop-filter: blur(5px); }
-.call-control { position: relative; width: 42px; height: 42px; flex: 0 0 42px; display: grid; place-items: center; border: 0; border-radius: 50%; color: var(--call-control-text); background: var(--call-control-bg); cursor: pointer; }
+.call-controls { position: absolute; z-index: 8; right: 0; bottom: 0; left: 0; height: 76px; padding: 8px 4px; display: flex; align-items: center; justify-content: center; gap: 6px; background: var(--call-controls-bg); backdrop-filter: blur(5px); }
+.call-control { position: relative; width: 54px; height: 54px; flex: 0 0 54px; display: grid; place-items: center; border: 0; border-radius: 50%; color: var(--call-control-text); background: var(--call-control-bg); cursor: pointer; }
 .call-control:hover:not(:disabled) { color: var(--call-control-hover-text); background: var(--call-control-hover-bg); }
 .call-control.is-active { color: var(--call-control-active-text); background: var(--call-control-active-bg); }
 .call-control.is-access-inactive { color: var(--call-shell-muted); background: color-mix(in srgb, var(--call-control-bg) 58%, var(--call-controls-bg)); filter: saturate(.35); }
@@ -848,15 +850,21 @@ button.public-workspace__back { padding: 0; border: 0; background: transparent; 
 .call-control-tooltip { position: absolute; z-index: 12; bottom: calc(100% + 9px); left: 50%; width: max-content; max-width: min(210px, calc(100vw - 20px)); padding: 6px 8px; visibility: hidden; border: 1px solid var(--call-settings-border); border-radius: 5px; color: var(--call-shell-text); background: var(--call-settings-bg); box-shadow: var(--call-settings-shadow); font-size: 9px; font-weight: 650; line-height: 1.25; opacity: 0; pointer-events: none; text-align: center; transform: translateX(-50%); }
 .call-control.is-access-inactive:hover .call-control-tooltip,
 .call-control.is-access-inactive:focus-visible .call-control-tooltip { visibility: visible; opacity: 1; }
-.call-control.is-danger { margin-left: 2px; color: var(--call-danger-text); background: var(--call-danger-bg); }
+.call-control.is-danger { position: absolute; right: 12px; bottom: 11px; color: var(--call-danger-text); background: var(--call-danger-bg); }
+.call-controls:has(.call-control.is-danger) { padding-right: 78px; padding-left: 78px; }
+@media (max-width: 480px) {
+  .call-controls:has(.call-control.is-danger) { justify-content: flex-start; gap: 4px; padding-left: 6px; padding-right: 74px; }
+}
 .call-control.is-danger:hover { background: var(--call-danger-hover); }
 .call-control:disabled { cursor: not-allowed; opacity: .48; }
-.call-media-control { position: relative; width: 46px; height: 46px; flex: 0 0 46px; display: grid; place-items: center; }
-.call-control-menu-trigger { position: absolute; z-index: 2; right: -1px; bottom: -1px; width: 18px; height: 18px; padding: 0; display: grid; place-items: center; border: 2px solid var(--call-controls-bg); border-radius: 50%; color: var(--call-control-text); background: var(--call-control-bg); cursor: pointer; }
+.call-control > svg { width: 26px; height: 26px; }
+.call-media-control { position: relative; width: 58px; height: 58px; flex: 0 0 58px; display: grid; place-items: center; }
+.call-control-menu-trigger { position: absolute; z-index: 2; right: -1px; bottom: -1px; width: 28px; height: 28px; padding: 0; display: grid; place-items: center; border: 2px solid var(--call-controls-bg); border-radius: 50%; color: var(--call-control-text); background: var(--call-control-bg); cursor: pointer; }
 .call-control-menu-trigger:hover:not(:disabled), .call-media-control.is-open .call-control-menu-trigger { color: var(--call-control-hover-text); background: var(--call-control-hover-bg); }
 .call-control-menu-trigger:disabled { cursor: not-allowed; opacity: .48; }
+.call-control-menu-trigger > svg { width: 16px; height: 16px; }
 .call-media-control:has(.call-control.is-active) .call-control-menu-trigger { color: var(--call-control-active-text); background: var(--call-control-active-bg); }
-.call-device-menu { position: absolute; z-index: 2; bottom: 52px; left: 50%; width: min(260px, calc(100vw - 16px)); max-height: 180px; padding: 8px; overflow: auto; display: grid; gap: 6px; border: 1px solid var(--call-settings-border); border-radius: 6px; color: var(--call-shell-text); background: var(--call-settings-bg); box-shadow: var(--call-settings-shadow); transform: translateX(-50%); }
+.call-device-menu { position: absolute; z-index: 2; bottom: 66px; left: 50%; width: min(260px, calc(100vw - 16px)); max-height: 180px; padding: 8px; overflow: auto; display: grid; gap: 6px; border: 1px solid var(--call-settings-border); border-radius: 6px; color: var(--call-shell-text); background: var(--call-settings-bg); box-shadow: var(--call-settings-shadow); transform: translateX(-50%); }
 .call-media-control:first-child .call-device-menu { left: 0; transform: none; }
 .call-media-control:nth-child(3) .call-device-menu { right: 0; left: auto; transform: none; }
 .call-device-menu header { min-height: 24px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
@@ -898,12 +906,8 @@ button.public-workspace__back { padding: 0; border: 0; background: transparent; 
 .call-start-audio { position: absolute; z-index: 8; top: 50%; left: 50%; min-height: 34px; padding: 0 13px; border: 1px solid var(--call-audio-border); border-radius: 6px; color: var(--call-primary-text); background: var(--call-primary-bg); cursor: pointer; font: inherit; font-size: 11px; font-weight: 750; transform: translate(-50%, -50%); }
 .call-start-audio:hover { background: var(--call-primary-hover); }
 .lesson-call:fullscreen { width: 100vw; height: 100vh; }
-.lesson-call:fullscreen .call-stage { bottom: 70px; padding: 14px; }
-.lesson-call:fullscreen .call-controls { height: 70px; gap: 12px; }
-.lesson-call:fullscreen .call-control { width: 50px; height: 50px; flex-basis: 50px; }
-.lesson-call:fullscreen .call-media-control { width: 54px; height: 54px; flex-basis: 54px; }
-.lesson-call:fullscreen .call-control-menu-trigger { width: 21px; height: 21px; }
-.lesson-call:fullscreen .call-device-menu { bottom: 58px; max-height: min(420px, calc(100vh - 140px)); }
+.lesson-call:fullscreen .call-stage { padding: 14px; }
+.lesson-call:fullscreen .call-device-menu { bottom: 66px; max-height: min(420px, calc(100vh - 140px)); }
 .lesson-call:fullscreen .call-focus-layout { grid-template-columns: minmax(0, 1fr) clamp(170px, 20%, 280px); gap: 12px; }
 .finish-summary { padding: 13px; display: grid; gap: 10px; border: 1px solid var(--line); border-radius: 6px; background: #f8fafb; }
 .finish-summary span { display: flex; align-items: center; gap: 8px; color: #4d5b6b; font-size: 12px; }

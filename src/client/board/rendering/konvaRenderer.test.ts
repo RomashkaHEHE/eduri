@@ -7403,12 +7403,14 @@ describe("Konva pointer gesture input", () => {
         lowZoomHeadDiameter,
       );
       expect(highZoomStations).toHaveLength(lowZoomStations.length);
+      // Time normalization and interpolation can round differently across runtimes;
+      // compare zoom invariance with a tolerance far below a CSS pixel.
       highZoomStations.forEach((station, index) => {
-        expect(station.x).toBeCloseTo(lowZoomStations[index].x, 12);
-        expect(station.y).toBeCloseTo(lowZoomStations[index].y, 12);
+        expect(station.x).toBeCloseTo(lowZoomStations[index].x, 9);
+        expect(station.y).toBeCloseTo(lowZoomStations[index].y, 9);
         expect(station.diameter).toBeCloseTo(
           lowZoomStations[index].diameter,
-          12,
+          9,
         );
       });
 

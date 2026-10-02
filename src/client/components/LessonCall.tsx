@@ -12,7 +12,6 @@ import {
   LiveKitRoom,
   ParticipantTile,
   RoomAudioRenderer,
-  StartAudio,
   useConnectionState,
   useConnectionQualityIndicator,
   useLocalParticipant,
@@ -42,9 +41,9 @@ import {
   PhoneOff,
   RotateCcw,
   Settings,
-  UserRoundCheck,
   Video,
   VideoOff,
+  VolumeX,
   Wifi,
 } from "lucide-react";
 import {
@@ -57,6 +56,7 @@ import {
   RemoteAudioTrack,
   RemoteTrack,
   Room,
+  RoomEvent,
   Track,
   type AudioProcessorOptions,
   type Participant,
@@ -719,7 +719,7 @@ function CallTrackTile({
 
   return (
     <div
-      className={`call-track-tile ${mediaActive ? "call-track-tile--media" : "call-track-tile--no-media"} ${screenShare ? "call-track-tile--screen" : "call-track-tile--camera"} ${joining ? "is-joining" : ""} ${focused ? "is-focused" : ""} ${!joining && transmittingAudio ? "is-transmitting-audio" : ""}`}
+      className={`call-track-tile ${mediaActive ? "call-track-tile--media" : "call-track-tile--no-media"} ${screenShare ? "call-track-tile--screen" : "call-track-tile--camera"} ${isSelf ? "is-self" : ""} ${joining ? "is-joining" : ""} ${focused ? "is-focused" : ""} ${!joining && transmittingAudio ? "is-transmitting-audio" : ""}`}
       data-call-track-key={key}
       data-participant-identity={trackRef.participant.identity}
       data-track-source={trackRef.source}
@@ -738,11 +738,6 @@ function CallTrackTile({
       }}
     >
       {!joining && <ParticipantTile trackRef={trackRef} className="call-participant" />}
-      {isSelf && (
-        <span className="call-self-badge" role="img" aria-label="Ваша карточка" title="Ваша карточка">
-          <UserRoundCheck size={16} aria-hidden="true" />
-        </span>
-      )}
       {!mediaActive && (
         <div className="call-participant-idle" aria-hidden="true">
           <span>{participantInitials(name)}</span>
@@ -1072,7 +1067,7 @@ function CallSettings({
 
   return (
     <div className="call-settings">
-      <div className="call-settings-tabs" role="tablist" aria-label="Разделы настроек звонка">
+      <div className="call-settings-tabs" role="tablist" aria-orientation="vertical" aria-label="Разделы настроек звонка">
         {tabs.map(({ key, label, Icon }, index) => (
           <button
             key={key}
@@ -1085,8 +1080,8 @@ function CallSettings({
             tabIndex={tab === key ? 0 : -1}
             onClick={() => setTab(key)}
             onKeyDown={(event) => {
-              const next = event.key === "ArrowRight" ? (index + 1) % tabs.length
-                : event.key === "ArrowLeft" ? (index + tabs.length - 1) % tabs.length
+              const next = event.key === "ArrowDown" ? (index + 1) % tabs.length
+                : event.key === "ArrowUp" ? (index + tabs.length - 1) % tabs.length
                   : event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : null;
               if (next === null) return;
               event.preventDefault();
@@ -1285,6 +1280,59 @@ function MediaControl({
       {menuOpen && menu}
     </div>
   );
+}
+
+function AutomaticCallAudio() {
+  const room = useRoomContext();
+  const connectionState = useConnectionState();
+  const [blocked, setBlocked] = useState(false);
+
+  useEffect(() => {
+    if (connectionState !== ConnectionState.Connected) return;
+    let disposed = false;
+    const update = (allowed: boolean) => {
+      if (!disposed) setBlocked(!allowed);
+    };
+    const start = () => {
+      // Keep this call synchronous with a browser gesture when one is available.
+      // A blocked AudioContext.resume may stay pending until a later gesture.
+      void room.startAudio().then(
+        () => update(room.canPlaybackAudio),
+        () => update(room.canPlaybackAudio),
+      );
+    };
+    const onInteraction = (event: Event) => {
+      if (event.isTrusted && !room.canPlaybackAudio) start();
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && !room.canPlaybackAudio) start();
+    };
+    const onTrackSubscribed = (track: RemoteTrack) => {
+      if (track.kind === Track.Kind.Audio && !room.canPlaybackAudio) start();
+    };
+    room.on(RoomEvent.AudioPlaybackStatusChanged, update);
+    room.on(RoomEvent.TrackSubscribed, onTrackSubscribed);
+    document.addEventListener("pointerup", onInteraction, true);
+    document.addEventListener("keydown", onInteraction, true);
+    document.addEventListener("visibilitychange", onVisible);
+    update(room.canPlaybackAudio);
+    start();
+    return () => {
+      disposed = true;
+      room.off(RoomEvent.AudioPlaybackStatusChanged, update);
+      room.off(RoomEvent.TrackSubscribed, onTrackSubscribed);
+      document.removeEventListener("pointerup", onInteraction, true);
+      document.removeEventListener("keydown", onInteraction, true);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [connectionState, room]);
+
+  return blocked && connectionState === ConnectionState.Connected ? (
+    <div className="call-audio-blocked" role="status" title="Браузер запретил воспроизведение звука. Приложение повторит попытку автоматически при обычном взаимодействии со страницей.">
+      <VolumeX size={16} aria-hidden="true" />
+      <span>Звук заблокирован браузером</span>
+    </div>
+  ) : null;
 }
 
 function ActiveCall({
@@ -1909,7 +1957,7 @@ function ActiveCall({
           <PhoneOff size={20} />
         </CallControl>
       </div>
-      <StartAudio className="call-start-audio" label="Включить звук" />
+      <AutomaticCallAudio />
       <RoomAudioRenderer />
       <Modal
         open={settingsOpen}

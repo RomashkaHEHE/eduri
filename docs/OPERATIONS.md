@@ -747,8 +747,8 @@ bash ops/scripts/restore.sh \
 - Обновления base image и npm dependencies сначала проверяйте на staging или
   локальной копии production backup.
 - Регулярно проверяйте свободное место. Автоматическая ротация касается только
-  строго распознанных Eduri backup; Docker images и журналы требуют отдельной,
-  явно ограниченной политики.
+  строго распознанных Eduri backup и управляемых Docker images/cache по
+  описанной ниже политике. Host journals требуют отдельной политики.
 - Проверяйте время сервера и NTP: session expiry, invite expiry, TLS и audit
   зависят от корректных часов.
 - Во время звонков следите за CPU, RAM, packet loss и Docker restarts. При
@@ -758,3 +758,54 @@ bash ops/scripts/restore.sh \
   после восстановления LiveKit due backlog должен убывать. Attempts насыщается
   на 30, но job не теряется; длительный backlog означает неисправность private
   management plane либо worker.
+
+## Ограничение Docker storage
+
+`sudo bash ops/scripts/install-maintenance.sh` устанавливает также
+`eduri-storage.timer`: первый запуск через 10 минут после boot, следующие через
+30 минут после окончания предыдущего запуска (с jitter до 2 минут). Installer
+копирует root-owned controller отдельно от immutable CD generations в
+`/usr/local/libexec/eduri/storage-maintenance.py`. Для установки требуется Python
+3 и Docker Buildx с `--max-used-space` и `--min-free-space`.
+
+Controller берёт сначала CD queue lock, затем общий maintenance lock, в том же
+порядке, что CD worker. Занятые locks приводят к пропуску запуска. Maintenance
+gate, незавершённый job или любой сохранённый recovery snapshot также запрещают
+очистку. Поэтому offline recovery и pre-deploy rollback не теряют свои images.
+
+Сохраняются все images, используемые любым контейнером (включая остановленные),
+`eduri-app:production`, bootstrap alias `eduri-app:latest` и две новейшие
+доступные предыдущие версии приложения по Docker creation time. Для старых
+исторических images нет надёжной метки успешного deployment, поэтому они
+считаются доступными предыдущими версиями, а не гарантированно успешными.
+Удаляются только images с repository metadata исключительно из `eduri-app`,
+`eduri-livekit`, `livekit/livekit-server`, `clamav/clamav`. Images без metadata
+или с чужими aliases сохраняются. Удаление выполняется без Docker force.
+
+Build cache default builder очищается до целевого объёма `4GB`, при нехватке
+места — дополнительно с целевым свободным местом `10GB`. Это периодическая
+очистка, не жёсткая квота: во время сборки объём может временно вырасти, а
+используемые images/layers не удаляются ради достижения лимита. Суммарная
+строка Build Cache может превышать лимит: она также включает общие с
+сохранёнными images слои. Остаток свободного места меньше
+10 GiB после очистки завершает service с ошибкой, видимой в systemd/journal;
+отправку внешних уведомлений controller не настраивает. Data, backups, volumes,
+контейнеры и сети не удаляются. Docker daemon и приложение не перезапускаются.
+
+Проверка плана и ручной запуск:
+
+```bash
+sudo python3 /usr/local/libexec/eduri/storage-maintenance.py
+sudo systemctl start eduri-storage.service
+systemctl status eduri-storage.service eduri-storage.timer
+journalctl -u eduri-storage.service --since today
+docker system df
+df -h /
+```
+
+Тестирование политики (retention, container references, foreign images,
+recovery barriers, dry run, failure и Linux locks):
+
+```bash
+python3 ops/scripts/storage_maintenance_test.py
+```

@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Eduri Docker storage every 30 minutes
+
+[Timer]
+OnBootSec=10min
+OnUnitInactiveSec=30min
+RandomizedDelaySec=2min
+Unit=eduri-storage.service
+
+[Install]
+WantedBy=timers.target

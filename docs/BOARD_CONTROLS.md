@@ -2732,8 +2732,18 @@ Displayed byte units use binary multiples of 1024.
 
 ## Call controls
 
-- Call Settings uses `Звук`, `Видео`, and `Экран` tabs, opening on `Звук`.
-  Only the selected panel is mounted. Left/Right arrows cycle tabs; Home/End
+- Call audio playback starts automatically on connection/reconnect. There is
+  no `Включить звук` button. If browser autoplay policy blocks playback, a
+  passive top-right `Звук заблокирован браузером` indicator follows LiveKit's
+  playback status. The adapter retries on audio subscription, tab visibility,
+  and ordinary trusted pointer/keyboard interaction, without enabling capture.
+  Browser policy can still require a user gesture; no automatic bypass is
+  promised. Listeners are removed on reconnect/exit and the indicator clears
+  when playback becomes available.
+- Call Settings uses a vertical left-hand list of `Звук`, `Видео`, and `Экран`
+  tabs with the selected panel on the right, opening on `Звук`. This layout
+  remains vertical on narrow screens. Only the selected panel is mounted.
+  Up/Down arrows cycle tabs; Home/End
   select the first/last tab and move focus. Switching tabs preserves preferences
   without changing published media or reconnecting. Leaving `Звук` stops and
   releases any local microphone test.
@@ -2781,13 +2791,14 @@ Displayed byte units use binary multiples of 1024.
 - Compact participant cards omit the visible `Без видео` caption; the avatar,
   name, and media indicators remain. Joining cards retain their joining status.
 - The local participant uses the same published display name and name-derived
-  initials as other participants, with a separate top-left circular person/check
-  icon (no visible text) on each
-  of their camera, screen-share, or no-video tiles. The badge is based on the
+  initials as other participants, with a static thin inner neutral border on
+  each camera, screen-share, or no-video tile, creating a double frame without
+  an extra badge, icon, or visible text. This frame is separate from the blue
+  outer focus/selection outline, green avatar speech ring, and dashed joining
+  border. It uses theme colors and never participant profile colors. It is based on the
   local LiveKit identity, so matching names/colors cannot mark a remote tile as
   local. Accessible tile and microphone labels also include `(вы)`. Published
-  name changes update the displayed name and initials live. The icon has the
-  tooltip and accessible label `Ваша карточка`.
+  name changes update the displayed name and initials live.
 - A remote participant announced by LiveKit whose connection is not yet active
   appears as a dashed, compact identity card with a spinner and `Присоединяется
   к звонку`. It cannot be focused or open the volume menu and shows no microphone

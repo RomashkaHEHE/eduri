@@ -12,6 +12,7 @@ import {
   LocalAudioTrack,
   ParticipantEvent,
   Room,
+  RoomEvent,
   Track,
 } from "livekit-client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -29,6 +30,11 @@ const mocks = vi.hoisted(() => ({
   room: {
     disconnect: vi.fn(),
     switchActiveDevice: vi.fn(),
+    startAudio: vi.fn(),
+    canPlaybackAudio: true,
+    on: vi.fn(),
+    off: vi.fn(),
+    emit: vi.fn(),
   },
   localParticipant: {
     identity: "local-user",
@@ -106,7 +112,6 @@ vi.mock("@livekit/components-react", async (importOriginal) => {
     "data-testid": "participant-media",
   }),
   RoomAudioRenderer: () => null,
-  StartAudio: () => null,
   isTrackReference: (track: Record<string, unknown> | undefined) => Boolean(track?.publication),
   useConnectionState: () => mocks.connectionState,
   useConnectionQualityIndicator: () => ({ quality: mocks.connectionQuality }),
@@ -259,6 +264,12 @@ beforeEach(() => {
   mocks.liveKitRoomProps = undefined;
   mocks.connectionState = ConnectionState.Connected;
   mocks.room.disconnect.mockReset().mockResolvedValue(undefined);
+  mocks.room.startAudio.mockReset().mockResolvedValue(undefined);
+  mocks.room.canPlaybackAudio = true;
+  const roomEvents = new EventEmitter();
+  mocks.room.on.mockReset().mockImplementation(roomEvents.on.bind(roomEvents));
+  mocks.room.off.mockReset().mockImplementation(roomEvents.off.bind(roomEvents));
+  mocks.room.emit.mockReset().mockImplementation(roomEvents.emit.bind(roomEvents));
   mocks.room.switchActiveDevice.mockReset().mockResolvedValue(true);
   mocks.localParticipant.setMicrophoneEnabled.mockReset().mockResolvedValue(undefined);
   mocks.localParticipant.setCameraEnabled.mockReset().mockResolvedValue(undefined);
@@ -597,10 +608,9 @@ describe("LessonCall", () => {
     const remoteTile = container?.querySelector('[data-participant-identity="remote-user"]');
     expect(localTile?.querySelector('.call-track-label > span')?.textContent).toBe("Same Name");
     expect(remoteTile?.querySelector('.call-track-label > span')?.textContent).toBe("Same Name");
-    expect(localTile?.querySelector('.call-self-badge')?.textContent).toBe("");
-    expect(localTile?.querySelector('.call-self-badge svg')).not.toBeNull();
-    expect(localTile?.querySelector('.call-self-badge')?.getAttribute('aria-label')).toBe("Ваша карточка");
-    expect(remoteTile?.querySelector('.call-self-badge')).toBeNull();
+    expect(localTile?.classList.contains('is-self')).toBe(true);
+    expect(remoteTile?.classList.contains('is-self')).toBe(false);
+    expect(container?.querySelector('.call-self-badge')).toBeNull();
     expect(localTile?.getAttribute("aria-label")).toContain("Same Name (вы):");
     expect(remoteTile?.getAttribute("aria-label")).toContain("Same Name:");
     if (!sid) {
@@ -614,7 +624,7 @@ describe("LessonCall", () => {
     });
     expect(localTile?.querySelector('.call-track-label > span')?.textContent).toBe("New Name");
     expect(remoteTile?.querySelector('.call-track-label > span')?.textContent).toBe("Same Name");
-    expect(localTile?.querySelector('.call-self-badge svg')).not.toBeNull();
+    expect(localTile?.classList.contains('is-self')).toBe(true);
     if (!sid) expect(localTile?.querySelector('.call-participant-idle > span')?.textContent).toBe("NN");
     expect(mocks.callToken).toHaveBeenCalledTimes(1);
   });
@@ -688,7 +698,7 @@ describe("LessonCall", () => {
     expect(tile?.getAttribute("role")).toBe("group");
     expect(tile?.getAttribute("tabindex")).toBeNull();
     expect(tile?.textContent).toContain("Call user");
-    expect(tile?.querySelector('.call-self-badge svg')).not.toBeNull();
+    expect(tile?.classList.contains('is-self')).toBe(true);
     expect(tile?.textContent).not.toContain("Без видео");
     expect(tile?.classList.contains("is-joining")).toBe(false);
 
@@ -918,6 +928,62 @@ describe("LessonCall", () => {
     expect(mocks.room.switchActiveDevice).toHaveBeenCalledWith("audiooutput", "speaker-two", true);
   });
 
+  it("starts audio automatically and shows a passive indicator when playback is blocked", async () => {
+    mocks.room.canPlaybackAudio = false;
+    mocks.room.startAudio.mockRejectedValue(new DOMException("Blocked", "NotAllowedError"));
+    const addListener = vi.spyOn(document, "addEventListener");
+    await joinActiveCall();
+    expect(mocks.room.startAudio).toHaveBeenCalledOnce();
+    expect(container?.querySelector('.call-start-audio')).toBeNull();
+    expect(container?.querySelector('.call-audio-blocked')?.textContent).toContain("Звук заблокирован браузером");
+    expect(container?.querySelector('.call-audio-blocked button')).toBeNull();
+
+    await act(async () => {
+      document.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    });
+    expect(mocks.room.startAudio).toHaveBeenCalledOnce();
+
+    const interaction = addListener.mock.calls.find(([type]) => type === "pointerup")?.[1] as EventListener;
+    mocks.room.startAudio.mockImplementation(async () => {
+      mocks.room.canPlaybackAudio = true;
+      mocks.room.emit(RoomEvent.AudioPlaybackStatusChanged, true);
+    });
+    await act(async () => interaction({ isTrusted: true } as Event));
+    expect(mocks.room.startAudio).toHaveBeenCalledTimes(2);
+    expect(container?.querySelector('.call-audio-blocked')).toBeNull();
+    expect(mocks.localParticipant.setMicrophoneEnabled).not.toHaveBeenCalled();
+
+    await act(async () => {
+      mocks.room.canPlaybackAudio = false;
+      mocks.room.emit(RoomEvent.AudioPlaybackStatusChanged, false);
+    });
+    expect(container?.querySelector('.call-audio-blocked')).not.toBeNull();
+    await act(async () => {
+      mocks.room.emit(RoomEvent.TrackSubscribed, { kind: Track.Kind.Audio });
+    });
+    expect(mocks.room.startAudio).toHaveBeenCalledTimes(3);
+    expect(container?.querySelector('.call-audio-blocked')).toBeNull();
+  });
+
+  it("retries audio after reconnect and removes listeners when the call ends", async () => {
+    const removeListener = vi.spyOn(document, "removeEventListener");
+    await joinActiveCall();
+    expect(mocks.room.startAudio).toHaveBeenCalledOnce();
+    mocks.connectionState = ConnectionState.Reconnecting;
+    await act(async () => {
+      root?.render(createElement(LessonCall, { lessonId: "lesson-id", status: "active", profile: PROFILE }));
+    });
+    mocks.connectionState = ConnectionState.Connected;
+    await act(async () => {
+      root?.render(createElement(LessonCall, { lessonId: "lesson-id", status: "active", profile: PROFILE }));
+    });
+    expect(mocks.room.startAudio).toHaveBeenCalledTimes(2);
+    await clickButton("Покинуть звонок");
+    expect(mocks.room.emit(RoomEvent.AudioPlaybackStatusChanged, false)).toBe(false);
+    expect(removeListener).toHaveBeenCalledWith("pointerup", expect.any(Function), true);
+    expect(removeListener).toHaveBeenCalledWith("keydown", expect.any(Function), true);
+  });
+
   it("uses browser-default output when speaker selection is unsupported", async () => {
     await joinActiveCall();
     const options = mocks.liveKitRoomProps?.options as Record<string, unknown>;
@@ -1030,6 +1096,7 @@ describe("LessonCall", () => {
     // Let the modal finish its initial deferred focus before keyboard navigation.
     await act(async () => { await new Promise((resolve) => window.setTimeout(resolve, 0)); });
     const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>('.call-settings [role="tab"]'));
+    expect(document.querySelector('.call-settings [role="tablist"]')?.getAttribute('aria-orientation')).toBe('vertical');
     const key = async (index: number, key: string, expected: number) => {
       await act(async () => {
         tabs[index].focus();
@@ -1040,10 +1107,10 @@ describe("LessonCall", () => {
       expect(tabs[expected].tabIndex).toBe(0);
       expect(document.querySelector('[role="tabpanel"]')?.id).toBe(tabs[expected].getAttribute('aria-controls'));
     };
-    await key(0, "ArrowRight", 1);
+    await key(0, "ArrowDown", 1);
     await key(1, "End", 2);
-    await key(2, "ArrowRight", 0);
-    await key(0, "ArrowLeft", 2);
+    await key(2, "ArrowDown", 0);
+    await key(0, "ArrowUp", 2);
     await key(2, "Home", 0);
   });
 

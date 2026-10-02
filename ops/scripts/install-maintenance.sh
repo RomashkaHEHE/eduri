@@ -33,6 +33,13 @@ id user1 >/dev/null 2>&1 || die "system user user1 does not exist"
     || die "$APP_ROOT must exist and must not be a symlink"
 [[ -f "$OPS_DIR/systemd/eduri-backup.service" ]] || die "backup service file is missing"
 [[ -f "$OPS_DIR/systemd/eduri-backup.timer" ]] || die "backup timer file is missing"
+[[ -f "$OPS_DIR/systemd/eduri-storage.service" ]] || die "storage service file is missing"
+[[ -f "$OPS_DIR/systemd/eduri-storage.timer" ]] || die "storage timer file is missing"
+[[ -f "$SCRIPT_DIR/storage-maintenance.py" ]] || die "storage maintenance script is missing"
+command -v python3 >/dev/null || die "python3 is required"
+docker buildx prune --help | grep -q -- '--max-used-space' \
+    || die "Docker Buildx with bounded cache pruning is required"
+python3 -m py_compile "$SCRIPT_DIR/storage-maintenance.py"
 
 install -d -o user1 -g user1 -m 0700 "$APP_ROOT/backups"
 touch -- "$APP_ROOT/.maintenance.lock"
@@ -42,12 +49,22 @@ install -m 0644 "$OPS_DIR/systemd/eduri-backup.service" \
     /etc/systemd/system/eduri-backup.service
 install -m 0644 "$OPS_DIR/systemd/eduri-backup.timer" \
     /etc/systemd/system/eduri-backup.timer
+install -d -o root -g root -m 0755 /usr/local/libexec/eduri
+install -d -o root -g root -m 0700 /var/lib/eduri-cd
+install -o root -g root -m 0644 "$SCRIPT_DIR/storage-maintenance.py" \
+    /usr/local/libexec/eduri/storage-maintenance.py
+install -m 0644 "$OPS_DIR/systemd/eduri-storage.service" \
+    /etc/systemd/system/eduri-storage.service
+install -m 0644 "$OPS_DIR/systemd/eduri-storage.timer" \
+    /etc/systemd/system/eduri-storage.timer
 
 systemctl daemon-reload
 systemctl enable --now eduri-backup.timer
+systemctl enable --now eduri-storage.timer
 
 if [[ $run_now -eq 1 ]]; then
     systemctl start eduri-backup.service
+    systemctl start eduri-storage.service
 fi
 
-systemctl --no-pager list-timers eduri-backup.timer
+systemctl --no-pager list-timers eduri-backup.timer eduri-storage.timer

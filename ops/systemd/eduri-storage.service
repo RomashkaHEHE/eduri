@@ -1,0 +1,29 @@
+[Unit]
+Description=Bound Eduri Docker cache and release storage
+Requires=docker.service
+After=docker.service
+ConditionPathExists=/home/user1/eduri/docker-compose.yml
+
+[Service]
+Type=oneshot
+User=root
+UMask=0077
+RuntimeDirectory=eduri-storage
+RuntimeDirectoryMode=0700
+Environment=DOCKER_CONFIG=/run/eduri-storage/docker
+ExecStart=/usr/bin/python3 /usr/local/libexec/eduri/storage-maintenance.py --apply
+TimeoutStartSec=30min
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/user1/eduri/.maintenance.lock
+ReadWritePaths=/var/lib/eduri-cd
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

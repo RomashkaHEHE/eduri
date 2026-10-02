@@ -2732,10 +2732,15 @@ Displayed byte units use binary multiples of 1024.
 
 ## Call controls
 
-- Call is currently a standalone guest-room resource. It mounts only on
-  `/room/:shareId/call` and occupies the whole room stage. Guest Board and Code
-  never mount a Call frame beside their workspace, even when the room contains
-  a Call resource. Creating a Call navigates to that route and then auto-joins.
+- The call controls have no fullscreen action.
+- Call is currently a standalone guest-room resource. It first mounts on
+  `/room/:shareId/call` and occupies the whole room stage. After visiting Call,
+  switching to Board or Code keeps the same media workspace mounted and the
+  connection alive, with its presentation fully hidden and no frame, overlay,
+  or reserved working area. Returning to Call restores that same workspace.
+  Opening Board or Code directly does not mount Call. Leaving or switching
+  rooms, or reaching a terminal room state, disconnects it. Hidden lobbies stop
+  roster polling. Creating a Call navigates to its route and then auto-joins.
 - The authenticated lesson workspace currently has no embedded Call, plan, or
   notes dock. Board and Code always receive the full area to the right of the
   mode rail. There is no hidden dock column, Call toggle, or reopen handle;
@@ -2749,6 +2754,16 @@ Displayed byte units use binary multiples of 1024.
 - Opening or joining a call does not request capture permission and does
   not publish a microphone or camera track. Both controls start disabled on
   every entry and re-entry; each is enabled only by its own explicit button.
+- Every participant tile (camera, screen share, and compact card without video)
+  shows a microphone badge in its top-right corner: Mic when enabled, Mic Off
+  when muted or unpublished. Local and remote mute/unmute updates change the
+  badge live, independently of whether the participant is currently speaking.
+- The local participant uses the same published display name and name-derived
+  initials as other participants, with a separate top-left `Вы` badge on each
+  of their camera, screen-share, or no-video tiles. The badge is based on the
+  local LiveKit identity, so matching names/colors cannot mark a remote tile as
+  local. Accessible tile and microphone labels also include `(вы)`. Published
+  name changes update the displayed name and initials live.
 - Device settings list microphone, speaker, and camera choices. Opening the
   settings only enumerates already visible browser devices and never turns a
   device on. The refresh button is the explicit permission-bearing action used

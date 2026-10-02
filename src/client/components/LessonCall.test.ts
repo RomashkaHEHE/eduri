@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import { readFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
 import { resolve } from "node:path";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -9,6 +10,7 @@ import {
   ConnectionError,
   ConnectionState,
   LocalAudioTrack,
+  ParticipantEvent,
   Room,
   Track,
 } from "livekit-client";
@@ -63,7 +65,8 @@ vi.mock("../api", () => ({
   },
 }));
 
-vi.mock("@livekit/components-react", async () => {
+vi.mock("@livekit/components-react", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@livekit/components-react")>();
   const React = await import("react");
   const trackContext = React.createContext<Record<string, unknown> | undefined>(undefined);
   const renderTracks = (
@@ -115,8 +118,10 @@ vi.mock("@livekit/components-react", async () => {
   }),
   useMaybeTrackRefContext: () => React.useContext(trackContext),
   useParticipants: () => mocks.participants.length ? mocks.participants : [mocks.localParticipant],
+  useParticipantInfo: original.useParticipantInfo,
   useRoomContext: () => mocks.room,
   useTrackVolume: () => mocks.trackVolume,
+  useIsMuted: original.useIsMuted,
   useTracks: () => mocks.visualTracks,
   };
 });
@@ -149,7 +154,11 @@ function mediaDevice(kind: MediaDeviceKind, deviceId: string, label: string): Me
 }
 
 function callParticipant(identity: string, name: string, isLocal = false) {
+  const events = new EventEmitter();
   return {
+    on: events.on.bind(events),
+    off: events.off.bind(events),
+    emit: events.emit.bind(events),
     identity,
     name,
     isLocal,
@@ -572,6 +581,41 @@ describe("LessonCall", () => {
     expect(container?.querySelector(".call-layout-grid")).not.toBeNull();
   });
 
+  it.each([
+    ["camera", Track.Source.Camera, "camera-track"],
+    ["screen share", Track.Source.ScreenShare, "screen-track"],
+    ["no video", Track.Source.Camera, undefined],
+  ] as const)("distinguishes self from an identical profile on %s tiles", async (_kind, source, sid) => {
+    const local = { ...callParticipant("local-user", "Same Name", true), attributes: { "eduri.color": "#2563eb" } };
+    const remote = { ...callParticipant("remote-user", "Same Name"), attributes: { "eduri.color": "#2563eb" } };
+    mocks.participants = [local, remote];
+    mocks.visualTracks = [visualTrack(local, source, sid), visualTrack(remote, source, sid)];
+    await joinActiveCall();
+
+    const localTile = container?.querySelector('[data-participant-identity="local-user"]');
+    const remoteTile = container?.querySelector('[data-participant-identity="remote-user"]');
+    expect(localTile?.querySelector('.call-track-label > span')?.textContent).toBe("Same Name");
+    expect(remoteTile?.querySelector('.call-track-label > span')?.textContent).toBe("Same Name");
+    expect(localTile?.querySelector('.call-self-badge')?.textContent).toBe("Вы");
+    expect(remoteTile?.querySelector('.call-self-badge')).toBeNull();
+    expect(localTile?.getAttribute("aria-label")).toContain("Same Name (вы):");
+    expect(remoteTile?.getAttribute("aria-label")).toContain("Same Name:");
+    if (!sid) {
+      expect(localTile?.querySelector('.call-participant-idle > span')?.textContent).toBe("SN");
+      expect(remoteTile?.querySelector('.call-participant-idle > span')?.textContent).toBe("SN");
+    }
+
+    await act(async () => {
+      local.name = "New Name";
+      local.emit(ParticipantEvent.ParticipantNameChanged, local.name);
+    });
+    expect(localTile?.querySelector('.call-track-label > span')?.textContent).toBe("New Name");
+    expect(remoteTile?.querySelector('.call-track-label > span')?.textContent).toBe("Same Name");
+    expect(localTile?.querySelector('.call-self-badge')?.textContent).toBe("Вы");
+    if (!sid) expect(localTile?.querySelector('.call-participant-idle > span')?.textContent).toBe("NN");
+    expect(mocks.callToken).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps participants without media as compact non-focusable cards", async () => {
     const local = callParticipant("local-user", "Call user", true);
     mocks.participants = [local];
@@ -920,6 +964,56 @@ describe("LessonCall", () => {
     expect(setProcessor.mock.calls[0]?.[0]).toMatchObject({
       name: "eduri-voice-activation",
     });
+  });
+
+  it.each([
+    ["camera", Track.Source.Camera, "camera-track"],
+    ["screen share", Track.Source.ScreenShare, "screen-track"],
+    ["no video", Track.Source.Camera, undefined],
+  ] as const)("updates local and remote microphone badges live on %s tiles", async (_kind, source, sid) => {
+    const local = callParticipant("local-user", "Call user", true);
+    const remote = callParticipant("remote-user", "Student");
+    const localMicrophone = { isMuted: true };
+    let remoteMicrophone: { isMuted: boolean } | undefined = { isMuted: false };
+    local.getTrackPublication.mockImplementation((source) => (
+      source === Track.Source.Microphone ? localMicrophone : undefined
+    ));
+    remote.getTrackPublication.mockImplementation((source) => (
+      source === Track.Source.Microphone ? remoteMicrophone : undefined
+    ));
+    mocks.participants = [local, remote];
+    mocks.visualTracks = [visualTrack(local, source, sid), visualTrack(remote, source, sid)];
+    mocks.trackVolume = 0;
+    await joinActiveCall();
+
+    const localTile = container?.querySelector('[data-participant-identity="local-user"]');
+    const remoteTile = container?.querySelector('[data-participant-identity="remote-user"]');
+    expect(localTile?.querySelector('.call-microphone-state')?.getAttribute("aria-label"))
+      .toBe("Call user (вы): микрофон выключен");
+    expect(remoteTile?.querySelector('.call-microphone-state')?.getAttribute("aria-label"))
+      .toBe("Student: микрофон включён");
+
+    await act(async () => {
+      localMicrophone.isMuted = false;
+      local.emit(ParticipantEvent.TrackUnmuted, localMicrophone);
+      remoteMicrophone!.isMuted = true;
+      remote.emit(ParticipantEvent.TrackMuted, remoteMicrophone);
+    });
+    expect(localTile?.querySelector('.call-microphone-state.is-enabled')).not.toBeNull();
+    expect(remoteTile?.querySelector('.call-microphone-state.is-muted')).not.toBeNull();
+
+    await act(async () => {
+      remoteMicrophone = undefined;
+      remote.emit(ParticipantEvent.TrackUnsubscribed);
+    });
+    expect(remoteTile?.querySelector('.call-microphone-state.is-muted')).not.toBeNull();
+
+    await act(async () => {
+      remoteMicrophone = { isMuted: false };
+      remote.emit(ParticipantEvent.TrackSubscribed);
+    });
+    expect(remoteTile?.querySelector('.call-microphone-state.is-enabled')).not.toBeNull();
+    expect(container?.querySelector('.is-transmitting-audio')).toBeNull();
   });
 
   it("marks any transmitted microphone audio around the participant avatar", async () => {

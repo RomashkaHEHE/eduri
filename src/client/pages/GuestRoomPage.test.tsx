@@ -271,9 +271,12 @@ describe("GuestRoomPage", () => {
     expect(mocks.navigate).toHaveBeenCalledWith("/");
   });
 
-  it("warns about disconnecting only when leaving the Call route", async () => {
+  it("warns about disconnecting after switching from Call to Board", async () => {
     mocks.params = { shareId: "share-id", resourceKind: "call" };
     mocks.get.mockResolvedValue(room(["board", "call"]));
+    await renderPage();
+
+    mocks.params.resourceKind = "board";
     await renderPage();
 
     await act(async () => {
@@ -307,7 +310,7 @@ describe("GuestRoomPage", () => {
     expect(mocks.navigate).not.toHaveBeenCalled();
   });
 
-  it("mounts Call only on its own route and never beside Board or Code", async () => {
+  it("mounts Call only after visiting its route", async () => {
     mocks.get.mockResolvedValue(room(["board", "code", "call"]));
     await renderPage();
     expect(container?.textContent).toContain("Board");
@@ -332,6 +335,64 @@ describe("GuestRoomPage", () => {
     expect(container?.querySelector(".guest-room__call")).not.toBeNull();
     expect(mocks.callMounts).toBe(1);
     expect(mocks.callUnmounts).toBe(0);
+  });
+
+  it("preserves the same hidden Call across Board, Code, and return navigation", async () => {
+    mocks.params.resourceKind = "call";
+    mocks.get.mockResolvedValue(room(["board", "code", "call"]));
+    await renderPage();
+    const call = container?.querySelector('[data-testid="call"]');
+    expect(call).not.toBeNull();
+
+    for (const resourceKind of ["board", "code", "call", "board"]) {
+      mocks.params.resourceKind = resourceKind;
+      await renderPage();
+      expect(container?.querySelector('[data-testid="call"]')).toBe(call);
+      expect(mocks.callMounts).toBe(1);
+      expect(mocks.callUnmounts).toBe(0);
+      const frame = container?.querySelector<HTMLElement>(".guest-room__call");
+      expect(frame?.hidden).toBe(resourceKind !== "call");
+      expect(frame?.style.display).toBe(resourceKind === "call" ? "" : "none");
+      if (resourceKind === "call") {
+        expect(mocks.callProps?.requestParticipants).toBeTypeOf("function");
+      } else {
+        expect(mocks.callProps?.requestParticipants).toBeUndefined();
+      }
+      if (resourceKind !== "call") {
+        expect(container?.querySelector(`[data-testid="${resourceKind}"]`)).not.toBeNull();
+      }
+    }
+
+    await act(async () => root?.unmount());
+    root = undefined;
+    expect(mocks.callUnmounts).toBe(1);
+  });
+
+  it("disconnects the hidden Call when the room expires", async () => {
+    mocks.params.resourceKind = "call";
+    mocks.get.mockResolvedValue(room(["board", "call"]));
+    await renderPage();
+    mocks.params.resourceKind = "board";
+    await renderPage();
+
+    await act(async () => {
+      (mocks.boardProps?.onTerminal as (kind: string) => void)("expired");
+    });
+    expect(mocks.callUnmounts).toBe(1);
+    expect(container?.querySelector(".guest-room__call")).toBeNull();
+    expect(container?.textContent).toContain("Сеанс завершён");
+  });
+
+  it("disconnects Call instead of carrying it into another room", async () => {
+    mocks.params.resourceKind = "call";
+    mocks.get.mockResolvedValue(room(["board", "call"]));
+    await renderPage();
+    mocks.params = { shareId: "another-room", resourceKind: "board" };
+    await renderPage();
+    expect(mocks.get).toHaveBeenLastCalledWith("another-room");
+    expect(mocks.callUnmounts).toBe(1);
+    expect(mocks.callMounts).toBe(1);
+    expect(container?.querySelector(".guest-room__call")).toBeNull();
   });
 
   it("requests guest call credentials with the selected profile", async () => {

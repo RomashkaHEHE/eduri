@@ -781,6 +781,9 @@ button.public-workspace__back { padding: 0; border: 0; background: transparent; 
 .call-track-label > span, .call-track-label > small { min-width: 0; padding: 3px 6px; overflow: hidden; border-radius: 4px; color: var(--call-overlay-text); background: var(--call-overlay-bg); font-size: 9px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
 .call-track-label > span { max-width: 100%; }
 .call-track-tile--no-media .call-track-label { display: none; }
+.call-self-badge { position: absolute; z-index: 2; top: 7px; left: 7px; padding: 4px 7px; border-radius: 4px; color: var(--call-overlay-text); background: var(--call-overlay-bg); font-size: 10px; font-weight: 750; pointer-events: none; }
+.call-microphone-state { position: absolute; z-index: 2; top: 7px; right: 7px; width: 26px; height: 26px; display: grid; place-items: center; border-radius: 50%; color: var(--call-overlay-text); background: var(--call-overlay-bg); pointer-events: none; }
+.call-microphone-state.is-muted { color: var(--call-error-text); }
 .call-connection { position: absolute; z-index: 6; bottom: 7px; left: 7px; }
 .call-connection__trigger { width: 16px; height: 16px; padding: 0; display: grid; place-items: center; border: 0; border-radius: 50%; color: var(--call-shell-muted); background: transparent; cursor: default; opacity: .48; transition: opacity 120ms ease; }
 .call-connection:hover .call-connection__trigger,

@@ -15,7 +15,9 @@ import {
   useConnectionState,
   useConnectionQualityIndicator,
   useLocalParticipant,
+  useIsMuted,
   useParticipants,
+  useParticipantInfo,
   useRoomContext,
   useMaybeTrackRefContext,
   useTrackVolume,
@@ -33,7 +35,6 @@ import {
   Gauge,
   Headphones,
   LoaderCircle,
-  Maximize2,
   Mic,
   MicOff,
   MonitorUp,
@@ -362,12 +363,6 @@ function mediaDeviceMessage(kind?: MediaDeviceKind) {
   return "Не удалось включить камеру или микрофон.";
 }
 
-function participantLabel(track: TrackReferenceOrPlaceholder | undefined, localIdentity: string) {
-  if (!track) return "";
-  if (track.participant.identity === localIdentity) return "Вы";
-  return track.participant.name || "Участник";
-}
-
 function trackReferenceKey(track: TrackReferenceOrPlaceholder): string {
   return isTrackReference(track)
     ? `${track.participant.identity}:${track.source}:${track.publication.trackSid}`
@@ -686,9 +681,16 @@ function CallTrackTile({
   const mediaActive = isTrackMediaActive(trackRef);
   const focused = focusedTrackKey === key;
   const screenShare = trackRef.source === Track.Source.ScreenShare;
-  const name = participantLabel(trackRef, localIdentity);
+  const { name: participantName } = useParticipantInfo({ participant: trackRef.participant });
+  const name = participantName || "Участник";
+  const isSelf = trackRef.participant.identity === localIdentity;
+  const accessibleName = isSelf ? `${name} (вы)` : name;
   const sourceLabel = screenShare ? "Демонстрация экрана" : mediaActive ? "Камера" : "Без видео";
   const microphonePublication = trackRef.participant.getTrackPublication?.(Track.Source.Microphone);
+  const microphoneMuted = useIsMuted({
+    participant: trackRef.participant,
+    source: Track.Source.Microphone,
+  });
   const microphoneTrack = microphonePublication?.track instanceof LocalAudioTrack
     || microphonePublication?.track instanceof RemoteAudioTrack
     ? microphonePublication.track
@@ -697,7 +699,7 @@ function CallTrackTile({
     fftSize: 32,
     smoothingTimeConstant: 0.35,
   });
-  const transmittingAudio = !microphonePublication?.isMuted && transmittedVolume > 0;
+  const transmittingAudio = !microphoneMuted && transmittedVolume > 0;
 
   const select = () => {
     if (mediaActive) onSelect(trackRef);
@@ -711,7 +713,7 @@ function CallTrackTile({
       data-track-source={trackRef.source}
       role={mediaActive ? "button" : "group"}
       tabIndex={mediaActive ? 0 : undefined}
-      aria-label={`${name}: ${sourceLabel}`}
+      aria-label={`${accessibleName}: ${sourceLabel}`}
       aria-pressed={mediaActive ? focused : undefined}
       onClick={select}
       onContextMenu={(event) => onOpenParticipantMenu(event, trackRef.participant)}
@@ -722,6 +724,7 @@ function CallTrackTile({
       }}
     >
       <ParticipantTile trackRef={trackRef} className="call-participant" />
+      {isSelf && <span className="call-self-badge" aria-hidden="true">Вы</span>}
       {!mediaActive && (
         <div className="call-participant-idle" aria-hidden="true">
           <span>{participantInitials(name)}</span>
@@ -734,6 +737,14 @@ function CallTrackTile({
         {screenShare && <small>Экран</small>}
       </div>
       <ParticipantConnectionIndicator participant={trackRef.participant} />
+      <span
+        className={`call-microphone-state ${microphoneMuted ? "is-muted" : "is-enabled"}`}
+        role="img"
+        aria-label={`${accessibleName}: микрофон ${microphoneMuted ? "выключен" : "включён"}`}
+        title={`Микрофон ${microphoneMuted ? "выключен" : "включён"}`}
+      >
+        {microphoneMuted ? <MicOff size={16} aria-hidden="true" /> : <Mic size={16} aria-hidden="true" />}
+      </span>
     </div>
   );
 }
@@ -1253,7 +1264,6 @@ function ActiveCall({
   );
   const [busyControl, setBusyControl] = useState<ControlKind | null>(null);
   const [switchingDevice, setSwitchingDevice] = useState<SelectableDeviceKind | null>(null);
-  const [isFullscreen, setIsFullscreen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [quickMenu, setQuickMenu] = useState<"audio" | "camera" | "screen" | null>(null);
   const [cameraMenuPurpose, setCameraMenuPurpose] = useState<"configure" | "enable" | null>(null);
@@ -1487,12 +1497,6 @@ function ActiveCall({
   }, []);
 
   useEffect(() => {
-    const updateFullscreen = () => setIsFullscreen(document.fullscreenElement === frameRef.current);
-    document.addEventListener("fullscreenchange", updateFullscreen);
-    return () => document.removeEventListener("fullscreenchange", updateFullscreen);
-  }, []);
-
-  useEffect(() => {
     if (!quickMenu) return;
     const closeOnOutsidePointer = (event: PointerEvent) => {
       if (
@@ -1657,22 +1661,12 @@ function ActiveCall({
     if (nextMenu) void refreshDevices();
   }, [quickMenu, refreshDevices]);
 
-  const openSettings = useCallback(async () => {
+  const openSettings = useCallback(() => {
     setQuickMenu(null);
     setCameraMenuPurpose(null);
-    if (document.fullscreenElement) await document.exitFullscreen();
     void refreshDevices();
     setSettingsOpen(true);
   }, [refreshDevices]);
-
-  const toggleFullscreen = useCallback(async () => {
-    try {
-      if (document.fullscreenElement) await document.exitFullscreen();
-      else await frameRef.current?.requestFullscreen();
-    } catch {
-      onMediaError("Не удалось развернуть звонок на весь экран.");
-    }
-  }, [onMediaError]);
 
   const statusText = connectionState === ConnectionState.Connected
     ? remoteCount > 0 ? `${remoteCount + 1} в звонке` : "Ожидаем участника"
@@ -1845,9 +1839,6 @@ function ActiveCall({
             {busyControl === "screen" ? <LoaderCircle className="spin" size={21} /> : <MonitorUp size={21} />}
           </CallControl>
         </MediaControl>
-        <CallControl active={isFullscreen} label={isFullscreen ? "Свернуть звонок" : "Развернуть звонок"} onClick={() => void toggleFullscreen()}>
-          <Maximize2 size={20} />
-        </CallControl>
         <button
           type="button"
           className={`call-control${settingsOpen ? " is-active" : ""}`}

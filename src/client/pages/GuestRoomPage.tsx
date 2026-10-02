@@ -55,9 +55,10 @@ function RoomEnded({ missing = false }: { missing?: boolean }) {
 }
 
 export function GuestRoomPage() {
+  const { shareId } = useParams();
   return (
     <OnlineProfileProvider>
-      <GuestRoomPageContent />
+      <GuestRoomPageContent key={shareId} />
     </OnlineProfileProvider>
   );
 }
@@ -71,6 +72,7 @@ function GuestRoomPageContent() {
   const [leaveOpen, setLeaveOpen] = useState(false);
   const [adding, setAdding] = useState<GuestResourceKind | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [callVisited, setCallVisited] = useState(false);
   const [autoJoinCall, setAutoJoinCall] = useState(() => (
     (location.state as { autoJoinCall?: unknown } | null)?.autoJoinCall === true
   ));
@@ -136,6 +138,11 @@ function GuestRoomPageContent() {
   const callResource = state.kind === "active"
     ? state.room.resources.find((resource) => resource.kind === "call") ?? null
     : null;
+
+  useEffect(() => {
+    // Keep the media provider mounted across resource navigation in this room.
+    if (resourceKind === "call" && callResource && profile) setCallVisited(true);
+  }, [callResource, profile, resourceKind]);
 
   if (state.kind === "loading") {
     return <div className="app-loading"><span className="spinner" /></div>;
@@ -278,19 +285,23 @@ function GuestRoomPageContent() {
         </div>
       )}
       <section className="guest-room__content">
-        {resourceKind === "call" ? (
-          profile && (
-            <div className="guest-room__call" aria-label="Звонок">
-              <CallWorkspace
-                requestCredentials={requestCredentials}
-                requestParticipants={requestParticipants}
-                profile={profile}
-                updateParticipantProfile={updateParticipantProfile}
-                autoJoin={autoJoinCall}
-              />
-            </div>
-          )
-        ) : (
+        {profile && callResource && (resourceKind === "call" || callVisited) && (
+          <div
+            className="guest-room__call"
+            aria-label="Звонок"
+            hidden={resourceKind !== "call"}
+            style={resourceKind !== "call" ? { display: "none" } : undefined}
+          >
+            <CallWorkspace
+              requestCredentials={requestCredentials}
+              requestParticipants={resourceKind === "call" ? requestParticipants : undefined}
+              profile={profile}
+              updateParticipantProfile={updateParticipantProfile}
+              autoJoin={autoJoinCall}
+            />
+          </div>
+        )}
+        {resourceKind !== "call" && (
           <div className="guest-room__stage">
             {profile && resourceKind === "board" ? (
               <GuestBoard
@@ -320,7 +331,7 @@ function GuestRoomPageContent() {
         open={leaveOpen}
         title="Покинуть комнату?"
         description={
-          resourceKind === "call"
+          resourceKind === "call" || callVisited
             ? "Звонок будет отключён. Доска, код и материалы останутся в комнате — вернуться можно по этой ссылке."
             : "Доска, код и материалы останутся в комнате — вернуться можно по этой ссылке."
         }

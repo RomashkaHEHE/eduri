@@ -21,11 +21,14 @@ The public routes are:
 - `/room/:shareId/board`, `/code`, and `/call` - independently addressable
   room resources.
 
-Each resource owns the whole room stage. The Call media workspace mounts only
-on `/room/:shareId/call`; it is never kept alive beside Board or Code and must
-not reduce either tool's working area. Creating a Call from another room
-resource navigates to the Call route before joining. Returning to Board or Code
-unmounts the media workspace.
+Each resource owns the whole room stage. The Call media workspace first mounts
+on `/room/:shareId/call`. After that visit it remains mounted in the same room
+when navigating to Board or Code, preserving the LiveKit connection and media
+tracks. Its presentation is fully hidden there, with no frame, overlay, or
+reserved working area. Hidden lobbies stop roster polling. Creating a Call from
+another room resource navigates to the Call route before joining. Returning to
+Call shows the same workspace without rejoining. Leaving the room, switching
+to another room, or entering a terminal room state unmounts the media workspace.
 
 Creating a room from a solo tool must promote the current resource, including
 its current durable state, rather than create an unrelated empty resource.
@@ -134,6 +137,15 @@ participant without active camera or screen media remains visible as a compact,
 non-focusable identity card instead of an empty full-stage rectangle. This
 preserves a participant target for later participant-specific actions without
 claiming that unavailable media is interactive. Every participant tile also
+shows a top-right microphone badge for the participant's microphone publication:
+Mic for enabled, Mic Off for muted or unpublished. This applies to camera,
+screen-share, and compact no-video tiles, updates live for local and remote
+participants, and does not depend on voice activity or received audio level.
+The local participant uses the same published name and initials as a remote
+participant, with a separate top-left `Вы` badge on each of their tiles. Local
+identity, not matching names or colors, controls this marker. Accessible labels
+include `(вы)`, and published participant name changes update the tile live.
+Every participant tile also
 keeps a bottom-left connection indicator. Its hover/focus popover reports the
 LiveKit aggregate quality plus WebRTC RTT, jitter, packet loss, and current
 media bitrate when the browser exposes those stats; missing values are shown as

@@ -1,4 +1,7 @@
-import { BUILTIN_OBJECT_KINDS } from "../../../board/core";
+import {
+  BUILTIN_OBJECT_KINDS,
+  isBoardTextLayoutMode,
+} from "../../../board/core";
 import { renderedLinePoints, renderedStrokePoints } from "./objectGeometry";
 import type {
   BoardObjectRenderingEnvelope,
@@ -42,7 +45,19 @@ const BUILTIN_PLUGINS: readonly BoardObjectPluginDescriptor[] = [
     kind: BUILTIN_OBJECT_KINDS.text,
     supportedVersion: 1,
     inlineEditor: true,
-    validate: (object) => hasStringProperty(object, "text"),
+    validate: (object) => hasStringProperty(object, "text")
+      && (
+        object.props.layoutMode === undefined
+        || isBoardTextLayoutMode(object.props.layoutMode)
+      )
+      && (
+        object.props.minimumHeight === undefined
+        || (
+          typeof object.props.minimumHeight === "number"
+          && Number.isFinite(object.props.minimumHeight)
+          && object.props.minimumHeight > 0
+        )
+      ),
   },
   {
     kind: BUILTIN_OBJECT_KINDS.frame,

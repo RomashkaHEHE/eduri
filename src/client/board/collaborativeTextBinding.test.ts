@@ -37,7 +37,11 @@ function replaceText(
   }, origin);
 }
 
-function bindReplica(document: Y.Doc, deviceId: string): BoundReplica {
+function bindReplica(
+  document: Y.Doc,
+  deviceId: string,
+  onValueChange?: () => void,
+): BoundReplica {
   const text = document.getText("source");
   const origin = createLocalCommandOrigin(deviceId);
   const undo = new LocalUndoController(document, origin);
@@ -49,6 +53,7 @@ function bindReplica(document: Y.Doc, deviceId: string): BoundReplica {
     localOrigin: origin,
     undo,
     applyEdit: (edit) => replaceText(document, text, origin, edit),
+    onValueChange,
   });
   const replica = { document, text, element, undo, binding };
   replicas.push(replica);
@@ -106,6 +111,19 @@ afterEach(() => {
 });
 
 describe("CollaborativeTextareaBinding", () => {
+  it("notifies layout consumers once after local and remote value changes", () => {
+    const document = new Y.Doc();
+    let notifications = 0;
+    const replica = bindReplica(document, "binding-layout", () => {
+      notifications += 1;
+    });
+
+    browserInput(replica, "local", 5);
+    expect(notifications).toBe(1);
+    document.transact(() => replica.text.insert(5, " remote"), REMOTE_ORIGIN);
+    expect(notifications).toBe(2);
+  });
+
   it("merges a delayed remote insert before the next local input without overwriting it", () => {
     const [first, second] = replicaPair("ab");
     first.element.setSelectionRange(1, 1);

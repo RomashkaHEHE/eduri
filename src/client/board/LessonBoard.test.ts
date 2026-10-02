@@ -34,8 +34,11 @@ interface FakeAwarenessState {
   readonly pageId?: string | null;
   readonly activeTool?: string;
   readonly viewport?: unknown;
+  readonly cursor?: BoardPoint | null;
+  readonly cursorTrail?: unknown;
   readonly laserPointer?: BoardPoint | null;
   readonly laserClearMode?: BoardLaserClearMode | null;
+  readonly transformPreview?: unknown;
   readonly gesturePreview?: {
     readonly kind: string;
     readonly points?: readonly unknown[];
@@ -724,11 +727,38 @@ describe("LessonBoard laser awareness", () => {
       viewport: localViewport,
     });
 
+    const localCursorTrail = {
+      streamId: "local-cursor-stream",
+      sampleOffset: 7,
+      samples: [
+        { x: 10, y: 20, elapsedMs: 0 },
+        { x: 18, y: 28, elapsedMs: 8 },
+      ],
+    } as const;
+    await act(async () => {
+      mocks.surfaceProps?.onAwarenessChange?.({
+        cursor: { x: 18, y: 28 },
+        cursorTrail: localCursorTrail,
+      });
+    });
+    expect(provider.presenceCalls.at(-1)).toMatchObject({
+      cursor: { x: 18, y: 28 },
+      cursorTrail: localCursorTrail,
+      pageId: CATALOG.pageId,
+    });
+
     provider.awareness.states.set(88, {
       userId: "tutor-2",
       displayName: "Преподаватель",
       color: "#006d77",
       pageId: CATALOG.pageId,
+      cursor: { x: 18, y: 28 },
+      cursorTrail: {
+        streamId: "remote-cursor-stream",
+        sampleOffset: 12,
+        points: [10, 20, 18, 28],
+        elapsedMs: [0, 8],
+      },
       viewport: { x: 25, y: 35, zoom: 0.005 },
     });
     await act(async () => provider.awareness.emitChange());
@@ -736,6 +766,14 @@ describe("LessonBoard laser awareness", () => {
       x: 25,
       y: 35,
       zoom: 0.02,
+    });
+    expect(mocks.surfaceProps?.presences?.[0]?.cursorTrail).toEqual({
+      streamId: "remote-cursor-stream",
+      sampleOffset: 12,
+      samples: [
+        { x: 10, y: 20, elapsedMs: 0 },
+        { x: 18, y: 28, elapsedMs: 8 },
+      ],
     });
 
     provider.awareness.states.set(88, {
@@ -1041,6 +1079,61 @@ describe("LessonBoard laser awareness", () => {
       gesturePreview: null,
       pageId: CATALOG.pageId,
     });
+  });
+
+  it("bridges validated live transform previews through awareness", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>().mockResolvedValue(
+        metricsResponse("2026-07-28T12:00:00.000Z"),
+      ),
+    );
+    await renderLessonBoard();
+    const provider = mocks.providers[0];
+    const transformPreview = {
+      streamId: "transform-stream-lesson",
+      transforms: [{
+        objectId: "00000000-0000-4000-8000-000000000410",
+        transform: [75, 85, 120, 80, 0.2] as const,
+      }],
+    };
+
+    await act(async () => {
+      mocks.surfaceProps?.onAwarenessChange?.({ transformPreview });
+    });
+    expect(provider.presenceCalls.at(-1)).toMatchObject({
+      transformPreview,
+      pageId: CATALOG.pageId,
+    });
+
+    provider.awareness.states.set(90, {
+      userId: "student-transform",
+      displayName: "Ученик",
+      color: "#2a9d5b",
+      pageId: CATALOG.pageId,
+      transformPreview: {
+        streamId: transformPreview.streamId,
+        objectIds: [transformPreview.transforms[0].objectId],
+        values: [...transformPreview.transforms[0].transform],
+      },
+    });
+    await act(async () => provider.awareness.emitChange());
+    expect(mocks.surfaceProps?.presences?.[0]?.transformPreview)
+      .toEqual(transformPreview);
+
+    provider.awareness.states.set(90, {
+      userId: "student-transform",
+      displayName: "Ученик",
+      color: "#2a9d5b",
+      pageId: CATALOG.pageId,
+      transformPreview: {
+        streamId: "invalid-transform-stream",
+        objectIds: [transformPreview.transforms[0].objectId],
+        values: [Number.NaN, 0, 10, 10, 0],
+      },
+    });
+    await act(async () => provider.awareness.emitChange());
+    expect(mocks.surfaceProps?.presences?.[0]?.transformPreview).toBeUndefined();
   });
 });
 

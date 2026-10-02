@@ -1,6 +1,7 @@
 import * as Y from "yjs";
 import type { BoardLineObjectGeometry } from "./lineGeometry.js";
 import {
+  BUILTIN_OBJECT_KINDS,
   type AtomicTransform,
   type BoardObjectInput,
   type BoardObjectRecord,
@@ -137,6 +138,39 @@ export function setObjectTransform(
   const record = requireObject(doc, objectId);
   const normalized = normalizeAtomicTransform(transform);
   executeBoardCommand(doc, origin, "object.transform", () => {
+    record.set("transform", normalized);
+  });
+}
+
+/** Applies an inline Text font resize and its proportional frame as one command. */
+export function setTextFontSizeAndTransform(
+  doc: Y.Doc,
+  objectId: string,
+  fontSize: number,
+  transform: AtomicTransform,
+  origin: BoardCommandOrigin,
+  minimumHeight?: number,
+): void {
+  if (!Number.isFinite(fontSize) || fontSize <= 0) {
+    throw new TypeError("Text font size must be a positive finite number");
+  }
+  const record = requireObject(doc, objectId);
+  const object = readBoardObject(record);
+  if (object.kind !== BUILTIN_OBJECT_KINDS.text) {
+    throw new TypeError(`Object ${objectId} is not Text`);
+  }
+  const normalized = normalizeAtomicTransform(transform);
+  if (
+    minimumHeight !== undefined
+    && (!Number.isFinite(minimumHeight) || minimumHeight <= 0)
+  ) {
+    throw new TypeError("Text minimum height must be a positive finite number");
+  }
+  executeBoardCommand(doc, origin, "text.font-size-and-transform", () => {
+    object.style.set("fontSize", fontSize);
+    if (minimumHeight !== undefined) {
+      object.props.set("minimumHeight", minimumHeight);
+    }
     record.set("transform", normalized);
   });
 }
@@ -512,5 +546,88 @@ export function replaceCollaborativeTextRange(
   executeBoardCommand(doc, origin, "text.replace-range", () => {
     if (deleteLength > 0) text.delete(index, deleteLength);
     if (value) text.insert(index, value);
+  });
+}
+
+export type CollaborativeTextAttributes = Readonly<Record<string, unknown>>;
+
+function assertCollaborativeTextAttributes(
+  attributes: CollaborativeTextAttributes,
+): void {
+  if (
+    attributes === null
+    || Array.isArray(attributes)
+    || Object.getPrototypeOf(attributes) !== Object.prototype
+  ) {
+    throw new TypeError("Collaborative text attributes must be a plain object");
+  }
+  for (const [key, value] of Object.entries(attributes)) {
+    if (!key || key.length > 64) {
+      throw new TypeError("Collaborative text attribute name is invalid");
+    }
+    if (
+      value !== null
+      && typeof value !== "boolean"
+      && typeof value !== "string"
+      && (typeof value !== "number" || !Number.isFinite(value))
+    ) {
+      throw new TypeError(`Collaborative text attribute ${key} is invalid`);
+    }
+  }
+}
+
+/** Replaces a range and applies inline attributes to the inserted text atomically. */
+export function replaceCollaborativeRichTextRange(
+  doc: Y.Doc,
+  objectId: string,
+  property: string,
+  index: number,
+  deleteLength: number,
+  value: string,
+  attributes: CollaborativeTextAttributes,
+  origin: BoardCommandOrigin,
+): void {
+  const text = requireCollaborativeText(doc, objectId, property);
+  assertCollaborativeTextAttributes(attributes);
+  if (
+    !Number.isSafeInteger(index)
+    || !Number.isSafeInteger(deleteLength)
+    || index < 0
+    || deleteLength < 0
+    || index + deleteLength > text.length
+  ) {
+    throw new RangeError("Rich-text replacement range is out of bounds");
+  }
+  if (deleteLength === 0 && value.length === 0) return;
+  executeBoardCommand(doc, origin, "text.rich-replace-range", () => {
+    if (deleteLength > 0) text.delete(index, deleteLength);
+    if (value) text.insert(index, value, { ...attributes });
+  });
+}
+
+/** Applies or clears inline attributes without replacing text content. */
+export function formatCollaborativeTextRange(
+  doc: Y.Doc,
+  objectId: string,
+  property: string,
+  index: number,
+  length: number,
+  attributes: CollaborativeTextAttributes,
+  origin: BoardCommandOrigin,
+): void {
+  const text = requireCollaborativeText(doc, objectId, property);
+  assertCollaborativeTextAttributes(attributes);
+  if (
+    !Number.isSafeInteger(index)
+    || !Number.isSafeInteger(length)
+    || index < 0
+    || length < 0
+    || index + length > text.length
+  ) {
+    throw new RangeError("Rich-text format range is out of bounds");
+  }
+  if (length === 0 || Object.keys(attributes).length === 0) return;
+  executeBoardCommand(doc, origin, "text.rich-format-range", () => {
+    text.format(index, length, { ...attributes });
   });
 }

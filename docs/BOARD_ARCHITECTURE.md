@@ -210,6 +210,17 @@ Rules:
 - a transform is one atomic value so concurrent movement cannot combine `x`
   from one user with `y` from another;
 - text, code, and LaTeX source use Y.Text;
+- Text version 1 may store optional `props.layoutMode` (`auto-width` or
+  `fixed-width`) and positive finite `props.minimumHeight`. Click-created Text
+  uses auto width with no implicit wrapping; drag-created Text keeps its
+  normalized horizontal width and dragged minimum height while content grows
+  downward. Optional `props.textAlign` is `left`, `center`, or `right` and
+  defaults to `left`. Records without `layoutMode` retain the fixed-width
+  compatibility behavior. The canonical Text `Y.Text` may carry bounded inline
+  `bold`, `italic`, `color`, `fontFamily`, and `fontSize` attributes. Missing
+  attributes inherit the object's versioned style; explicit boolean `false`
+  suppresses inherited bold/italic for that run. HTML and renderer nodes are
+  never canonical content.
 - a completed freehand stroke stores immutable packed/delta-coded points;
 - live stroke preview is awareness data, not hundreds of durable CRDT writes;
 - connectors retain bindings plus fallback coordinates; Arrow version 1 keeps
@@ -322,6 +333,19 @@ or interpret them. A known kind with a newer unsupported object version keeps
 the existing safe-placeholder behavior instead of applying version 1 defaults.
 Web and native renderers must use the same table rather than renderer-library
 defaults.
+
+While Text is actively edited, local and remote selections are ephemeral
+awareness. Each presence value names one Text object and carries two bounded,
+canonically encoded Yjs relative positions. The durable `Y.Text` remains the
+only source of text and inline formatting; awareness never duplicates the
+text. Recipients resolve both positions against their local document, reject a
+position belonging to another shared type, and render the participant-colored
+selection/caret at board level for every viewer, whether or not that viewer has
+the same Text object open. A layout-only DOM mirror follows the canonical
+object geometry and rich runs when no local editor supplies that layout. The
+participant name is hidden by default and appears only while a fine pointer is
+within the caret's bounded hover target; touch input does not reveal it.
+Leaving Text editing clears the local presence field.
 
 Creation-tool presets are local input/view state. They are not part of the
 board CRDT, awareness, wire protocol, or undo history, and changing a preset
@@ -614,7 +638,7 @@ manifest Y.Docs; a later object-add command copies their current concrete
 values into the new object.
 
 The web style adapter must not turn common suggestions into durable
-allow-lists. Its one-press colors, line patterns, font stacks, and font sizes are
+allow-lists. Its one-press colors, line patterns, and font stacks are
 accelerators. Arbitrary validated color, exact numeric width/opacity/font size,
 safe font-family fallback stack, and bounded dash pattern remain available.
 Mixed values stay explicit, and a change targets only compatible versions. The
@@ -632,8 +656,9 @@ A mixed selection which also contains an opacity-capable non-text object may
 show the union's opacity control and apply it to every compatible target.
 
 The ordinary font-family control is a portalled select-only combobox/listbox
-with the exact friendly labels `Inter`, `Georgia`, `Cascadia Code`, `Arial`,
-`Verdana`, `Trebuchet MS`, `Times New Roman`, and `Courier New`. Every ordinary
+with the exact friendly labels `Inter`, `Segoe UI`, `Calibri`, `Georgia`,
+`Cambria`, `Cascadia Code`, `Arial`, `Tahoma`, `Verdana`, `Trebuchet MS`,
+`Times New Roman`, and `Courier New`. Every ordinary
 option displays its friendly family name through the complete stored
 font-family stack it represents. The compact closed trigger always displays
 `Шрифт` through the selected known stack; mixed and unsupported historical
@@ -649,9 +674,14 @@ traversal with `Tab`, and outside-pointer dismissal. `Другой шрифт...
 explicitly opens the existing custom stack editor; that path keeps its
 validation, commit, blur, cancel, and focus behavior and accepts at most eight
 comma-separated families and 256 UTF-16 code units. The font-size input has no
-browser spinner chrome. Wheel over that input changes the bounded `8..256`
-value by `0.5`, or `5` with `Shift`, consumes the camera wheel event, and groups
-an uninterrupted wheel burst as one continuous style command.
+browser spinner chrome, datalist, or step snap. Its free-form draft is parsed
+only on commit, then clamped to `0.01..256` and rounded to two decimal places.
+While ordinary Text is active, `Alt`+scroll anywhere on the board changes that
+value continuously from normalized wheel delta, consumes the camera wheel
+event, and groups an uninterrupted wheel burst as one continuous style command.
+The physical `Alt` keydown/repeat and matching keyup are also consumed while
+the Text editor or its formatting controls own focus, preventing browser-menu
+activation without suppressing the wheel-driven board command.
 
 For a multi-selection, the style UI exposes the union of capabilities declared
 by the selected supported `(kind, version)` contracts. Applying one property
@@ -671,7 +701,15 @@ object's existing italic token.
 Collaborative style and text values are untrusted input. The web renderer
 applies finite, bounded dash, font-size, color, font-family, and font-style
 values before invoking Canvas2D. Static text/code/LaTeX previews and metadata
-labels render bounded UTF-16 prefixes with an explicit ellipsis. These are
+labels render bounded UTF-16 prefixes with an explicit ellipsis. Ordinary Text
+uses a substantially larger 65,536-code-unit static guard, omits a fixed glyph
+height so stale frames cannot clip canonical content, and switches long
+fixed-width strings to measured chunk wrapping instead of Konva's per-character
+native wrapper. Formatted `Y.Text` deltas become renderer-only runs with bounded
+font/color sanitization, mixed-run measurement, word wrapping, and object-level
+alignment; the derived `textRuns` snapshot is never written into the Y.Doc.
+During local inline editing its hidden Canvas glyph nodes remain empty and are
+rebuilt on exit, avoiding duplicate full layout on every input. These are
 renderer-only safety limits: the full CRDT values remain intact for editing,
 sync, recovery, and a future native client.
 
@@ -1126,8 +1164,13 @@ after commit. These differences are adapter command policy, not object schema
 or transport behavior.
 
 Placing a new empty text box starts a renderer-local provisional editor rather
-than a CRDT object. The first textarea value containing a non-whitespace
-character synchronously creates the versioned `eduri/text` object with the
+than a CRDT object. A click creates an auto-width/no-implicit-wrap draft; a drag
+beyond four screen pixels creates a fixed-width draft whose dragged height is
+its durable minimum. Both modes measure their content after every local input:
+auto width follows the longest explicit line in both directions, while fixed
+width wraps and grows downward without shrinking below its minimum. The first
+rich-editor value containing a non-whitespace character synchronously creates
+the versioned `eduri/text` object with the
 complete, untrimmed current value and immediately continues through its
 collaborative `Y.Text` binding. Whitespace-only input remains provisional.
 During IME composition, promotion waits for `compositionend` so replacing the
@@ -1135,12 +1178,21 @@ binding cannot interrupt the browser's active composition. The web adapter
 tracks the interval from `compositionstart` through `compositionend` explicitly
 instead of relying only on optional per-event `isComposing` flags; composing
 `Enter`/`Escape` keystrokes remain owned by the IME rather than closing the
-editor. Closing, replacing, or revoking access to a still-empty provisional
+editor. Outside IME composition, every `Enter` is native newline input. Ordinary
+Text survives blur and exits only through `Escape`, an actual tool change, or a
+lifecycle/access invalidation. `Alt`+scroll continuously resizes the active font
+and proportionally scales the atomic frame in one named local command before
+content measurement corrects its height. Closing, replacing, or revoking access
+to a still-empty provisional
 editor creates no object, update, selection, awareness state, or undo item.
 Undoing the initial add closes the now-invalid editor state when it removes the
-object. Once promoted, the object follows ordinary collaborative text
-semantics; it is never deleted merely because a later edit makes its text empty,
-since a concurrent remote insert must not be lost.
+object. Once promoted, the object follows ordinary collaborative text semantics
+and may be temporarily empty while an editor remains active, so select-all
+replacement and concurrent inserts are not interrupted. Explicitly finishing
+the editor reads the converged `Y.Text`; if it still contains only whitespace,
+line breaks, zero-width spacing/joiner characters, or a byte-order mark, the
+complete Text object is deleted in one local command. A remote visible insertion
+observed before that finish check is retained.
 
 The web renderer intercepts `contextmenu` only inside its canvas. A context
 request carries renderer-local screen coordinates, the corresponding board
@@ -1293,6 +1345,33 @@ zoom. Partly offscreen selections combine a dashed aggregate frame with solid
 individual outlines for their materialized members. The renderer suppresses
 individual outlines entirely above 512 materialized selected nodes; commands
 continue to use the complete local ID set.
+
+For a committed, fully materialized editable selection in Select, the complete
+interior of the common Transformer frame is a transparent drag target. This
+makes thin strokes and connectors movable without requiring another exact hit
+on their rendered geometry. Resize and rotation anchors keep priority. A
+`Ctrl`/`Cmd` or standalone-`Alt` pointer-down still bypasses the Transformer to
+start marquee or lasso selection, and read-only, inline editing, point editing,
+active area selection, pan, and pinch states disable this drag target with the
+rest of Transformer input. The target is renderer-local hit geometry: it does
+not alter object bounds, selection membership, awareness, CRDT state, or undo.
+
+Live object drag/resize/rotation uses a separate bounded awareness transform
+preview rather than repeated durable writes. Each display-paced packet carries
+a stable stream ID and up to 96 `(objectId, atomic transform)` entries in a
+compact parallel-array wire representation. Remote web renderers apply those
+entries only as temporary node presentation and
+interpolate retargeting over 56 ms; canonical object records, spatial geometry,
+and command history remain unchanged until pointer-up. Retained creation/laser
+and transform previews are mutually exclusive in one
+local awareness state, preventing stale gesture payloads from consuming the
+same JSON budget. The final transform preview is retained as a committed
+handoff target. A renderer retires that stream for an
+object as soon as any newer canonical transform for it arrives, preventing both
+awareness-first and CRDT-first delivery from flashing the old position. The
+completed gesture still writes every selected transform in one local-origin
+CRDT command and one undo item; the live packet cap never truncates that commit.
+Cancellation clears only the awareness preview and restores canonical nodes.
 
 The web Transformer's visual and pointer-hit metrics are an explicit
 screen-space exception to ordinary world-node inverse-zoom compensation. Konva
@@ -1695,7 +1774,27 @@ Awareness is ephemeral and never stored in SQLite or IndexedDB:
 - current page and optional viewport;
 - capped live gesture preview.
 
-Cursor/laser updates are coalesced around 20-30 Hz and interpolated by peers.
+Cursor/laser awareness remains coalesced around 20-30 Hz. Cursor packets do not
+discard higher-rate local input: the web adapter retains browser coalesced
+pointer events and includes a compact sequenced/timed repair tail of at most 48
+real positions spanning approximately the newest 100 ms. Packets overlap, and
+the receiver deduplicates by stream ID plus monotonic sample offset, so an
+intermediate awareness coalesce does not replace a curved path with one chord.
+The complete renderer-local cursor history is bounded to 1,024 samples; neither
+the tail nor its sender-relative timestamps are durable or authoritative state.
+
+The web receiver maps the sender-relative timeline onto its monotonic clock,
+tracks a slowly drifting minimum transit offset and filtered positive jitter,
+and plays confirmed samples through an adaptive 48-140 ms jitter buffer. Its
+playhead is monotonic, starts a late post-underrun packet without a same-call
+position jump, and catches up at no more than 1.25x. Piecewise cubic Hermite
+motion derives endpoint velocities from adjacent timed samples and bounds both
+controls to the current sample rectangle, preserving sample order without
+overshoot. A source-time gap above 48 ms holds the earlier coordinate until the
+last 48 ms rather than inventing continuous motion through an idle interval.
+Playback ends exactly at the newest confirmed coordinate and never extrapolates
+past it. Legacy cursor-only clients use the bounded adaptive 32-80 ms endpoint
+fallback.
 Laser payload validation retains at most the newest 16 strokes and 160 total
 finite points, and sanitizes each optional color/width/opacity style at the
 renderer/network boundary. A retained session stays active until an explicit
@@ -2198,7 +2297,10 @@ cover:
 - mobile/touch/stylus gestures and responsive controls;
 - synthetic keyboard-to-mouse button injection, empty coalesced samples,
   mixed pointer/mouse movement, and cursor awareness during renderer-owned
-  drag/transform gestures;
+  drag/transform gestures; cursor coverage includes compact timed-tail
+  validation, frame/network coalescing without path loss, overlapping sequence
+  repair, curved timed playback, adaptive jitter, bounded catch-up, underrun
+  restart without a same-frame jump, exact stop, and legacy endpoint fallback;
 - Drawing modifier ordering: pre-held standalone `Alt` latches an
   awareness-only laser, while pre-held `Ctrl/Cmd` keeps ordinary freehand
   sampling until complete release and re-press arms unfinished-stroke movement;

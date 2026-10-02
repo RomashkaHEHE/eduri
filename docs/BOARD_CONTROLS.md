@@ -111,7 +111,7 @@ active/disabled treatment as its peers.
 | Select | `V` or `1` | Click, containment/`Shift`-intersection marquee, `Alt` lasso, move, resize, rotate | Fixed first | Available |
 | Drawing | `P` or `2` | Freehand stroke; pre-held `Alt` starts its temporary laser mode | Main toolbar | Laser mode only |
 | Eraser | `E` or `3` | Preview a pending erase, commit on release | Main toolbar | Disabled |
-| Text | `T` or `4` | Open a provisional 240 x 52 text editor; create on first input | Main toolbar | Disabled |
+| Text | `T` or `4` | Click for auto-width text or drag a fixed-width area; create on first non-whitespace input | Main toolbar | Disabled |
 | Line | `L` or `5` | Drag a straight or quadratic curved line | Main toolbar | Disabled |
 | Arrow | `A` or `6` | Drag a straight or quadratic curved arrow | Main toolbar | Disabled |
 | Shape | `R` or `7` | Drag the Rectangle, Ellipse, Diamond, or Frame/Area selected in the tool settings | Main toolbar | Disabled |
@@ -137,10 +137,11 @@ scrolling. Opening toolbar configuration hides the stack.
 | Active lasso selection | Armed `Ctrl` move the area |
 | Drawing selected, no active gesture | `Alt` laser |
 | Active ordinary Drawing/highlighter stroke | Armed `Ctrl` move the unfinished stroke; `Shift` straight segment |
+| Active Text editor | `Esc` finish text; `Alt + Scroll` change font size |
 | Active laser, pan, pinch, placement, shape/connector drawing, resize, or object drag | none |
 | Active Eraser gesture | `Alt` restore an object from the pending erase set |
 | Active rotation handle gesture | `Shift` snap to 45-degree steps |
-| Hand, Eraser while idle, Text, Line, Arrow, Shape, Code, LaTeX, or Image while idle | none |
+| Hand, Eraser while idle, Text while idle, Line, Arrow, Shape, Code, LaTeX, or Image while idle | none |
 
 `Ctrl` labels also describe the equivalent `Cmd` behavior. For selection-area
 and unfinished-stroke movement, a command key already down at pointer-down is
@@ -885,7 +886,29 @@ presence frame.
 - Object drag/resize/rotate is enabled only in Select and while editable.
 - Dragging one selected object moves the complete supported selection by the
   same logical delta, including selected objects outside the viewport.
-- One drag commits all transforms atomically and is one undo item.
+- During drag, resize, or rotation, the renderer publishes the newest absolute
+  transforms through a display-paced awareness preview. A packet has one
+  stable gesture stream ID and at most 96 object transforms; this bounds
+  network and remote-render work without creating intermediate board updates.
+  Publishing a transform preview clears any retained creation/laser preview;
+  publishing a new creation/laser preview clears a retained transform preview,
+  so mutually exclusive tool gestures cannot accumulate in one presence frame.
+  Remote materialized objects interpolate from their currently shown transform
+  to each new target over 56 ms with cubic ease-out, so ordinary awareness
+  cadence does not look like low-frame-rate movement. Simultaneous previews for
+  the same object resolve deterministically by authenticated awareness client
+  ID, while the canonical CRDT transform remains authoritative.
+- Pointer-up commits every selected object's final transform atomically as one
+  CRDT command and one undo item, including objects omitted from a bounded live
+  packet. The final awareness value is marked committed and remains a visual
+  handoff target until the corresponding canonical transform arrives. If the
+  CRDT update arrives first, that stream is retired for the object; if awareness
+  arrives first, it stays visible until the object catches up. Neither delivery
+  order exposes the pre-drag position between preview and commit.
+- Cancellation clears the live transform preview and restores canonical object
+  transforms without a durable command. Read-only transitions, context-menu
+  cancellation, blur, hidden-document cancellation, and renderer destruction
+  use the same path.
 - Resize and rotation handles are enabled when no more than 256 objects are
   selected and every selected renderer node is currently visible.
 - Rotation is smooth by default. Holding `Shift` before or during a rotation-
@@ -937,31 +960,51 @@ presence frame.
 
 ## Shapes, text, frame, and placement tools
 
-- Text pointer-up opens a local provisional 240 x 52 editor at the pointer-down
-  world point. The provisional editor is not yet a board object and is not
-  advertised to other participants.
-- The first textarea value containing a non-whitespace character synchronously
+- Text click opens a compact local provisional editor at the pointer-down world
+  point with `layoutMode=auto-width`. It never wraps automatically: its frame
+  follows the longest explicit line in both growth and deletion, while `Enter`
+  creates another explicit line and height remains content-driven.
+- A Text drag beyond the four-screen-pixel click tolerance opens
+  `layoutMode=fixed-width`. The normalized drag width remains fixed. Its dragged
+  height is stored as `minimumHeight`; ordinary word wrapping grows the frame
+  downward as needed and deletion may shrink it back to, but never below, that
+  minimum. Both provisional modes are local and are not advertised to peers.
+- The first rich-text editor value containing a visible non-spacing character synchronously
   creates the `eduri/text` object with the complete, untrimmed current value,
   selects it, and attaches the normal collaborative `Y.Text` binding without
-  replacing or defocusing the textarea. Leading/trailing whitespace and line
-  breaks are preserved, but whitespace-only input remains provisional.
-- Interim IME composition remains in the provisional textarea and promotion
+  replacing or defocusing the editor. Leading/trailing whitespace and line
+  breaks are preserved, but a value containing only Unicode whitespace, line
+  breaks, zero-width spacing/joiner characters, or a byte-order mark remains
+  provisional.
+- Interim IME composition remains in the provisional editor and promotion
   occurs on `compositionend`, avoiding a binding change during active native
   composition. The editor tracks the interval from `compositionstart` through
   `compositionend`, including environments whose interim input event omits
   `isComposing`. While native composition is active, `Enter` and `Escape`
   remain available to the IME and do not close the editor (including legacy key
   code `229` events).
-- Closing a still-empty provisional editor through `Escape`, unmodified
-  `Enter`, blur, read-only transition, document replacement, or surface unmount
-  discards it. It creates no CRDT update, awareness selection, or undo item.
+- `Enter` is always native text input and blur does not finish ordinary Text.
+  A still-empty provisional editor is discarded only through `Escape`, an
+  actual tool change, read-only transition, document replacement, or surface
+  unmount. It creates no CRDT update, awareness selection, or undo item.
 - `Escape` from a text editor also restores keyboard focus to the board. If the
   provisional text was promoted or an existing text object was being edited,
   the same keypress clears its local selection; plain numeric tool shortcuts
   are therefore available on the immediately following keypress.
-- After promotion, the text object follows ordinary collaborative behavior. It
-  is not automatically deleted if a later edit makes it empty, because deleting
-  a map entry could discard a concurrent remote insertion into its `Y.Text`.
+- After promotion, the text object follows ordinary collaborative behavior. A
+  temporarily empty value is allowed while its editor remains active, so
+  select-all then replacement stays intuitive. Finishing editing checks the
+  converged current `Y.Text`; if it still contains only the spacing characters
+  listed above, the complete object is deleted in one local command. A new
+  non-empty remote insertion observed before that finish check is retained.
+- Text bounds use a one-pixel muted-gray editing outline with no fill. The editor and
+  Canvas renderer both start at the top padding; neither vertically centers nor
+  clips overflow. Auto-width measurement reserves one final CSS pixel beyond
+  measured `scrollWidth`, preventing the last glyph from being clipped by
+  fractional font metrics. The Canvas node omits a fixed glyph height and uses
+  measured wrapping for long static fixed-width text, while hidden glyph layout
+  is skipped during local editing so typing cost does not grow on every
+  keystroke.
 - Rectangle, ellipse, diamond, and frame drags normalize in every direction to
   positive bounds.
 - `Shift`, `Ctrl`, and `Cmd` do not constrain or modify line, arrow, rectangle,
@@ -1352,11 +1395,12 @@ awareness payload, collaboration packet, or undo item.
 Direct selection controls and the property editors inside creation-preset cells
 use the following bounds:
 
-- Ordinary Text is edited directly in its board object. The textarea overlay
+- Ordinary Text is edited directly in its board object. The rich contenteditable overlay
   follows the object's canvas position, dimensions, zoom, rotation, font,
   weight, italic style, color, and opacity; it has no detached popup size,
-  panel, opaque background, outline, or shadow. The matching canvas glyphs are
-  suppressed locally while the transparent textarea is active so text is not
+  panel, opaque background, or shadow. A one-pixel outline exposes its exact
+  frame without adding fill. The matching canvas glyphs are
+  suppressed locally while the transparent editor is active so text is not
   drawn twice. Code and LaTeX retain their dedicated editors because their
   source-oriented workflows are distinct from plain text editing.
 
@@ -1376,11 +1420,11 @@ use the following bounds:
   preserved and rendered. A mixed selection containing at least one
   opacity-capable non-text object may show the union control; changing it still
   targets every selected object version which declares opacity.
-- Font size accepts every 0.5 value from 8 through 256. A datalist supplies
-  common sizes without restricting manual input, while browser spinner arrows
-  are visually removed. Wheel directly over the input consumes the event so the
-  board cannot pan: wheel up adds 0.5, wheel down subtracts 0.5, and holding
-  `Shift` uses 5-point steps. Values clamp to 8-256. A wheel burst outside input
+- Font size accepts every finite value from 8 through 256 without a datalist,
+  step snap, or browser spinner arrows. Wheel directly over the input consumes
+  the event so the board cannot pan and changes the value continuously from the
+  normalized pixel/line/page delta; `Shift` accelerates it tenfold. Values clamp
+  to 8-256. A wheel burst outside input
   focus ends after 180 ms of inactivity and is one continuous undo item; while
   the field is focused, focus/blur owns the same continuous capture.
 - Font family uses a portalled select-only combobox/listbox rather than a native
@@ -1811,22 +1855,60 @@ board has focus. Text editors retain the browser's native text clipboard.
   editor. A new Text placement starts with the provisional lifecycle above;
   existing Text and newly placed code/LaTeX edit durable objects immediately.
 - Ordinary Text keeps the object's exact projected position, dimensions, zoom,
-  rotation, typography, opacity, wrapping, and vertical alignment at every
+  rotation, typography, opacity, wrapping, and top alignment at every
   viewport width. It is never moved or expanded into a detached mobile panel.
 - Code and LaTeX source overlays are clamped into the visible board, have a
   minimum screen size of 220 x 72, and currently do not rotate with the object.
-- Blur outside the editor container exits. Moving focus to the Run button inside
-  a code editor does not exit.
+- Blur outside Code/LaTeX exits. Ordinary Text intentionally survives blur and
+  finishes only on `Escape`, an actual tool change, access/document replacement,
+  object removal, undo of its initial add, or surface unmount. Board creation
+  callbacks are ignored while Text owns editing, so an outside board press cannot
+  silently replace the active editor.
 - `Escape` exits any editor except while the key event belongs to an active
   native IME composition.
-- Text: `Enter` exits; `Shift+Enter` inserts a newline; spellcheck is enabled.
-  A composing `Enter` remains reserved for the IME. `Ctrl+Enter`,
-  `Cmd+Enter`, and `Alt+Enter` do not exit and retain the textarea's native
-  behavior.
+- Text: plain or modified `Enter` inserts a newline; spellcheck is enabled. A
+  composing `Enter` remains reserved for the
+  IME. `Escape` exits and restores board focus. The contextual hint stack shows
+  both this exit and the active `Alt`+scroll font-size action.
+- `Alt`+scroll anywhere on the board while Text editing is active is consumed
+  before camera handling and continuously changes the Text object's bounded
+  `0.01..256` font size without snapping. Width and height scale immediately by the
+  same ratio; fixed-width `minimumHeight` scales too, then content measurement
+  corrects height. Every stored wheel result is rounded to two decimal places,
+  preventing floating-point drift. One uninterrupted wheel burst is one local
+  undo item and the font/style-frame update is one named Yjs transaction.
+- A compact no-shadow formatting bar appears immediately above active Text. It
+  exposes font family, a free-form font-size textbox, text color, bold, italic,
+  and left/center/right alignment. Font, size, color, bold, and italic apply to
+  the current selection; with a collapsed caret they become attributes for
+  subsequent input. Alignment belongs to the complete Text object. Toolbar
+  pointer input preserves the editor's last text range. Mixed selection values
+  remain explicit rather than silently choosing one run.
+- Font family uses the same in-app portalled combobox/listbox as the board style
+  bar, including its keyboard navigation, typeahead, and custom-family path;
+  Text editing never falls back to a native `select`. Text color uses the same
+  shared Color Library, recent colors, palette editing, and advanced in-app
+  picker as other board style controls, and never opens `input[type=color]`.
+- The font-size textbox accepts an unrestricted intermediate string and has no
+  native number spinner, `min`, `max`, or `step`. Only `Enter` or blur parses a
+  decimal point or comma, clamps the committed value to `0.01..256`, rounds it
+  to two decimal places, and restores the previous value if parsing fails.
 - Code and LaTeX: `Enter` inserts a native newline; spellcheck is disabled.
 - Text uses collaborative `text`; code and LaTeX use collaborative `source`.
-  Local input performs a minimal prefix/suffix replacement. Remote deltas patch
-  the textarea and translate its selection without dropping focus.
+  Text input and range formatting are granular `Y.Text` transactions; its DOM
+  spans are derived presentation only. Remote deltas rebuild only the active
+  presentation and translate the local selection without dropping focus.
+  Active Text publishes its anchor/head as Yjs relative positions in bounded
+  awareness. Every peer renders participant-colored selections and carets over
+  the board object even when that peer is not editing it; edits before a remote
+  caret therefore do not detach it from its logical location. The participant
+  name stays hidden until a fine pointer hovers within 18 CSS pixels across the
+  caret hit target, matching the Code workspace behavior. Code/LaTeX retain
+  their plain-text minimal prefix/suffix binding.
+- Text intercepts `Ctrl`/`Cmd+A` for its complete collaborative value,
+  `Ctrl`/`Cmd+B` and `Ctrl`/`Cmd+I` for the selected range or pending caret
+  attributes, and the existing local-only undo/redo shortcuts. Backspace and
+  Delete replace any non-collapsed selection in one granular `Y.Text` edit.
 - IME composition creates explicit undo boundaries.
 - Editor `Ctrl`/`Cmd+Z`, `Ctrl`/`Cmd+Shift+Z`, and `Ctrl`/`Cmd+Y` operate on the
   same local-only board history.
@@ -1935,11 +2017,12 @@ One undo item is created for each:
 - one code output write;
 - one held arrow-key nudge gesture.
 
-Text typing uses a roughly 450 ms grouping window with focus, tool, and IME
-boundaries.
+Text typing and its content-driven frame updates use a roughly 450 ms grouping
+window with tool, `Escape`, and IME boundaries. Ordinary Text blur is not a
+boundary because it no longer finishes editing.
 
 A still-empty provisional Text editor is outside history. Its first value
-containing a non-whitespace character is stored inside the object-add command,
+containing a visible non-spacing character is stored inside the object-add command,
 so undoing that creation removes the object and closes its editor rather than
 leaving either an empty textbox or a hidden editing state. Later typing uses the
 ordinary grouping window.
@@ -1963,8 +2046,11 @@ that explicit pre-cancellation.
 - Browser-window blur clears the remembered key without trying to block
   operating-system actions such as `Alt+Tab`. Unmounting the board does the
   same.
-- `input`, `textarea`, `select`, and `contenteditable` targets retain native
-  `Alt`/Option input. `AltGraph` is not treated as standalone `Alt`.
+- `input`, `textarea`, `select`, and `contenteditable` targets normally retain
+  native `Alt`/Option input. Active ordinary Text is the deliberate exception:
+  its editor and formatting controls consume physical `Alt` keydown/repeat and
+  the matching keyup so browser chrome cannot react while `Alt`+scroll is a
+  board command. `AltGraph` is not treated as standalone `Alt`.
 - Only the event for the `Alt` key itself is consumed. `Alt+Enter`,
   `Alt`-modified arrows, digits, and all other key events keep their documented
   behavior. Pointer and compatibility-mouse events still expose the physical
@@ -2004,6 +2090,7 @@ selected concrete shape never change this table.
 | --- | --- |
 | `Ctrl`/`Cmd+A` | Select all mutable objects |
 | Click mutable object | Select it alone, or preserve its already-selected group |
+| Drag anywhere inside the frame of an editable selection | Move the complete selection; resize/rotation handles retain priority |
 | `Shift`+click mutable object | Toggle that one object |
 | Drag empty canvas | Replace selection with objects fully contained by the rectangular marquee |
 | Hold `Shift` during rectangular marquee | Use inclusive any-intersection while held; pressing/releasing it updates live candidates and the final predicate |
@@ -2137,14 +2224,28 @@ non-Select tool; those nested states can require multiple presses.
   failure leave the device-local profile saved, keep every collaboration/media
   surface mounted, and expose the relevant provider/media error; they do not
   falsely present the remote participant update as accepted.
-- Local cursor and live gesture updates are coalesced to animation frames, then
-  network awareness is rate-limited to roughly one packet per 40 ms.
-- Remote cursor motion interpolates over 72 ms and uses a compact asymmetric
+- Local cursor input retains browser coalesced pointer events rather than only
+  the last animation-frame position. Awareness remains rate-limited to roughly
+  one packet per 40 ms, but each packet carries a compact, sequenced, timed
+  repair tail: up to 48 real samples covering approximately the newest 100 ms.
+  Overlap repairs a skipped/coalesced packet without raising the packet rate;
+  receivers deduplicate samples by stream ID and monotonic sample offset.
+- Remote clients play the confirmed sender timeline through an adaptive 48-140
+  ms jitter buffer. They estimate minimum transit offset and filtered excess
+  jitter, never move the playback clock backwards, and catch up at no more than
+  1.25x after an underrun. A newly arrived packet after a stop cannot move the
+  cursor in the same render call. Timed samples are joined with bounded cubic
+  Hermite segments whose velocities come from adjacent real samples; every
+  sample is reached in order and curve controls remain inside each confirmed
+  segment. Gaps longer than 48 ms hold the earlier position until the final 48
+  ms instead of inventing motion throughout an idle period. Playback stops
+  exactly at the newest confirmed coordinate and never extrapolates beyond it.
+  Clients without a timed trail retain the adaptive 32-80 ms endpoint fallback.
+  The cursor uses a compact asymmetric
   navigation wedge with a precise hotspot, no stem or tail, and the
   authenticated participant color. Its outline contrasts with the viewer's
   current board theme and scales with the pointer, while the idle name label chooses light or dark
-  text from the participant color's relative luminance. A jump above 600 screen
-  pixels is shown immediately. The pointer lives in board space: its effective
+  text from the participant color's relative luminance. The pointer lives in board space: its effective
   screen scale is `viewerZoom / senderZoom`, so zooming the local camera out
   shrinks remote pointers together with board content and zooming in enlarges
   them. The authenticated display-name label remains constant screen size and is hidden on

@@ -59,10 +59,16 @@ import {
   MAX_BOARD_GESTURE_PREVIEW_POINTS,
   MAX_BOARD_LASER_POINTS,
   MAX_BOARD_LASER_STROKES,
+  compactBoardCursorTrail,
+  compactBoardTransformPreview,
+  sanitizeBoardCursorTrail,
   sanitizeBoardGesturePreviewStyle,
+  sanitizeBoardTransformPreview,
   type BoardGesturePreviewStyle,
+  type BoardCursorTrail,
   type BoardLaserClearMode,
   type BoardLaserStroke,
+  type BoardTransformPreview,
 } from "./rendering/types.js";
 
 export type BoardConnectionState =
@@ -150,6 +156,7 @@ export interface BoardGesturePreview {
 
 export interface BoardLocalPresence {
   readonly cursor?: BoardPoint | null;
+  readonly cursorTrail?: BoardCursorTrail | null;
   readonly selection?: readonly string[];
   readonly activeTool?: string | null;
   readonly laserPointer?: BoardPoint | null;
@@ -157,6 +164,12 @@ export interface BoardLocalPresence {
   readonly pageId?: string | null;
   readonly viewport?: BoardViewport | null;
   readonly gesturePreview?: BoardGesturePreview | null;
+  readonly transformPreview?: BoardTransformPreview | null;
+  readonly textSelection?: {
+    readonly objectId: string;
+    readonly anchor: readonly number[];
+    readonly head: readonly number[];
+  } | null;
 }
 
 export interface BoardNetworkProviderOptions {
@@ -246,6 +259,7 @@ const MAX_OUTBOX_IN_FLIGHT_BYTES = BOARD_PROTOCOL_LIMITS.maxUpdateBytes;
 const MAX_OUTBOX_SOCKET_BUFFERED_BYTES = 4 * 1024 * 1024;
 const LOCAL_PRESENCE_KEYS = new Set([
   "cursor",
+  "cursorTrail",
   "selection",
   "activeTool",
   "laserPointer",
@@ -253,6 +267,8 @@ const LOCAL_PRESENCE_KEYS = new Set([
   "pageId",
   "viewport",
   "gesturePreview",
+  "transformPreview",
+  "textSelection",
 ]);
 
 class BoardUpdateLimitError extends Error {
@@ -382,6 +398,20 @@ function finitePoint(value: BoardPoint, field: string): BoardPoint {
     throw new TypeError(`${field} coordinates must be finite`);
   }
   return { x: value.x, y: value.y };
+}
+
+function relativePositionBytes(
+  value: readonly number[],
+  field: string,
+): number[] {
+  if (
+    value.length === 0
+    || value.length > 128
+    || value.some((byte) => !Number.isSafeInteger(byte) || byte < 0 || byte > 255)
+  ) {
+    throw new TypeError(`${field} must be 1-128 bytes`);
+  }
+  return [...value];
 }
 
 function recoveryReasonForTicket(error: BoardTicketRequestError): BoardRecoveryReason {
@@ -622,6 +652,15 @@ export class BoardNetworkProvider {
     if (presence.cursor !== undefined) {
       next.cursor = presence.cursor === null ? null : finitePoint(presence.cursor, "cursor");
     }
+    if (presence.cursorTrail !== undefined) {
+      if (presence.cursorTrail === null) {
+        next.cursorTrail = null;
+      } else {
+        const cursorTrail = sanitizeBoardCursorTrail(presence.cursorTrail);
+        if (!cursorTrail) throw new TypeError("cursorTrail is invalid");
+        next.cursorTrail = compactBoardCursorTrail(cursorTrail);
+      }
+    }
     if (presence.selection !== undefined) {
       next.selection = [...new Set(presence.selection)]
         .sort()
@@ -820,6 +859,34 @@ export class BoardNetworkProvider {
             ...(committedObjectId !== undefined ? { committedObjectId } : {}),
           };
         }
+      }
+    }
+    if (presence.transformPreview !== undefined) {
+      if (presence.transformPreview === null) {
+        next.transformPreview = null;
+      } else {
+        const transformPreview = sanitizeBoardTransformPreview(
+          presence.transformPreview,
+        );
+        if (!transformPreview) {
+          throw new TypeError("transformPreview is invalid");
+        }
+        next.transformPreview = compactBoardTransformPreview(transformPreview);
+      }
+    }
+    if (presence.textSelection !== undefined) {
+      if (presence.textSelection === null) {
+        next.textSelection = null;
+      } else {
+        const value = presence.textSelection;
+        if (!value.objectId || value.objectId.length > 96) {
+          throw new TypeError("textSelection objectId is invalid");
+        }
+        next.textSelection = {
+          objectId: value.objectId,
+          anchor: relativePositionBytes(value.anchor, "textSelection anchor"),
+          head: relativePositionBytes(value.head, "textSelection head"),
+        };
       }
     }
 

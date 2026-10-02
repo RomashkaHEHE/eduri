@@ -439,9 +439,13 @@ describe("BoardStyleBar shape kind control", () => {
 describe("BoardStyleBar font family menu", () => {
   const expectedOptions = [
     ["Inter", "Inter, Arial, sans-serif"],
+    ["Segoe UI", "Segoe UI, Arial, sans-serif"],
+    ["Calibri", "Calibri, Arial, sans-serif"],
     ["Georgia", "Georgia, Times New Roman, serif"],
+    ["Cambria", "Cambria, Times New Roman, serif"],
     ["Cascadia Code", "Cascadia Code, Consolas, monospace"],
     ["Arial", "Arial, sans-serif"],
+    ["Tahoma", "Tahoma, Arial, sans-serif"],
     ["Verdana", "Verdana, sans-serif"],
     ["Trebuchet MS", "Trebuchet MS, sans-serif"],
     ["Times New Roman", "Times New Roman, serif"],
@@ -553,7 +557,7 @@ describe("BoardStyleBar font family menu", () => {
     });
     expect(changes).toHaveBeenCalledWith(
       "fontFamily",
-      "Georgia, Times New Roman, serif",
+      "Segoe UI, Arial, sans-serif",
     );
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
     expect(document.activeElement).toBe(trigger);

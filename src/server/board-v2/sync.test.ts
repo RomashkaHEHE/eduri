@@ -966,6 +966,41 @@ describe("authoritative Board awareness", () => {
     )).toThrow(/too many values/iu);
   });
 
+  it("accepts a compact 96-object transform preview with maximum selection", () => {
+    const objectIds = Array.from(
+      { length: 96 },
+      (_, index) => `board-object-${index.toString().padStart(3, "0")}`,
+    );
+    const state = {
+      pageId: "00000000-0000-4000-8000-000000000001",
+      cursor: { x: 320, y: 180 },
+      viewport: { x: 12, y: 24, zoom: 1.25 },
+      activeTool: "select",
+      selection: Array.from(
+        { length: 256 },
+        (_, index) => `selected-object-${index.toString().padStart(3, "0")}`,
+      ),
+      gesturePreview: null,
+      transformPreview: {
+        streamId: "transform-stream-maximum",
+        objectIds,
+        values: objectIds.flatMap((_, index) => [index, index * 2, 80, 60, 0]),
+      },
+    };
+    const authorized = authorizeAwarenessUpdate(
+      encodeAwarenessState(46, 1, state),
+      46,
+      {
+        userId: "real-user",
+        displayName: "Real user",
+        role: "tutor",
+        color: "#2563eb",
+      },
+    );
+
+    expect(authorized.state).toMatchObject(state);
+  });
+
   it("preflights every document before committing profile identity updates", () => {
     const registry = new BoardAwarenessRegistry();
     const clientId = 45;

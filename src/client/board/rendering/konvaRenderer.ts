@@ -1,7 +1,13 @@
 import Konva from "konva";
 import { clampBoardZoom } from "../boardZoom";
 import {
+  BOARD_TEXT_LINE_HEIGHT,
+  BOARD_TEXT_MIN_AUTO_WIDTH,
+  BOARD_TEXT_PADDING_PX,
+} from "../textLayout";
+import {
   BUILTIN_OBJECT_KINDS,
+  boardTextLayoutMode,
   boardPointLineCubicPoints,
   compareBoardObjectZOrder,
   createBoardPointLineObjectGeometry,
@@ -46,6 +52,8 @@ import { BoardSpatialIndex, spatialItemForObject } from "./spatialIndex";
 import { defaultBoardToolStyle } from "./toolStyles";
 import type {
   BoardCamera,
+  BoardCursorInputSample,
+  BoardCursorTrail,
   BoardGesturePreview,
   BoardGesturePreviewStyle,
   BoardGesturePreviewTool,
@@ -62,13 +70,17 @@ import type {
   BoardShapeKind,
   BoardTheme,
   BoardTool,
+  BoardTransformPreview,
 } from "./types";
 import {
   MAX_BOARD_ACCUMULATED_LASER_STROKES,
+  MAX_BOARD_ACCUMULATED_CURSOR_POINTS,
   MAX_BOARD_ACCUMULATED_PREVIEW_POINTS,
   MAX_BOARD_GESTURE_PREVIEW_POINTS,
   MAX_BOARD_LASER_POINTS,
   MAX_BOARD_LASER_STROKES,
+  MAX_BOARD_TRANSFORM_PREVIEW_OBJECTS,
+  sanitizeBoardCursorTrail,
   sanitizeBoardGesturePreviewStyle,
   sanitizeBoardLaserPreview,
 } from "./types";
@@ -79,7 +91,18 @@ const WHEEL_LINE_DELTA_PX = 16;
 const WHEEL_DELTA_MODE_LINE = 1;
 const WHEEL_DELTA_MODE_PAGE = 2;
 const VIEWPORT_OVERSCAN_PX = 480;
-const CURSOR_INTERPOLATION_MS = 72;
+const DEFAULT_CURSOR_SAMPLE_INTERVAL_MS = 40;
+const MIN_CURSOR_INTERPOLATION_MS = 32;
+const MAX_CURSOR_INTERPOLATION_MS = 80;
+const CURSOR_INTERPOLATION_INTERVAL_FACTOR = 1.15;
+const CURSOR_VELOCITY_FILTER = 0.65;
+const INITIAL_CURSOR_PLAYBACK_DELAY_MS = 64;
+const MIN_CURSOR_PLAYBACK_DELAY_MS = 48;
+const MAX_CURSOR_PLAYBACK_DELAY_MS = 140;
+const CURSOR_JITTER_FILTER = 0.18;
+const CURSOR_JITTER_DELAY_FACTOR = 2.5;
+const MAX_CURSOR_CATCH_UP_RATE = 1.25;
+const MAX_CURSOR_SEGMENT_MOTION_MS = 48;
 export const REMOTE_GESTURE_INTERPOLATION_MS = 56;
 export const REMOTE_CURSOR_LABEL_IDLE_MS = 5_000;
 const LASER_FADE_MS = 300;
@@ -180,8 +203,15 @@ const MAX_RENDER_FONT_SIZE = 256;
 const MAX_RENDER_COLOR_CODE_UNITS = 64;
 const MAX_RENDER_FONT_FAMILY_CODE_UNITS = 256;
 const MAX_RENDER_FONT_FAMILIES = 8;
-const MAX_RENDER_TEXT_CODE_UNITS = 4_096;
+const MAX_RENDER_TEXT_CODE_UNITS = 65_536;
+const MAX_RENDER_SOURCE_CODE_UNITS = 4_096;
 const MAX_RENDER_METADATA_CODE_UNITS = 128;
+const NATIVE_TEXT_WRAP_CODE_UNITS = 4_096;
+const TEXT_CREATION_DRAG_PX = 4;
+const TEXT_LINE_HEIGHT = BOARD_TEXT_LINE_HEIGHT;
+const TEXT_PADDING = BOARD_TEXT_PADDING_PX;
+const TEXT_MIN_AUTO_WIDTH = BOARD_TEXT_MIN_AUTO_WIDTH;
+const TEXT_MIN_FIXED_WIDTH = 24;
 
 // These are soft limits for decoded surfaces retained across viewport culling.
 // Visible images hold references and may temporarily exceed them; they are
@@ -339,13 +369,42 @@ type ActiveGesture =
 interface CursorMotion {
   readonly from: BoardPoint;
   readonly target: BoardPoint;
+  readonly control1: BoardPoint;
+  readonly control2: BoardPoint;
   readonly startedAt: number;
+  readonly durationMs: number;
+  readonly receivedAt: number;
+  readonly sampleIntervalMs: number;
+  readonly sampleVelocity: BoardPoint;
   readonly lastMovedAt: number;
+}
+
+interface RemoteCursorStreamSample {
+  readonly sequence: number;
+  readonly point: BoardPoint;
+  readonly elapsedMs: number;
+}
+
+interface RemoteCursorStream {
+  readonly streamId: string;
+  readonly samples: RemoteCursorStreamSample[];
+  clockOffsetMs: number;
+  jitterMs: number;
+  playbackDelayMs: number;
+  playbackElapsedMs: number;
+  lastRenderAt: number;
+  lastMovedAt: number;
 }
 
 interface RemotePointMotion {
   readonly from: BoardPoint;
   readonly target: BoardPoint;
+  readonly startedAt: number;
+}
+
+interface RemoteTransformMotion {
+  readonly from: AtomicTransform;
+  readonly target: AtomicTransform;
   readonly startedAt: number;
 }
 
@@ -415,6 +474,7 @@ interface PresenceRenderEntry {
   gestureHeadMotion: RemotePointMotion | null;
   laser: Konva.Group | null;
   laserSessionId: string | null;
+  retiredTransformStreamId: string | null;
   readonly selections: Map<string, Konva.Rect>;
 }
 
@@ -969,6 +1029,256 @@ function fontSizeValue(
   return boundedNumber(value, fallback, minimum, MAX_RENDER_FONT_SIZE);
 }
 
+let textMeasureContext: CanvasRenderingContext2D | null = null;
+
+function measuredTextContext(): CanvasRenderingContext2D | null {
+  if (textMeasureContext) return textMeasureContext;
+  if (typeof document === "undefined") return null;
+  textMeasureContext = document.createElement("canvas").getContext("2d");
+  return textMeasureContext;
+}
+
+function wrapMeasuredTextLine(
+  line: string,
+  availableWidth: number,
+  fontSize: number,
+  context: CanvasRenderingContext2D,
+): string[] {
+  if (!line || context.measureText(line).width <= availableWidth) return [line];
+  const chunks: string[] = [];
+  let offset = 0;
+  const candidateLimit = Math.max(
+    16,
+    Math.ceil(availableWidth / Math.max(1, fontSize * 0.2)) * 2,
+  );
+  while (offset < line.length) {
+    const remaining = line.length - offset;
+    let low = 1;
+    let high = Math.min(remaining, candidateLimit);
+    let fit = 0;
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2);
+      const width = context.measureText(line.slice(offset, offset + middle)).width;
+      if (width <= availableWidth) {
+        fit = middle;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    if (fit === 0) fit = 1;
+    const boundary = offset + fit;
+    if (
+      boundary < line.length
+      && boundary > offset
+      && line.charCodeAt(boundary - 1) >= 0xd800
+      && line.charCodeAt(boundary - 1) <= 0xdbff
+    ) {
+      fit += 1;
+    }
+    const candidate = line.slice(offset, offset + fit);
+    const whitespace = candidate.search(/\s+\S*$/u);
+    const breakAt = whitespace > Math.floor(candidate.length * 0.5)
+      ? whitespace + candidate.slice(whitespace).search(/\S/u)
+      : -1;
+    const length = breakAt > 0 ? breakAt : fit;
+    chunks.push(line.slice(offset, offset + length));
+    offset += Math.max(1, length);
+  }
+  return chunks;
+}
+
+function renderedTextLayout(
+  text: string,
+  width: number,
+  fontSize: number,
+  fontFamily: string,
+  fontStyle: string,
+  mode: ReturnType<typeof boardTextLayoutMode>,
+): { readonly text: string; readonly wrap: "none" | "word" } {
+  if (mode === "auto-width") return { text, wrap: "none" };
+  if (text.length <= NATIVE_TEXT_WRAP_CODE_UNITS) {
+    return { text, wrap: "word" };
+  }
+  const context = measuredTextContext();
+  if (!context) return { text, wrap: "word" };
+  context.font = `${fontStyle === "normal" ? "" : `${fontStyle} `}${fontSize}px ${fontFamily}`;
+  const availableWidth = Math.max(1, width - TEXT_PADDING * 2);
+  return {
+    text: text
+      .split("\n")
+      .flatMap((line) => wrapMeasuredTextLine(
+        line,
+        availableWidth,
+        fontSize,
+        context,
+      ))
+      .join("\n"),
+    wrap: "none",
+  };
+}
+
+interface RenderedRichTextStyle {
+  readonly fontSize: number;
+  readonly fontFamily: string;
+  readonly fontStyle: string;
+  readonly fill: string;
+}
+
+interface RenderedRichTextUnit extends RenderedRichTextStyle {
+  readonly text: string;
+  readonly width: number;
+}
+
+interface RenderedRichTextFragment extends RenderedRichTextStyle {
+  readonly text: string;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+}
+
+function sameRichTextStyle(
+  left: RenderedRichTextStyle,
+  right: RenderedRichTextStyle,
+): boolean {
+  return left.fontSize === right.fontSize
+    && left.fontFamily === right.fontFamily
+    && left.fontStyle === right.fontStyle
+    && left.fill === right.fill;
+}
+
+function richTextStyle(
+  attributes: unknown,
+  fallback: RenderedRichTextStyle,
+  theme: BoardTheme,
+): RenderedRichTextStyle {
+  const source = attributes && typeof attributes === "object" && !Array.isArray(attributes)
+    ? attributes as Readonly<Record<string, unknown>>
+    : {};
+  const fallbackTokens = new Set(fallback.fontStyle.split(/\s+/u));
+  const bold = typeof source.bold === "boolean"
+    ? source.bold
+    : fallbackTokens.has("bold");
+  const italic = typeof source.italic === "boolean"
+    ? source.italic
+    : fallbackTokens.has("italic");
+  return {
+    fontSize: fontSizeValue(source.fontSize, fallback.fontSize, 0.01),
+    fontFamily: fontFamilyValue(source.fontFamily, fallback.fontFamily),
+    fontStyle: bold && italic ? "bold italic" : bold ? "bold" : italic ? "italic" : fallback.fontStyle,
+    fill: adaptiveInkColor(source.color, fallback.fill, theme),
+  };
+}
+
+function richTextFragments(
+  object: BoardObjectSnapshot,
+  text: string,
+  width: number,
+  fallback: RenderedRichTextStyle,
+  theme: BoardTheme,
+): readonly RenderedRichTextFragment[] | null {
+  if (!Array.isArray(object.props.textRuns) || object.props.textRuns.length === 0) {
+    return null;
+  }
+  const context = measuredTextContext();
+  if (!context) return null;
+  const units: Array<RenderedRichTextUnit | null> = [];
+  let consumed = 0;
+  for (const rawRun of object.props.textRuns) {
+    if (!rawRun || typeof rawRun !== "object" || Array.isArray(rawRun)) continue;
+    const run = rawRun as Readonly<Record<string, unknown>>;
+    if (typeof run.insert !== "string" || run.insert.length === 0) continue;
+    const runText = run.insert.slice(0, Math.max(0, text.length - consumed));
+    if (!runText) break;
+    const style = richTextStyle(run.attributes, fallback, theme);
+    context.font = `${style.fontStyle === "normal" ? "" : `${style.fontStyle} `}${style.fontSize}px ${style.fontFamily}`;
+    for (const character of runText) {
+      if (character === "\n") {
+        units.push(null);
+      } else {
+        units.push({
+          ...style,
+          text: character,
+          width: context.measureText(character).width,
+        });
+      }
+    }
+    consumed += runText.length;
+    if (consumed >= text.length) break;
+  }
+  if (consumed !== text.length) return null;
+
+  const availableWidth = Math.max(1, width - TEXT_PADDING * 2);
+  const fixedWidth = boardTextLayoutMode(object.props.layoutMode) === "fixed-width";
+  const lines: RenderedRichTextUnit[][] = [[]];
+  let lineWidth = 0;
+  for (const unit of units) {
+    if (unit === null) {
+      lines.push([]);
+      lineWidth = 0;
+      continue;
+    }
+    if (fixedWidth && lineWidth + unit.width > availableWidth && lines.at(-1)!.length > 0) {
+      const current = lines.at(-1)!;
+      let breakIndex = -1;
+      for (let index = current.length - 1; index > 0; index -= 1) {
+        if (/\s/u.test(current[index].text)) {
+          breakIndex = index + 1;
+          break;
+        }
+      }
+      if (breakIndex > 0 && breakIndex < current.length) {
+        const overflow = current.splice(breakIndex);
+        lines.push(overflow);
+        lineWidth = overflow.reduce((sum, entry) => sum + entry.width, 0);
+      } else {
+        lines.push([]);
+        lineWidth = 0;
+      }
+    }
+    lines.at(-1)!.push(unit);
+    lineWidth += unit.width;
+  }
+
+  const alignment = object.props.textAlign === "center" || object.props.textAlign === "right"
+    ? object.props.textAlign
+    : "left";
+  const fragments: RenderedRichTextFragment[] = [];
+  let y = TEXT_PADDING;
+  for (const line of lines) {
+    const measuredWidth = line.reduce((sum, unit) => sum + unit.width, 0);
+    let x = TEXT_PADDING + (alignment === "center"
+      ? Math.max(0, availableWidth - measuredWidth) / 2
+      : alignment === "right"
+        ? Math.max(0, availableWidth - measuredWidth)
+        : 0);
+    const lineHeight = Math.max(
+      fallback.fontSize,
+      ...line.map((unit) => unit.fontSize),
+    ) * TEXT_LINE_HEIGHT;
+    for (const unit of line) {
+      const previous = fragments.at(-1);
+      if (
+        previous
+        && previous.y === y
+        && Math.abs(previous.x + previous.width - x) < 0.01
+        && sameRichTextStyle(previous, unit)
+      ) {
+        fragments[fragments.length - 1] = {
+          ...previous,
+          text: previous.text + unit.text,
+          width: previous.width + unit.width,
+        };
+      } else {
+        fragments.push({ ...unit, x, y, width: unit.width });
+      }
+      x += unit.width;
+    }
+    y += lineHeight;
+  }
+  return fragments;
+}
+
 function strokeWidth(object: BoardObjectSnapshot, fallback = 2): number {
   return boundedNumber(object.style.strokeWidth, fallback, 0.5, 96);
 }
@@ -1141,6 +1451,38 @@ function pointerAnimationTimes(
     { length: sampleCount },
     (_, index) => safePrevious + span * (index + 1) / sampleCount,
   );
+}
+
+function cursorPointerAnimationTimes(
+  samples: readonly (PointerEvent | MouseEvent)[],
+  previousAt: number | null,
+  receivedAt: number,
+): number[] {
+  if (samples.length === 0) return [];
+  const timestamps = samples.map((sample) => sample.timeStamp);
+  const timestampsUsable = timestamps.every((timestamp, index) =>
+    Number.isFinite(timestamp)
+    && (index === 0 || timestamp >= timestamps[index - 1]))
+    && (timestamps.length === 1 || timestamps.at(-1)! > timestamps[0])
+    && timestamps.at(-1)! - timestamps[0] <= MAX_SYNTHETIC_POINTER_BATCH_SPAN_MS;
+  let times = timestampsUsable
+    ? timestamps.map((timestamp) => receivedAt - (timestamps.at(-1)! - timestamp))
+    : Array.from({ length: samples.length }, (_, index) => {
+        const fallbackSpan = Math.min(
+          MAX_SYNTHETIC_POINTER_BATCH_SPAN_MS,
+          Math.max(samples.length, receivedAt - (previousAt ?? receivedAt)),
+        );
+        return receivedAt - fallbackSpan * (samples.length - index - 1)
+          / samples.length;
+      });
+  if (previousAt !== null) {
+    let floor = previousAt;
+    times = times.map((time) => {
+      floor = Math.max(floor, Math.min(receivedAt, time));
+      return floor;
+    });
+  }
+  return times;
 }
 
 function eraserModeFromEvent(
@@ -1365,15 +1707,238 @@ function equalGesturePreviewStyles(
     && left.opacity === right.opacity;
 }
 
-function interpolateCursor(motion: CursorMotion, time: number): BoardPoint {
+function cursorMotionSample(
+  motion: CursorMotion,
+  time: number,
+): { readonly point: BoardPoint; readonly velocity: BoardPoint } {
+  if (motion.durationMs <= 0 || time >= motion.startedAt + motion.durationMs) {
+    return {
+      point: motion.target,
+      velocity: { x: 0, y: 0 },
+    };
+  }
   const progress = Math.max(
     0,
-    Math.min(1, (time - motion.startedAt) / CURSOR_INTERPOLATION_MS),
+    Math.min(1, (time - motion.startedAt) / motion.durationMs),
   );
-  const eased = 1 - (1 - progress) ** 3;
+  const inverse = 1 - progress;
+  const point = {
+    x: inverse ** 3 * motion.from.x
+      + 3 * inverse ** 2 * progress * motion.control1.x
+      + 3 * inverse * progress ** 2 * motion.control2.x
+      + progress ** 3 * motion.target.x,
+    y: inverse ** 3 * motion.from.y
+      + 3 * inverse ** 2 * progress * motion.control1.y
+      + 3 * inverse * progress ** 2 * motion.control2.y
+      + progress ** 3 * motion.target.y,
+  };
+  const derivativeScale = 1 / motion.durationMs;
   return {
-    x: motion.from.x + (motion.target.x - motion.from.x) * eased,
-    y: motion.from.y + (motion.target.y - motion.from.y) * eased,
+    point,
+    velocity: {
+      x: 3 * (
+        inverse ** 2 * (motion.control1.x - motion.from.x)
+        + 2 * inverse * progress * (motion.control2.x - motion.control1.x)
+        + progress ** 2 * (motion.target.x - motion.control2.x)
+      ) * derivativeScale,
+      y: 3 * (
+        inverse ** 2 * (motion.control1.y - motion.from.y)
+        + 2 * inverse * progress * (motion.control2.y - motion.control1.y)
+        + progress ** 2 * (motion.target.y - motion.control2.y)
+      ) * derivativeScale,
+    },
+  };
+}
+
+function cursorControlPoint(
+  point: BoardPoint,
+  velocity: BoardPoint,
+  durationMs: number,
+  from: BoardPoint,
+  target: BoardPoint,
+  direction: 1 | -1,
+): BoardPoint {
+  const candidate = {
+    x: point.x + velocity.x * durationMs / 3 * direction,
+    y: point.y + velocity.y * durationMs / 3 * direction,
+  };
+  return {
+    x: Math.max(Math.min(from.x, target.x), Math.min(Math.max(from.x, target.x), candidate.x)),
+    y: Math.max(Math.min(from.y, target.y), Math.min(Math.max(from.y, target.y), candidate.y)),
+  };
+}
+
+function updateRemoteCursorStream(
+  previous: RemoteCursorStream | undefined,
+  trail: BoardCursorTrail,
+  animationTime: number,
+  wallTime: number,
+): RemoteCursorStream {
+  const incoming = trail.samples.map((sample, index) => ({
+    sequence: trail.sampleOffset + index,
+    point: { x: sample.x, y: sample.y },
+    elapsedMs: sample.elapsedMs,
+  }));
+  const newestIncoming = incoming.at(-1)!;
+  if (!previous || previous.streamId !== trail.streamId) {
+    const playbackDelayMs = INITIAL_CURSOR_PLAYBACK_DELAY_MS;
+    return {
+      streamId: trail.streamId,
+      samples: incoming,
+      clockOffsetMs: animationTime - newestIncoming.elapsedMs,
+      jitterMs: 0,
+      playbackDelayMs,
+      playbackElapsedMs: Math.max(
+        incoming[0].elapsedMs,
+        newestIncoming.elapsedMs - playbackDelayMs,
+      ),
+      lastRenderAt: animationTime,
+      lastMovedAt: wallTime,
+    };
+  }
+
+  const previousNewest = previous.samples.at(-1)!;
+  if (newestIncoming.sequence <= previousNewest.sequence) return previous;
+  const wasExhausted = previous.playbackElapsedMs >= previousNewest.elapsedMs;
+  for (const sample of incoming) {
+    if (sample.sequence > previous.samples.at(-1)!.sequence) {
+      previous.samples.push(sample);
+    }
+  }
+  if (previous.samples.length > MAX_BOARD_ACCUMULATED_CURSOR_POINTS) {
+    previous.samples.splice(
+      0,
+      previous.samples.length - MAX_BOARD_ACCUMULATED_CURSOR_POINTS,
+    );
+    previous.playbackElapsedMs = Math.max(
+      previous.playbackElapsedMs,
+      previous.samples[0].elapsedMs,
+    );
+  }
+
+  const transitOffset = animationTime - newestIncoming.elapsedMs;
+  if (transitOffset < previous.clockOffsetMs) {
+    previous.clockOffsetMs = transitOffset;
+  } else {
+    previous.clockOffsetMs += Math.min(
+      0.25,
+      (transitOffset - previous.clockOffsetMs) * 0.002,
+    );
+  }
+  const excessTransit = Math.max(0, transitOffset - previous.clockOffsetMs);
+  previous.jitterMs = previous.jitterMs * (1 - CURSOR_JITTER_FILTER)
+    + excessTransit * CURSOR_JITTER_FILTER;
+  const targetDelay = Math.max(
+    MIN_CURSOR_PLAYBACK_DELAY_MS,
+    Math.min(
+      MAX_CURSOR_PLAYBACK_DELAY_MS,
+      MIN_CURSOR_PLAYBACK_DELAY_MS + previous.jitterMs * CURSOR_JITTER_DELAY_FACTOR,
+    ),
+  );
+  previous.playbackDelayMs += targetDelay > previous.playbackDelayMs
+    ? Math.min(12, targetDelay - previous.playbackDelayMs)
+    : (targetDelay - previous.playbackDelayMs) * 0.05;
+  if (
+    previousNewest.point.x !== newestIncoming.point.x
+    || previousNewest.point.y !== newestIncoming.point.y
+  ) {
+    previous.lastMovedAt = wallTime;
+  }
+  if (wasExhausted) previous.lastRenderAt = animationTime;
+  return previous;
+}
+
+function remoteCursorVelocity(
+  samples: readonly RemoteCursorStreamSample[],
+  index: number,
+): BoardPoint {
+  const left = samples[Math.max(0, index - 1)];
+  const right = samples[Math.min(samples.length - 1, index + 1)];
+  const durationMs = right.elapsedMs - left.elapsedMs;
+  if (durationMs <= 0) return { x: 0, y: 0 };
+  return {
+    x: (right.point.x - left.point.x) / durationMs,
+    y: (right.point.y - left.point.y) / durationMs,
+  };
+}
+
+function remoteCursorStreamSample(
+  stream: RemoteCursorStream,
+  animationTime: number,
+): { readonly point: BoardPoint; readonly pending: boolean } {
+  const newest = stream.samples.at(-1)!;
+  const localDelta = Math.max(0, Math.min(50, animationTime - stream.lastRenderAt));
+  stream.lastRenderAt = animationTime;
+  const desiredElapsed = Math.max(
+    stream.playbackElapsedMs,
+    animationTime - stream.clockOffsetMs - stream.playbackDelayMs,
+  );
+  stream.playbackElapsedMs = Math.min(
+    newest.elapsedMs,
+    desiredElapsed,
+    stream.playbackElapsedMs + localDelta * MAX_CURSOR_CATCH_UP_RATE,
+  );
+
+  if (stream.playbackElapsedMs <= stream.samples[0].elapsedMs) {
+    return {
+      point: stream.samples[0].point,
+      pending: stream.samples.length > 1,
+    };
+  }
+  if (stream.playbackElapsedMs >= newest.elapsedMs) {
+    return { point: newest.point, pending: false };
+  }
+
+  let low = 1;
+  let high = stream.samples.length - 1;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (stream.samples[middle].elapsedMs < stream.playbackElapsedMs) low = middle + 1;
+    else high = middle;
+  }
+  const rightIndex = low;
+  const leftIndex = rightIndex - 1;
+  const left = stream.samples[leftIndex];
+  const right = stream.samples[rightIndex];
+  const sourceDuration = Math.max(0.1, right.elapsedMs - left.elapsedMs);
+  const motionDuration = Math.min(sourceDuration, MAX_CURSOR_SEGMENT_MOTION_MS);
+  const motionStartedAt = right.elapsedMs - motionDuration;
+  if (stream.playbackElapsedMs <= motionStartedAt) {
+    return { point: left.point, pending: true };
+  }
+  const progress = Math.max(
+    0,
+    Math.min(1, (stream.playbackElapsedMs - motionStartedAt) / motionDuration),
+  );
+  const inverse = 1 - progress;
+  const control1 = cursorControlPoint(
+    left.point,
+    remoteCursorVelocity(stream.samples, leftIndex),
+    motionDuration,
+    left.point,
+    right.point,
+    1,
+  );
+  const control2 = cursorControlPoint(
+    right.point,
+    remoteCursorVelocity(stream.samples, rightIndex),
+    motionDuration,
+    left.point,
+    right.point,
+    -1,
+  );
+  return {
+    point: {
+      x: inverse ** 3 * left.point.x
+        + 3 * inverse ** 2 * progress * control1.x
+        + 3 * inverse * progress ** 2 * control2.x
+        + progress ** 3 * right.point.x,
+      y: inverse ** 3 * left.point.y
+        + 3 * inverse ** 2 * progress * control1.y
+        + 3 * inverse * progress ** 2 * control2.y
+        + progress ** 3 * right.point.y,
+    },
+    pending: true,
   };
 }
 
@@ -1398,19 +1963,70 @@ function interpolateRemotePoint(
   };
 }
 
+function equalAtomicTransforms(
+  left: AtomicTransform,
+  right: AtomicTransform,
+): boolean {
+  return left.every((component, index) => component === right[index]);
+}
+
+function interpolateRemoteTransform(
+  motion: RemoteTransformMotion,
+  time: number,
+): { readonly transform: AtomicTransform; readonly complete: boolean } {
+  const progress = Math.max(
+    0,
+    Math.min(
+      1,
+      (time - motion.startedAt) / REMOTE_GESTURE_INTERPOLATION_MS,
+    ),
+  );
+  const eased = 1 - (1 - progress) ** 3;
+  return {
+    transform: motion.from.map((component, index) =>
+      component + (motion.target[index] - component) * eased
+    ) as unknown as AtomicTransform,
+    complete: progress >= 1,
+  };
+}
+
 function shapeDraft(
   tool: DrawingGesture["tool"],
   start: BoardPoint,
   end: BoardPoint,
   points: readonly (BoardPoint & { pressure: number })[],
   style: Readonly<Record<string, unknown>>,
+  textDragged = false,
 ): BoardObjectDraft | null {
   if (tool === "text") {
+    const fontSize = fontSizeValue(style.fontSize, 20, 0.01);
+    const minimumLineHeight = fontSize * TEXT_LINE_HEIGHT + TEXT_PADDING * 2;
+    if (textDragged) {
+      const transform = normalizedTransform(start, end);
+      const width = Math.max(TEXT_MIN_FIXED_WIDTH, transform[2]);
+      const minimumHeight = Math.max(minimumLineHeight, transform[3]);
+      return {
+        kind: BUILTIN_OBJECT_KINDS.text,
+        transform: [transform[0], transform[1], width, minimumHeight, 0],
+        style,
+        props: {
+          text: "",
+          layoutMode: "fixed-width",
+          minimumHeight,
+        },
+      };
+    }
     return {
       kind: BUILTIN_OBJECT_KINDS.text,
-      transform: [start.x, start.y, 240, 52, 0],
+      transform: [
+        start.x,
+        start.y,
+        Math.max(TEXT_MIN_AUTO_WIDTH, fontSize * 0.65 + TEXT_PADDING * 2),
+        minimumLineHeight,
+        0,
+      ],
       style,
-      props: { text: "" },
+      props: { text: "", layoutMode: "auto-width" },
     };
   }
 
@@ -1879,23 +2495,70 @@ export function renderObjectNode(
       perfectDrawEnabled: false,
     }));
   } else if (object.kind === BUILTIN_OBJECT_KINDS.text) {
-    group.add(new Konva.Text({
-      name: INLINE_TEXT_GLYPHS_NAME,
-      width,
-      height,
-      text: boundedTextValue(object.props.text, "", MAX_RENDER_TEXT_CODE_UNITS),
+    const text = boundedTextValue(
+      object.props.text,
+      "",
+      MAX_RENDER_TEXT_CODE_UNITS,
+    );
+    const fontSize = fontSizeValue(object.style.fontSize, 20, 0.01);
+    const fontFamily = fontFamilyValue(
+      object.style.fontFamily,
+      "Inter, Arial, sans-serif",
+    );
+    const fontStyle = fontStyleValue(object.style.fontStyle, "normal");
+    const fallbackRichStyle: RenderedRichTextStyle = {
+      fontSize,
+      fontFamily,
+      fontStyle,
       fill: adaptiveInkColor(object.style.fill, DEFAULT_STROKE, theme),
-      fontSize: fontSizeValue(object.style.fontSize, 20, 8),
-      fontFamily: fontFamilyValue(
-        object.style.fontFamily,
-        "Inter, Arial, sans-serif",
-      ),
-      fontStyle: fontStyleValue(object.style.fontStyle, "normal"),
-      lineHeight: 1.25,
-      wrap: "word",
-      padding: 2,
-      verticalAlign: "middle",
-    }));
+    };
+    const richFragments = richTextFragments(
+      object,
+      text,
+      width,
+      fallbackRichStyle,
+      theme,
+    );
+    const layout = renderedTextLayout(
+      text,
+      width,
+      fontSize,
+      fontFamily,
+      fontStyle,
+      boardTextLayoutMode(object.props.layoutMode),
+    );
+    if (richFragments) {
+      for (const fragment of richFragments) {
+        group.add(new Konva.Text({
+          name: INLINE_TEXT_GLYPHS_NAME,
+          x: fragment.x,
+          y: fragment.y,
+          text: fragment.text,
+          fill: fragment.fill,
+          fontSize: fragment.fontSize,
+          fontFamily: fragment.fontFamily,
+          fontStyle: fragment.fontStyle,
+          lineHeight: TEXT_LINE_HEIGHT,
+          wrap: "none",
+        }));
+      }
+    } else {
+      group.add(new Konva.Text({
+        name: INLINE_TEXT_GLYPHS_NAME,
+        width,
+        text: layout.text,
+        fill: fallbackRichStyle.fill,
+        fontSize,
+        fontFamily,
+        fontStyle,
+        align: object.props.textAlign === "center" || object.props.textAlign === "right"
+          ? object.props.textAlign
+          : "left",
+        lineHeight: TEXT_LINE_HEIGHT,
+        wrap: layout.wrap,
+        padding: TEXT_PADDING,
+      }));
+    }
   } else if (object.kind === BUILTIN_OBJECT_KINDS.frame) {
     group.add(new Konva.Rect({
       width,
@@ -1961,7 +2624,7 @@ export function renderObjectNode(
       y: 31,
       width: width - 24,
       height: height - 42,
-      text: boundedTextValue(object.props.source, "", MAX_RENDER_TEXT_CODE_UNITS),
+      text: boundedTextValue(object.props.source, "", MAX_RENDER_SOURCE_CODE_UNITS),
       fontSize: fontSizeValue(object.style.fontSize, 14, 10),
       fontFamily: "JetBrains Mono, Consolas, monospace",
       lineHeight: 1.35,
@@ -1983,7 +2646,7 @@ export function renderObjectNode(
       y: 10,
       width: width - 20,
       height: height - 20,
-      text: boundedTextValue(object.props.source, "", MAX_RENDER_TEXT_CODE_UNITS),
+      text: boundedTextValue(object.props.source, "", MAX_RENDER_SOURCE_CODE_UNITS),
       fontFamily: "Cambria Math, Times New Roman, serif",
       fontSize: fontSizeValue(object.style.fontSize, 22, 12),
       fontStyle: fontStyleValue(object.style.fontStyle, "normal"),
@@ -2083,7 +2746,10 @@ export class KonvaBoardRenderer implements BoardRenderer {
   private readonly nodes = new Map<string, Konva.Group>();
   private readonly visibleIds = new Set<string>();
   private readonly cursorMotions = new Map<number, CursorMotion>();
+  private readonly remoteCursorStreams = new Map<number, RemoteCursorStream>();
   private readonly remoteLaserTrails = new Map<number, RemoteLaserTrail>();
+  private readonly remoteTransformTargets = new Map<string, AtomicTransform>();
+  private readonly remoteTransformMotions = new Map<string, RemoteTransformMotion>();
   private readonly presenceRenderEntries = new Map<number, PresenceRenderEntry>();
   private readonly touchPointers = new Map<number, BoardPoint>();
   private readonly pressedPointerIds = new Set<number>();
@@ -2136,6 +2802,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
   private dragStart = new Map<string, BoardPoint>();
   private dragVisibleIds: string[] = [];
   private dragSelectionOutlineStart: BoardPoint | null = null;
+  private activeTransformPreviewStreamId: string | null = null;
   private orderDirty = true;
   private visibleReorderScheduled = false;
   private selectionNotificationScheduled = false;
@@ -2147,6 +2814,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
   private activeMousePointerId: number | null = null;
   private activeMouseButton: number | null = null;
   private lastMouseInputScreen: BoardPoint | null = null;
+  private lastCursorSampleAt: number | null = null;
   private cancellingInteraction = false;
   private destroyed = false;
   private readonly lostPointerCapture = (event: PointerEvent): void => {
@@ -2241,6 +2909,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
       rotationSnapTolerance: TRANSFORMER_ROTATION_SNAP_TOLERANCE_DEGREES,
       flipEnabled: false,
       ignoreStroke: true,
+      shouldOverdrawWholeArea: true,
       boundBoxFunc: (oldBox, newBox) =>
         Math.abs(newBox.width) < 4 || Math.abs(newBox.height) < 4 ? oldBox : newBox,
     });
@@ -2258,11 +2927,22 @@ export class KonvaBoardRenderer implements BoardRenderer {
       this.transformer,
     );
     this.transformer.on("transformstart.eduri", () => {
+      this.beginTransformPreview();
       this.callbacks.onTransformStart();
       this.emitModifierHints();
     });
     this.transformer.on("transform.eduriSelection", () => {
       this.updateSelectionObjectOutlines(this.selectionChromeVisible());
+      const transforms = new Map<string, AtomicTransform>();
+      for (const node of this.transformer.nodes()) {
+        if (!(node instanceof Konva.Group)) continue;
+        const id = node.getAttr("boardObjectId") as string;
+        const object = this.objects.get(id);
+        if (object && isBoardObjectMutable(object)) {
+          transforms.set(id, this.nodeAtomicTransform(object, node));
+        }
+      }
+      this.emitTransformPreview(transforms);
       this.previewLayer.batchDraw();
     });
     this.transformer.on("transformend.eduri", () => {
@@ -2287,7 +2967,10 @@ export class KonvaBoardRenderer implements BoardRenderer {
           node.rotation() * Math.PI / 180,
         ]);
       }
-      if (transforms.size) this.callbacks.onTransformObjects(transforms);
+      if (transforms.size) {
+        this.callbacks.onTransformObjects(transforms);
+        this.emitTransformPreview(transforms, true);
+      }
       this.emitModifierHints();
     });
     this.stage.add(this.gridLayer, this.objectLayer, this.previewLayer, this.presenceLayer);
@@ -2296,7 +2979,10 @@ export class KonvaBoardRenderer implements BoardRenderer {
     this.stage.on("pointermove", (event) => this.onPointerMove(event));
     this.stage.on("pointerup pointercancel", (event) => this.onPointerUp(event));
     this.stage.on("contextmenu", (event) => this.onContextMenu(event));
-    this.stage.on("pointerleave", () => this.callbacks.onCursorChange(null));
+    this.stage.on("pointerleave", () => {
+      this.lastCursorSampleAt = null;
+      this.callbacks.onCursorChange(null);
+    });
     this.element.addEventListener(
       "lostpointercapture",
       this.lostPointerCapture,
@@ -2304,7 +2990,13 @@ export class KonvaBoardRenderer implements BoardRenderer {
     );
     this.stage.on("dblclick dbltap", (event) => {
       if (this.readOnly) return;
-      const objectId = objectIdFromTarget(event.target);
+      const target = event.target as Konva.Node;
+      const targetIsTransformer = target === this.transformer
+        || this.transformer.isAncestorOf(target);
+      const objectId = objectIdFromTarget(target)
+        ?? (targetIsTransformer && this.selectedIds.length === 1
+          ? this.selectedIds[0]
+          : null);
       const object = objectId ? this.objects.get(objectId) : undefined;
       if (object && isBoardObjectInlineEditable(object)) {
         this.callbacks.onEditObject(object.id);
@@ -2528,6 +3220,13 @@ export class KonvaBoardRenderer implements BoardRenderer {
 
   setObjects(objects: readonly BoardObjectSnapshot[]): void {
     this.exitLinePointEditing();
+    const nextById = new Map(objects.map((object) => [object.id, object]));
+    for (const [id, previous] of this.objects) {
+      const next = nextById.get(id);
+      if (next && !equalAtomicTransforms(previous.transform, next.transform)) {
+        this.retireRemoteTransformPreviewForObject(id);
+      }
+    }
     this.objects.clear();
     for (const object of objects) this.objects.set(object.id, object);
     if (
@@ -2562,12 +3261,16 @@ export class KonvaBoardRenderer implements BoardRenderer {
     }
     if (this.presences.length > 0) {
       this.syncPresenceScene();
+      this.reconcileRemoteTransformPreviews();
       this.renderPresence();
     }
   }
 
   setObject(object: BoardObjectSnapshot): void {
     const previous = this.objects.get(object.id);
+    if (previous && !equalAtomicTransforms(previous.transform, object.transform)) {
+      this.retireRemoteTransformPreviewForObject(object.id);
+    }
     const currentNode = this.nodes.get(object.id);
     const replacementIndex = currentNode?.zIndex();
     const wasVisible = this.visibleIds.has(object.id);
@@ -2659,8 +3362,12 @@ export class KonvaBoardRenderer implements BoardRenderer {
     if (committedPreviewChanged || this.presences.some((presence) => (
       presence.selectionIds.includes(object.id)
       || presence.gesturePreview?.committedObjectId === object.id
+      || presence.transformPreview?.transforms.some(
+        (entry) => entry.objectId === object.id,
+      )
     ))) {
       this.syncPresenceScene();
+      this.reconcileRemoteTransformPreviews();
       this.renderPresence();
     }
     if (isSelectionGesture(this.activeGesture)) {
@@ -2674,6 +3381,8 @@ export class KonvaBoardRenderer implements BoardRenderer {
       this.activeGesture.objectIds.delete(id);
     }
     this.objects.delete(id);
+    this.remoteTransformTargets.delete(id);
+    this.remoteTransformMotions.delete(id);
     if (this.inlineEditingObjectId === id) this.inlineEditingObjectId = null;
     this.spatial.delete(id);
     this.eraserHits.delete(id);
@@ -2698,6 +3407,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
     this.updatePresenceMotion(presences);
     this.presences = presences;
     this.syncPresenceScene();
+    this.reconcileRemoteTransformPreviews();
     this.renderPresence();
   }
 
@@ -2733,9 +3443,9 @@ export class KonvaBoardRenderer implements BoardRenderer {
     if (this.inlineEditingObjectId === nextId) return;
     const previousId = this.inlineEditingObjectId;
     this.inlineEditingObjectId = nextId;
-    if (previousId) {
-      const previous = this.nodes.get(previousId);
-      if (previous) this.applyInlineEditingPresentation(previous, previousId);
+    if (previousId && previousId !== nextId) {
+      const previousObject = this.objects.get(previousId);
+      if (previousObject) this.setObject(previousObject);
     }
     if (nextId) {
       const next = this.nodes.get(nextId);
@@ -3105,6 +3815,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
       this.cancellingInteraction = wasCancelling;
     }
     this.callbacks.onTransformCancel();
+    this.clearTransformPreview();
     this.emitModifierHints();
     return true;
   }
@@ -3138,6 +3849,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
     if (this.destroyed) return;
     this.cancelActiveGesture();
     this.clearLaserSession(false);
+    this.clearTransformPreview();
     this.setLaserModifierPressed(false);
     this.destroyed = true;
     this.resizeObserver.disconnect();
@@ -4125,7 +4837,30 @@ export class KonvaBoardRenderer implements BoardRenderer {
       this.touchPointers.set(pointerId, screen);
     }
     const point = worldPoint(screen, this.currentCamera);
-    this.callbacks.onCursorChange(point);
+    const deliveredCursorSamples = pointerSamples(nativeEvent);
+    const cursorEvents = deliveredCursorSamples.at(-1) === nativeEvent
+      ? deliveredCursorSamples
+      : [...deliveredCursorSamples, nativeEvent];
+    const cursorReceivedAt = performance.now();
+    const cursorTimes = cursorPointerAnimationTimes(
+      cursorEvents,
+      this.lastCursorSampleAt,
+      cursorReceivedAt,
+    );
+    const cursorSamples: BoardCursorInputSample[] = [];
+    for (let index = 0; index < cursorEvents.length; index += 1) {
+      const sampleScreen = screenPointFromPointer(
+        cursorEvents[index],
+        this.element,
+        screenTransform,
+      );
+      const samplePoint = worldPoint(sampleScreen, this.currentCamera);
+      const previous = cursorSamples.at(-1);
+      if (previous && previous.x === samplePoint.x && previous.y === samplePoint.y) continue;
+      cursorSamples.push({ ...samplePoint, at: cursorTimes[index] });
+    }
+    this.lastCursorSampleAt = cursorTimes.at(-1) ?? cursorReceivedAt;
+    this.callbacks.onCursorChange(point, cursorSamples);
     if (pointerType === "mouse" && this.activeMousePointerId === pointerId) {
       this.lastMouseInputScreen = screen;
     }
@@ -4599,6 +5334,8 @@ export class KonvaBoardRenderer implements BoardRenderer {
       point,
       draftPoints,
       gesture.style,
+      gesture.tool === "text"
+        && distance(gesture.previousScreen, screen) > TEXT_CREATION_DRAG_PX,
     );
     const draft = rawDraft
       && (gesture.tool === "pen" || gesture.tool === "highlighter")
@@ -4995,14 +5732,16 @@ export class KonvaBoardRenderer implements BoardRenderer {
     node: Konva.Group,
     objectId: string,
   ): void {
-    node.findOne<Konva.Text>(`.${INLINE_TEXT_GLYPHS_NAME}`)?.opacity(
-      objectId === this.inlineEditingObjectId ? 0 : 1,
-    );
+    for (const glyph of node.find<Konva.Text>(`.${INLINE_TEXT_GLYPHS_NAME}`)) {
+      glyph.opacity(objectId === this.inlineEditingObjectId ? 0 : 1);
+    }
   }
 
   private materializeObjectNode(object: BoardObjectSnapshot): Konva.Group {
     const node = renderObjectNode(
-      object,
+      object.id === this.inlineEditingObjectId
+        ? { ...object, props: { ...object.props, text: "", textRuns: [] } }
+        : object,
       this.options.resolveAssetUrl,
       () => this.objectLayer.batchDraw(),
       this.decodedImages ?? undefined,
@@ -5010,6 +5749,13 @@ export class KonvaBoardRenderer implements BoardRenderer {
     );
     this.applyInlineEditingPresentation(node, object.id);
     this.bindObjectNode(node, object.id);
+    const remoteTransform = this.remoteTransformTargets.get(object.id);
+    if (
+      remoteTransform
+      && !equalAtomicTransforms(object.transform, remoteTransform)
+    ) {
+      this.applyAtomicTransformToNode(object, node, remoteTransform);
+    }
     if (this.linePointEditor?.objectId === object.id) node.visible(false);
     return node;
   }
@@ -5087,6 +5833,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
 
   private bindObjectNode(node: Konva.Group, objectId: string): void {
     node.on("dragstart", () => {
+      this.beginTransformPreview();
       this.callbacks.onTransformStart();
       this.dragStart.clear();
       this.dragVisibleIds = [];
@@ -5107,13 +5854,15 @@ export class KonvaBoardRenderer implements BoardRenderer {
     });
     node.on("dragmove", () => {
       const anchorStart = this.dragStart.get(objectId);
-      if (!anchorStart || this.dragStart.size < 2) return;
+      if (!anchorStart) return;
       const deltaX = node.x() - anchorStart.x;
       const deltaY = node.y() - anchorStart.y;
-      for (const id of this.dragVisibleIds) {
-        if (id === objectId) continue;
-        const start = this.dragStart.get(id);
-        if (start) this.nodes.get(id)?.position({ x: start.x + deltaX, y: start.y + deltaY });
+      if (this.dragStart.size >= 2) {
+        for (const id of this.dragVisibleIds) {
+          if (id === objectId) continue;
+          const start = this.dragStart.get(id);
+          if (start) this.nodes.get(id)?.position({ x: start.x + deltaX, y: start.y + deltaY });
+        }
       }
       if (this.dragSelectionOutlineStart) {
         this.selectionOutline.position({
@@ -5122,6 +5871,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
         });
       }
       this.updateSelectionObjectOutlines(this.selectionChromeVisible());
+      this.emitTransformPreview(this.currentDragTransforms(objectId, node));
       this.objectLayer.batchDraw();
       this.previewLayer.batchDraw();
     });
@@ -5133,28 +5883,14 @@ export class KonvaBoardRenderer implements BoardRenderer {
         this.emitModifierHints();
         return;
       }
-      const transforms = new Map<string, AtomicTransform>();
-      const anchorStart = this.dragStart.get(objectId);
-      const deltaX = anchorStart ? node.x() - anchorStart.x : 0;
-      const deltaY = anchorStart ? node.y() - anchorStart.y : 0;
-      for (const [id, start] of this.dragStart) {
-        const currentNode = this.nodes.get(id);
-        const object = this.objects.get(id);
-        if (!object || !isBoardObjectMutable(object)) continue;
-        transforms.set(id, [
-          currentNode?.x() ?? start.x + deltaX,
-          currentNode?.y() ?? start.y + deltaY,
-          object.transform[2],
-          object.transform[3],
-          currentNode
-            ? currentNode.rotation() * Math.PI / 180
-            : object.transform[4],
-        ]);
-      }
+      const transforms = this.currentDragTransforms(objectId, node);
       this.dragStart.clear();
       this.dragVisibleIds = [];
       this.dragSelectionOutlineStart = null;
-      if (transforms.size) this.callbacks.onTransformObjects(transforms);
+      if (transforms.size) {
+        this.callbacks.onTransformObjects(transforms);
+        this.emitTransformPreview(transforms, true);
+      }
       this.emitModifierHints();
     });
   }
@@ -5177,6 +5913,181 @@ export class KonvaBoardRenderer implements BoardRenderer {
       this.reorderVisibleObjects();
       this.objectLayer.batchDraw();
     });
+  }
+
+  private beginTransformPreview(): void {
+    if (!this.activeTransformPreviewStreamId) {
+      this.activeTransformPreviewStreamId = this.nextPreviewStreamId();
+    }
+  }
+
+  private emitTransformPreview(
+    transforms: ReadonlyMap<string, AtomicTransform>,
+    committed = false,
+  ): void {
+    if (transforms.size === 0) {
+      if (committed) this.activeTransformPreviewStreamId = null;
+      return;
+    }
+    if (!this.callbacks.onTransformPreviewChange) {
+      if (committed) this.activeTransformPreviewStreamId = null;
+      return;
+    }
+    this.beginTransformPreview();
+    const preview: BoardTransformPreview = {
+      streamId: this.activeTransformPreviewStreamId!,
+      transforms: [...transforms]
+        .slice(0, MAX_BOARD_TRANSFORM_PREVIEW_OBJECTS)
+        .map(([objectId, transform]) => ({ objectId, transform })),
+      ...(committed ? { committed: true } : {}),
+    };
+    this.callbacks.onTransformPreviewChange(preview);
+    if (committed) this.activeTransformPreviewStreamId = null;
+  }
+
+  private clearTransformPreview(): void {
+    if (!this.activeTransformPreviewStreamId) return;
+    this.activeTransformPreviewStreamId = null;
+    this.callbacks.onTransformPreviewChange?.(null);
+  }
+
+  private nodeAtomicTransform(
+    object: BoardObjectSnapshot,
+    node: Konva.Group,
+  ): AtomicTransform {
+    return [
+      node.x(),
+      node.y(),
+      Math.max(1, Math.abs(object.transform[2] * node.scaleX())),
+      Math.max(1, Math.abs(object.transform[3] * node.scaleY())),
+      node.rotation() * Math.PI / 180,
+    ];
+  }
+
+  private applyAtomicTransformToNode(
+    object: BoardObjectSnapshot,
+    node: Konva.Group,
+    transform: AtomicTransform,
+  ): void {
+    const baseWidth = Math.max(1, Math.abs(object.transform[2]));
+    const baseHeight = Math.max(1, Math.abs(object.transform[3]));
+    node.setAttrs({
+      x: transform[0],
+      y: transform[1],
+      scaleX: Math.max(1, Math.abs(transform[2])) / baseWidth,
+      scaleY: Math.max(1, Math.abs(transform[3])) / baseHeight,
+      rotation: transform[4] * 180 / Math.PI,
+    });
+    for (const entry of this.presenceRenderEntries.values()) {
+      entry.selections.get(object.id)?.setAttrs({
+        x: transform[0],
+        y: transform[1],
+        width: Math.max(1, Math.abs(transform[2])),
+        height: Math.max(1, Math.abs(transform[3])),
+        rotation: transform[4] * 180 / Math.PI,
+      });
+    }
+  }
+
+  private localTransformOwnsObject(id: string): boolean {
+    return this.dragStart.has(id)
+      || (this.transformer.isTransforming() && this.selectedIdSet.has(id));
+  }
+
+  private retireRemoteTransformPreviewForObject(id: string): void {
+    for (const presence of this.presences) {
+      const preview = presence.transformPreview;
+      if (!preview?.transforms.some((entry) => entry.objectId === id)) continue;
+      const renderEntry = this.presenceRenderEntries.get(presence.clientId);
+      if (renderEntry) renderEntry.retiredTransformStreamId = preview.streamId;
+    }
+    this.remoteTransformTargets.delete(id);
+    this.remoteTransformMotions.delete(id);
+  }
+
+  private reconcileRemoteTransformPreviews(): void {
+    const nextTargets = new Map<string, AtomicTransform>();
+    const orderedPresences = [...this.presences]
+      .sort((left, right) => left.clientId - right.clientId);
+    for (const presence of orderedPresences) {
+      const preview = presence.transformPreview;
+      if (!preview) continue;
+      const renderEntry = this.presenceRenderEntries.get(presence.clientId);
+      if (renderEntry?.retiredTransformStreamId === preview.streamId) continue;
+      if (renderEntry?.retiredTransformStreamId) {
+        renderEntry.retiredTransformStreamId = null;
+      }
+      for (const entry of preview.transforms) {
+        if (!this.objects.has(entry.objectId) || nextTargets.has(entry.objectId)) continue;
+        nextTargets.set(entry.objectId, entry.transform);
+      }
+    }
+
+    for (const id of this.remoteTransformTargets.keys()) {
+      if (nextTargets.has(id)) continue;
+      if (this.localTransformOwnsObject(id)) {
+        this.remoteTransformMotions.delete(id);
+        continue;
+      }
+      const object = this.objects.get(id);
+      const node = this.nodes.get(id);
+      if (object && node) this.applyAtomicTransformToNode(object, node, object.transform);
+      this.remoteTransformMotions.delete(id);
+    }
+
+    const animationTime = performance.now();
+    for (const [id, target] of nextTargets) {
+      const object = this.objects.get(id);
+      const node = this.nodes.get(id);
+      if (!object || this.localTransformOwnsObject(id)) continue;
+      if (equalAtomicTransforms(object.transform, target)) {
+        if (node) this.applyAtomicTransformToNode(object, node, object.transform);
+        this.remoteTransformMotions.delete(id);
+        continue;
+      }
+      const previousTarget = this.remoteTransformTargets.get(id);
+      if (!previousTarget || !equalAtomicTransforms(previousTarget, target)) {
+        this.remoteTransformMotions.set(id, {
+          from: node ? this.nodeAtomicTransform(object, node) : object.transform,
+          target,
+          startedAt: animationTime,
+        });
+      } else if (node && !this.remoteTransformMotions.has(id)) {
+        this.applyAtomicTransformToNode(object, node, target);
+      }
+    }
+
+    this.remoteTransformTargets.clear();
+    for (const [id, target] of nextTargets) {
+      this.remoteTransformTargets.set(id, target);
+    }
+    if (this.remoteTransformMotions.size > 0) this.schedulePresenceAnimation();
+    this.objectLayer.batchDraw();
+  }
+
+  private currentDragTransforms(
+    objectId: string,
+    node: Konva.Group,
+  ): Map<string, AtomicTransform> {
+    const transforms = new Map<string, AtomicTransform>();
+    const anchorStart = this.dragStart.get(objectId);
+    const deltaX = anchorStart ? node.x() - anchorStart.x : 0;
+    const deltaY = anchorStart ? node.y() - anchorStart.y : 0;
+    for (const [id, start] of this.dragStart) {
+      const currentNode = this.nodes.get(id);
+      const object = this.objects.get(id);
+      if (!object || !isBoardObjectMutable(object)) continue;
+      transforms.set(id, [
+        currentNode?.x() ?? start.x + deltaX,
+        currentNode?.y() ?? start.y + deltaY,
+        object.transform[2],
+        object.transform[3],
+        currentNode
+          ? currentNode.rotation() * Math.PI / 180
+          : object.transform[4],
+      ]);
+    }
+    return transforms;
   }
 
   private nodeShouldBeDraggable(
@@ -5402,24 +6313,93 @@ export class KonvaBoardRenderer implements BoardRenderer {
           this.cursorMotions.set(presence.clientId, {
             from: presence.cursor,
             target: presence.cursor,
-            startedAt: animationTime - CURSOR_INTERPOLATION_MS,
+            control1: presence.cursor,
+            control2: presence.cursor,
+            startedAt: animationTime,
+            durationMs: 0,
+            receivedAt: animationTime,
+            sampleIntervalMs: DEFAULT_CURSOR_SAMPLE_INTERVAL_MS,
+            sampleVelocity: { x: 0, y: 0 },
             lastMovedAt: wallTime,
           });
         } else if (
           previous.target.x !== presence.cursor.x
           || previous.target.y !== presence.cursor.y
         ) {
-          const current = interpolateCursor(previous, animationTime);
-          const teleported = distance(current, presence.cursor) * this.currentCamera.zoom > 600;
+          const current = cursorMotionSample(previous, animationTime);
+          const teleported = distance(current.point, presence.cursor)
+            * this.currentCamera.zoom > 600;
+          const measuredInterval = Math.max(
+            1,
+            Math.min(250, animationTime - previous.receivedAt),
+          );
+          const sampleIntervalMs = previous.sampleIntervalMs * 0.7
+            + measuredInterval * 0.3;
+          const measuredVelocity = {
+            x: (presence.cursor.x - previous.target.x) / measuredInterval,
+            y: (presence.cursor.y - previous.target.y) / measuredInterval,
+          };
+          const filteredSampleVelocity = {
+            x: previous.sampleVelocity.x * (1 - CURSOR_VELOCITY_FILTER)
+              + measuredVelocity.x * CURSOR_VELOCITY_FILTER,
+            y: previous.sampleVelocity.y * (1 - CURSOR_VELOCITY_FILTER)
+              + measuredVelocity.y * CURSOR_VELOCITY_FILTER,
+          };
+          const sampleVelocity = teleported
+            ? { x: 0, y: 0 }
+            : filteredSampleVelocity;
+          const durationMs = Math.max(
+            MIN_CURSOR_INTERPOLATION_MS,
+            Math.min(
+              MAX_CURSOR_INTERPOLATION_MS,
+              sampleIntervalMs * CURSOR_INTERPOLATION_INTERVAL_FACTOR,
+            ),
+          );
+          const from = teleported ? presence.cursor : current.point;
+          const startVelocity = teleported ? { x: 0, y: 0 } : current.velocity;
           this.cursorMotions.set(presence.clientId, {
-            from: teleported ? presence.cursor : current,
+            from,
             target: presence.cursor,
+            control1: cursorControlPoint(
+              from,
+              startVelocity,
+              durationMs,
+              from,
+              presence.cursor,
+              1,
+            ),
+            control2: cursorControlPoint(
+              presence.cursor,
+              sampleVelocity,
+              durationMs,
+              from,
+              presence.cursor,
+              -1,
+            ),
             startedAt: animationTime,
+            durationMs: teleported ? 0 : durationMs,
+            receivedAt: animationTime,
+            sampleIntervalMs,
+            sampleVelocity,
             lastMovedAt: wallTime,
           });
         }
       } else {
         this.cursorMotions.delete(presence.clientId);
+      }
+      const cursorTrail = presence.cursorTrail
+        ? sanitizeBoardCursorTrail(presence.cursorTrail)
+        : undefined;
+      if (presence.cursor && cursorTrail) {
+        const stream = updateRemoteCursorStream(
+          this.remoteCursorStreams.get(presence.clientId),
+          cursorTrail,
+          animationTime,
+          wallTime,
+        );
+        this.remoteCursorStreams.set(presence.clientId, stream);
+      } else {
+        this.remoteCursorStreams.delete(presence.clientId);
       }
 
       const incomingLaser = presence.laser
@@ -5555,6 +6535,9 @@ export class KonvaBoardRenderer implements BoardRenderer {
     for (const clientId of this.cursorMotions.keys()) {
       if (!activeClientIds.has(clientId)) this.cursorMotions.delete(clientId);
     }
+    for (const clientId of this.remoteCursorStreams.keys()) {
+      if (!activeClientIds.has(clientId)) this.remoteCursorStreams.delete(clientId);
+    }
     for (const clientId of this.remoteLaserTrails.keys()) {
       if (!activeClientIds.has(clientId)) this.remoteLaserTrails.delete(clientId);
     }
@@ -5581,6 +6564,7 @@ export class KonvaBoardRenderer implements BoardRenderer {
       gestureHeadMotion: null,
       laser: null,
       laserSessionId: null,
+      retiredTransformStreamId: null,
       selections: new Map(),
     };
   }
@@ -6039,12 +7023,19 @@ export class KonvaBoardRenderer implements BoardRenderer {
       const entry = this.presenceRenderEntries.get(presence.clientId);
       if (!entry) continue;
       const cursorMotion = this.cursorMotions.get(presence.clientId);
-      const cursorPoint = cursorMotion
-        ? interpolateCursor(cursorMotion, animationTime)
-        : presence.cursor;
+      const remoteCursorStream = this.remoteCursorStreams.get(presence.clientId);
+      const streamedCursor = remoteCursorStream
+        ? remoteCursorStreamSample(remoteCursorStream, animationTime)
+        : null;
+      const cursorPoint = streamedCursor?.point
+        ?? (cursorMotion
+          ? cursorMotionSample(cursorMotion, animationTime).point
+          : presence.cursor);
+      if (streamedCursor?.pending) animationPending = true;
       if (
-        cursorMotion
-        && animationTime < cursorMotion.startedAt + CURSOR_INTERPOLATION_MS
+        !remoteCursorStream
+        && cursorMotion
+        && animationTime < cursorMotion.startedAt + cursorMotion.durationMs
       ) {
         animationPending = true;
       }
@@ -6072,8 +7063,10 @@ export class KonvaBoardRenderer implements BoardRenderer {
         }
       }
       if (entry.cursorLabel) {
-        const labelDeadline = cursorMotion
-          ? cursorMotion.lastMovedAt + REMOTE_CURSOR_LABEL_IDLE_MS
+        const labelLastMovedAt = remoteCursorStream?.lastMovedAt
+          ?? cursorMotion?.lastMovedAt;
+        const labelDeadline = labelLastMovedAt !== undefined
+          ? labelLastMovedAt + REMOTE_CURSOR_LABEL_IDLE_MS
           : Number.POSITIVE_INFINITY;
         const interacting = Boolean(
           entry.gesturePreview?.visible()
@@ -6132,6 +7125,29 @@ export class KonvaBoardRenderer implements BoardRenderer {
               ));
         }
       }
+    }
+    let objectTransformChanged = false;
+    for (const [id, motion] of this.remoteTransformMotions) {
+      if (this.localTransformOwnsObject(id)) continue;
+      const object = this.objects.get(id);
+      const node = this.nodes.get(id);
+      if (!object || !node) {
+        this.remoteTransformMotions.delete(id);
+        continue;
+      }
+      const interpolated = interpolateRemoteTransform(motion, animationTime);
+      this.applyAtomicTransformToNode(object, node, interpolated.transform);
+      objectTransformChanged = true;
+      if (interpolated.complete) {
+        this.remoteTransformMotions.delete(id);
+      } else {
+        animationPending = true;
+      }
+    }
+    if (objectTransformChanged) {
+      this.updateSelectionObjectOutlines(this.selectionChromeVisible());
+      this.objectLayer.batchDraw();
+      this.previewLayer.batchDraw();
     }
     this.presenceLayer.batchDraw();
     if (animationPending) this.schedulePresenceAnimation();

@@ -19,6 +19,30 @@ const VALID_NEIGHBOR_ID = "00000000-0000-4000-8000-000000000104";
 const FUTURE_TEXT_ID = "00000000-0000-4000-8000-000000000105";
 
 describe("boardObjectSnapshot", () => {
+  it("exposes collaborative Text formatting as renderer-only runs", () => {
+    const document = createPageDocument(PAGE_ID);
+    const record = addBoardObject(document, {
+      id: OBJECT_ID,
+      kind: BUILTIN_OBJECT_KINDS.text,
+      version: 1,
+      transform: [0, 0, 200, 80, 0],
+      zRank: "text-runs",
+      props: { text: createCollaborativeText("hello") },
+    }, createLocalCommandOrigin("snapshot-rich-text"));
+    const text = getCollaborativeText(record, "text")!;
+    text.format(1, 3, { bold: true, color: "#d33f49" });
+
+    const snapshot = boardObjectSnapshot(record);
+
+    expect(snapshot.props.text).toBe("hello");
+    expect(snapshot.props.textRuns).toEqual([
+      { insert: "h" },
+      { insert: "ell", attributes: { bold: true, color: "#d33f49" } },
+      { insert: "o" },
+    ]);
+    expect(readBoardObject(record).props.has("textRuns")).toBe(false);
+  });
+
   it("preserves unknown shapes, collaborative text, and opaque binary values without aliasing", () => {
     const document = createPageDocument(PAGE_ID);
     const binary = new Uint8Array([0, 1, 127, 128, 254, 255]);

@@ -332,8 +332,48 @@ export function createCollaborativeText(initialValue = ""): Y.Text {
   return text;
 }
 
-export function createTextProps(text = ""): Readonly<Record<string, unknown>> {
-  return { text: createCollaborativeText(text) };
+export const BOARD_TEXT_LAYOUT_MODES = [
+  "auto-width",
+  "fixed-width",
+] as const;
+
+export type BoardTextLayoutMode = typeof BOARD_TEXT_LAYOUT_MODES[number];
+
+export interface BoardTextLayoutOptions {
+  readonly layoutMode?: BoardTextLayoutMode;
+  readonly minimumHeight?: number;
+}
+
+export function isBoardTextLayoutMode(
+  value: unknown,
+): value is BoardTextLayoutMode {
+  return BOARD_TEXT_LAYOUT_MODES.includes(value as BoardTextLayoutMode);
+}
+
+export function boardTextLayoutMode(
+  value: unknown,
+): BoardTextLayoutMode {
+  return isBoardTextLayoutMode(value) ? value : "fixed-width";
+}
+
+export function createTextProps(
+  text = "",
+  layout: BoardTextLayoutOptions = {},
+): Readonly<Record<string, unknown>> {
+  const props: Record<string, unknown> = {
+    text: createCollaborativeText(text),
+  };
+  if (layout.layoutMode !== undefined) {
+    props.layoutMode = layout.layoutMode;
+  }
+  if (
+    layout.minimumHeight !== undefined
+    && Number.isFinite(layout.minimumHeight)
+    && layout.minimumHeight > 0
+  ) {
+    props.minimumHeight = layout.minimumHeight;
+  }
+  return props;
 }
 
 export function createCodeProps(

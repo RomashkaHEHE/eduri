@@ -98,6 +98,8 @@ const MODIFIER_HINTS: Readonly<Record<
   "rotation-snap": { key: "Shift", label: "шаг 45°" },
   "line-edit-points": { key: "Enter", label: "изменить точки линии/стрелки" },
   "line-delete-point": { key: "Delete", label: "удалить точку" },
+  "text-exit": { key: "Esc", label: "закончить текст" },
+  "text-font-size": { key: "Alt + Scroll", label: "размер текста" },
 };
 
 function shortcutLabel(tool: BoardTool): string | undefined {

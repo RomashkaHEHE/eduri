@@ -168,7 +168,10 @@ describe("Board v2 fragments", () => {
         fill: "#123456",
         fontStyle: "bold italic",
       },
-      props: createTextProps("rich text"),
+      props: createTextProps("rich text", {
+        layoutMode: "fixed-width",
+        minimumHeight: 30,
+      }),
     }, origin);
     getCollaborativeText(textRecord, "text")?.format(0, 4, {
       emphasis: true,
@@ -290,6 +293,8 @@ describe("Board v2 fragments", () => {
     );
     expect(pastedText.style.get("fill")).toBe("#123456");
     expect(pastedText.style.get("fontStyle")).toBe("bold italic");
+    expect(pastedText.props.get("layoutMode")).toBe("fixed-width");
+    expect(pastedText.props.get("minimumHeight")).toBe(30);
   });
 
   it("rejects malformed, oversized, and non-fresh input before target mutation", () => {

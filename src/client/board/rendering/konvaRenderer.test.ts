@@ -315,6 +315,30 @@ interface RendererInternals {
     readonly expiresAt: number;
     readonly active: boolean;
   }>;
+  readonly cursorMotions: Map<number, {
+    readonly from: BoardPoint;
+    readonly target: BoardPoint;
+    readonly control1: BoardPoint;
+    readonly control2: BoardPoint;
+    readonly startedAt: number;
+    readonly durationMs: number;
+    readonly receivedAt: number;
+    readonly sampleIntervalMs: number;
+    readonly sampleVelocity: BoardPoint;
+  }>;
+  readonly remoteCursorStreams: Map<number, {
+    readonly streamId: string;
+    readonly samples: readonly {
+      readonly sequence: number;
+      readonly point: BoardPoint;
+      readonly elapsedMs: number;
+    }[];
+    clockOffsetMs: number;
+    jitterMs: number;
+    playbackDelayMs: number;
+    playbackElapsedMs: number;
+    lastRenderAt: number;
+  }>;
   readonly laserSession: {
     readonly group: Konva.Group;
     readonly strokes: readonly {
@@ -386,6 +410,7 @@ function callbackSpies(): BoardRendererCallbacks {
     onTransformStart: vi.fn(),
     onTransformCancel: vi.fn(),
     onTransformObjects: vi.fn(),
+    onTransformPreviewChange: vi.fn(),
     onEditLineGeometry: vi.fn(),
     onEditObject: vi.fn(),
     onLaserChange: vi.fn(),
@@ -740,7 +765,41 @@ describe("Konva board object compatibility", () => {
     expect(textNode.padding()).toBe(2);
     expect(textNode.lineHeight()).toBe(1.25);
     expect(textNode.wrap()).toBe("word");
-    expect(textNode.verticalAlign()).toBe("middle");
+    expect(textNode.verticalAlign()).toBe("top");
+
+    const autoWidthText = renderObjectNode(snapshot({
+      props: { text: "one line only", layoutMode: "auto-width" },
+    }), undefined, () => undefined);
+    expect((autoWidthText.getChildren()[0] as Konva.Text).wrap()).toBe("none");
+    autoWidthText.destroy();
+
+    const richText = renderObjectNode(snapshot({
+      props: {
+        text: "AB",
+        layoutMode: "auto-width",
+        textRuns: [
+          { insert: "A", attributes: { bold: true, color: "#d33f49" } },
+          { insert: "B", attributes: { italic: true, fontSize: 28 } },
+        ],
+      },
+      style: {
+        fill: "#17212b",
+        fontSize: 20,
+        fontFamily: "Inter, Arial, sans-serif",
+        fontStyle: "normal",
+      },
+    }), undefined, () => undefined);
+    const richGlyphs = richText.getChildren() as Konva.Text[];
+    expect(richGlyphs).toHaveLength(2);
+    expect(richGlyphs[0].text()).toBe("A");
+    expect(richGlyphs[0].fill()).toBe("#d33f49");
+    expect(richGlyphs[0].fontStyle()).toBe("bold");
+    expect(richGlyphs[0].lineHeight()).toBe(1.25);
+    expect(richGlyphs[1].text()).toBe("B");
+    expect(richGlyphs[1].fontStyle()).toBe("italic");
+    expect(richGlyphs[1].fontSize()).toBe(28);
+    expect(richGlyphs[1].lineHeight()).toBe(1.25);
+    richText.destroy();
 
     const image = renderObjectNode(snapshot({
       id: "styled-image",
@@ -884,7 +943,8 @@ describe("Konva board object compatibility", () => {
 
     const textObject = snapshot({ props: { text: longText } });
     const text = renderObjectNode(textObject, undefined, () => undefined);
-    expectBounded((text.getChildren()[0] as Konva.Text).text(), 4_096);
+    expect((text.getChildren()[0] as Konva.Text).text().replace(/\n/gu, ""))
+      .toBe(longText);
     expect(textObject.props.text).toBe(longText);
 
     const codeObject = snapshot({
@@ -1477,6 +1537,133 @@ describe("Konva local multi-selection chrome", () => {
     renderer.destroy();
   });
 
+  it("uses the complete Transformer interior to drag a selected thin stroke", () => {
+    const { callbacks, renderer, internals } = rendererHarness();
+    renderer.setObject(snapshot({
+      id: "thin-stroke",
+      kind: BUILTIN_OBJECT_KINDS.stroke,
+      transform: [100, 80, 140, 90, 0],
+      props: {
+        points: encodeStrokePoints([
+          { x: 0, y: 0, pressure: 0.5 },
+          { x: 140, y: 90, pressure: 0.5 },
+        ]),
+      },
+    }));
+    renderer.setSelection(["thin-stroke"]);
+
+    const node = internals.nodes.get("thin-stroke")!;
+    const back = internals.transformer.findOne<Konva.Shape>(".back")!;
+    expect(internals.transformer.shouldOverdrawWholeArea()).toBe(true);
+    expect(back.draggable()).toBe(true);
+
+    back.fire("dragstart");
+    back.position({ x: 24, y: 16 });
+    back.fire("dragmove");
+    expect(node.position()).toEqual({ x: 124, y: 96 });
+
+    node.fire("dragmove");
+    const livePreview = vi.mocked(callbacks.onTransformPreviewChange!)
+      .mock.calls.at(-1)?.[0];
+    expect(livePreview).toMatchObject({
+      transforms: [{
+        objectId: "thin-stroke",
+        transform: [124, 96, 140, 90, 0],
+      }],
+    });
+    expect(callbacks.onTransformObjects).not.toHaveBeenCalled();
+    node.stopDrag();
+    expect(callbacks.onTransformStart).toHaveBeenCalledOnce();
+    expect(callbacks.onTransformObjects).toHaveBeenCalledOnce();
+    expect(
+      vi.mocked(callbacks.onTransformObjects).mock.calls[0][0].get("thin-stroke"),
+    ).toEqual([124, 96, 140, 90, 0]);
+    const committedPreview = vi.mocked(callbacks.onTransformPreviewChange!)
+      .mock.calls.at(-1)?.[0];
+    expect(committedPreview).toEqual({
+      streamId: livePreview?.streamId,
+      committed: true,
+      transforms: [{
+        objectId: "thin-stroke",
+        transform: [124, 96, 140, 90, 0],
+      }],
+    });
+    renderer.destroy();
+  });
+
+  it("interpolates remote transforms and hands off to the canonical object without blinking", () => {
+    const { renderer, internals } = rendererHarness();
+    const initial = snapshot({
+      id: "remote-move",
+      transform: [20, 30, 80, 60, 0],
+    });
+    const intermediate = [100, 90, 80, 60, 0] as const;
+    const committed = [140, 120, 80, 60, 0] as const;
+    renderer.setObject(initial);
+    renderer.setPresence([{
+      clientId: 91,
+      userId: "remote-user",
+      displayName: "Remote",
+      color: "#315efb",
+      selectionIds: [initial.id],
+      transformPreview: {
+        streamId: "remote-transform-1",
+        transforms: [{ objectId: initial.id, transform: intermediate }],
+      },
+    }]);
+
+    const node = internals.nodes.get(initial.id)!;
+    const animationStart = performance.now();
+    internals.renderPresence(animationStart + REMOTE_GESTURE_INTERPOLATION_MS / 2);
+    expect(node.x()).toBeGreaterThan(initial.transform[0]);
+    expect(node.x()).toBeLessThan(intermediate[0]);
+    internals.renderPresence(animationStart + REMOTE_GESTURE_INTERPOLATION_MS * 2);
+    expect(node.position()).toEqual({ x: intermediate[0], y: intermediate[1] });
+    expect(
+      internals.presenceRenderEntries.get(91)?.selections.get(initial.id)?.position(),
+    ).toEqual({ x: intermediate[0], y: intermediate[1] });
+
+    renderer.setObject(snapshot({ id: initial.id, transform: committed }));
+    expect(internals.nodes.get(initial.id)?.position()).toEqual({
+      x: committed[0],
+      y: committed[1],
+    });
+    renderer.setPresence([{
+      clientId: 91,
+      userId: "remote-user",
+      displayName: "Remote",
+      color: "#315efb",
+      selectionIds: [initial.id],
+      transformPreview: {
+        streamId: "remote-transform-1",
+        committed: true,
+        transforms: [{ objectId: initial.id, transform: committed }],
+      },
+    }]);
+    internals.renderPresence(performance.now() + REMOTE_GESTURE_INTERPOLATION_MS * 2);
+    expect(internals.nodes.get(initial.id)?.position()).toEqual({
+      x: committed[0],
+      y: committed[1],
+    });
+    renderer.destroy();
+  });
+
+  it("keeps single-object editing reachable through the Transformer interior", () => {
+    const { callbacks, renderer, internals } = rendererHarness();
+    renderer.setObject(snapshot({
+      id: "selected-text",
+      kind: BUILTIN_OBJECT_KINDS.text,
+      props: { text: "editable" },
+    }));
+    renderer.setSelection(["selected-text"]);
+
+    const back = internals.transformer.findOne<Konva.Shape>(".back")!;
+    back.fire("dblclick", { evt: new MouseEvent("dblclick") }, true);
+
+    expect(callbacks.onEditObject).toHaveBeenCalledWith("selected-text");
+    renderer.destroy();
+  });
+
   it("keeps individual outlines attached during live drag and transform", () => {
     const { renderer, internals } = selectedRenderer();
     const rectangle = internals.nodes.get("selection-rectangle")!;
@@ -1794,6 +1981,55 @@ describe("Konva board view controls", () => {
 });
 
 describe("Konva pointer gesture input", () => {
+  it("creates click Text as auto-width and dragged Text as fixed-width", () => {
+    const { callbacks, renderer, internals } = rendererHarness();
+    renderer.setTool("text");
+    renderer.setCreationStyle({ fontSize: 20 });
+
+    internals.onPointerDown(konvaPointerEvent(
+      internals,
+      "pointerdown",
+      pointerEvent(270, 50, 60, { type: "pointerdown" }),
+    ));
+    internals.onPointerUp(konvaPointerEvent(
+      internals,
+      "pointerup",
+      pointerEvent(270, 52, 61, { buttons: 0, type: "pointerup" }),
+    ));
+    expect(vi.mocked(callbacks.onCreateObject).mock.calls[0]?.[0]).toMatchObject({
+      kind: BUILTIN_OBJECT_KINDS.text,
+      transform: [50, 60, 17, 29, 0],
+      props: { text: "", layoutMode: "auto-width" },
+    });
+
+    vi.mocked(callbacks.onCreateObject).mockClear();
+    internals.onPointerDown(konvaPointerEvent(
+      internals,
+      "pointerdown",
+      pointerEvent(271, 250, 180, { type: "pointerdown" }),
+    ));
+    internals.onPointerMove(konvaPointerEvent(
+      internals,
+      "pointermove",
+      pointerEvent(271, 90, 80),
+    ));
+    internals.onPointerUp(konvaPointerEvent(
+      internals,
+      "pointerup",
+      pointerEvent(271, 90, 80, { buttons: 0, type: "pointerup" }),
+    ));
+    expect(vi.mocked(callbacks.onCreateObject).mock.calls[0]?.[0]).toMatchObject({
+      kind: BUILTIN_OBJECT_KINDS.text,
+      transform: [90, 80, 160, 100, 0],
+      props: {
+        text: "",
+        layoutMode: "fixed-width",
+        minimumHeight: 100,
+      },
+    });
+    renderer.destroy();
+  });
+
   it("creates every concrete shape through the one stable Shape tool", () => {
     const { callbacks, renderer, internals } = rendererHarness();
     const cases = [
@@ -7314,6 +7550,141 @@ describe("Konva remote gesture previews", () => {
     } finally {
       renderer.destroy();
       vi.useRealTimers();
+    }
+  });
+
+  it("retargets remote cursor motion with continuous velocity and no endpoint overshoot", () => {
+    let animationTime = 10_000;
+    const performanceNow = vi.spyOn(performance, "now")
+      .mockImplementation(() => animationTime);
+    const { renderer, internals } = rendererHarness();
+    const presence = {
+      clientId: 911,
+      userId: "remote-natural-cursor-user",
+      displayName: "Remote natural cursor",
+      color: "#0a7f59",
+      selectionIds: [],
+    } as const;
+
+    try {
+      renderer.setPresence([{ ...presence, cursor: { x: 0, y: 0 } }]);
+      animationTime += 40;
+      renderer.setPresence([{ ...presence, cursor: { x: 40, y: 0 } }]);
+      const firstMotion = internals.cursorMotions.get(presence.clientId)!;
+      internals.renderPresence(
+        firstMotion.startedAt + firstMotion.durationMs / 2,
+      );
+      const entry = internals.presenceRenderEntries.get(presence.clientId)!;
+      const firstMidpoint = entry.cursor!.position();
+      expect(firstMidpoint.x).toBeGreaterThan(0);
+      expect(firstMidpoint.x).toBeLessThan(40);
+
+      animationTime = firstMotion.startedAt + firstMotion.durationMs * 0.7;
+      const beforeRetarget = entry.cursor!.position();
+      renderer.setPresence([{ ...presence, cursor: { x: 72, y: 12 } }]);
+      const secondMotion = internals.cursorMotions.get(presence.clientId)!;
+      expect(secondMotion.from.x).toBeGreaterThan(beforeRetarget.x);
+      expect(secondMotion.from.x).toBeLessThan(40);
+      expect(secondMotion.control1.x).toBeGreaterThan(secondMotion.from.x);
+
+      internals.renderPresence(
+        secondMotion.startedAt + secondMotion.durationMs / 2,
+      );
+      const secondMidpoint = entry.cursor!.position();
+      expect(secondMidpoint.x).toBeGreaterThan(secondMotion.from.x);
+      expect(secondMidpoint.x).toBeLessThan(72);
+      expect(secondMidpoint.y).toBeGreaterThanOrEqual(0);
+      expect(secondMidpoint.y).toBeLessThanOrEqual(12);
+
+      internals.renderPresence(
+        secondMotion.startedAt + secondMotion.durationMs + 1,
+      );
+      expect(entry.cursor!.position()).toEqual({ x: 72, y: 12 });
+      internals.renderPresence(
+        secondMotion.startedAt + secondMotion.durationMs + 1_000,
+      );
+      expect(entry.cursor!.position()).toEqual({ x: 72, y: 12 });
+
+      animationTime += 100;
+      renderer.setPresence([{ ...presence, cursor: { x: 50_000, y: 50_000 } }]);
+      expect(internals.cursorMotions.get(presence.clientId)?.durationMs).toBe(0);
+      expect(entry.cursor!.position()).toEqual({ x: 50_000, y: 50_000 });
+    } finally {
+      renderer.destroy();
+      performanceNow.mockRestore();
+    }
+  });
+
+  it("replays timed cursor trails as smooth curves and never jumps on a late packet", () => {
+    let animationTime = 20_000;
+    const performanceNow = vi.spyOn(performance, "now")
+      .mockImplementation(() => animationTime);
+    const { renderer, internals } = rendererHarness();
+    const presence = {
+      clientId: 912,
+      userId: "remote-cursor-stream-user",
+      displayName: "Remote streamed cursor",
+      color: "#0a7f59",
+      selectionIds: [],
+    } as const;
+    const diagonal = Math.SQRT1_2 * 100;
+
+    try {
+      renderer.setPresence([{
+        ...presence,
+        cursor: { x: 0, y: 100 },
+        cursorTrail: {
+          streamId: "cursor-circle-stream",
+          sampleOffset: 0,
+          samples: [
+            { x: 100, y: 0, elapsedMs: 0 },
+            { x: diagonal, y: diagonal, elapsedMs: 10 },
+            { x: 0, y: 100, elapsedMs: 20 },
+          ],
+        },
+      }]);
+      const stream = internals.remoteCursorStreams.get(presence.clientId)!;
+      stream.playbackElapsedMs = 5;
+      stream.lastRenderAt = animationTime;
+      stream.clockOffsetMs = animationTime - stream.playbackDelayMs - 5;
+      internals.renderPresence(animationTime);
+      const entry = internals.presenceRenderEntries.get(presence.clientId)!;
+      const curvedMidpoint = entry.cursor!.position();
+      expect(Math.hypot(curvedMidpoint.x, curvedMidpoint.y)).toBeGreaterThan(94);
+      expect(curvedMidpoint.x).toBeLessThan(100);
+      expect(curvedMidpoint.y).toBeGreaterThan(0);
+
+      stream.playbackElapsedMs = 20;
+      internals.renderPresence(animationTime);
+      expect(entry.cursor!.position()).toEqual({ x: 0, y: 100 });
+      animationTime += 200;
+      renderer.setPresence([{
+        ...presence,
+        cursor: { x: -100, y: 0 },
+        cursorTrail: {
+          streamId: "cursor-circle-stream",
+          sampleOffset: 1,
+          samples: [
+            { x: diagonal, y: diagonal, elapsedMs: 10 },
+            { x: 0, y: 100, elapsedMs: 20 },
+            { x: -diagonal, y: diagonal, elapsedMs: 30 },
+            { x: -100, y: 0, elapsedMs: 40 },
+          ],
+        },
+      }]);
+      const merged = internals.remoteCursorStreams.get(presence.clientId)!;
+      expect(merged.samples.map((sample) => sample.sequence)).toEqual([0, 1, 2, 3, 4]);
+      expect(merged.jitterMs).toBeGreaterThan(0);
+      expect(merged.playbackDelayMs).toBeGreaterThan(64);
+      expect(merged.playbackElapsedMs).toBe(20);
+      expect(entry.cursor!.position()).toEqual({ x: 0, y: 100 });
+
+      internals.renderPresence(animationTime + 8);
+      expect(merged.playbackElapsedMs).toBeLessThanOrEqual(30);
+      expect(entry.cursor!.position()).not.toEqual({ x: -100, y: 0 });
+    } finally {
+      renderer.destroy();
+      performanceNow.mockRestore();
     }
   });
 

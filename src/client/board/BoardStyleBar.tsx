@@ -122,18 +122,21 @@ const COLOR_NAMES: Readonly<Record<string, string>> = {
 const FONT_FAMILY_SUGGESTIONS = [
   // Each offered family has Cyrillic coverage; fallbacks preserve it on older OSes.
   { value: "Inter, Arial, sans-serif", label: "Inter" },
+  { value: "Segoe UI, Arial, sans-serif", label: "Segoe UI" },
+  { value: "Calibri, Arial, sans-serif", label: "Calibri" },
   { value: "Georgia, Times New Roman, serif", label: "Georgia" },
+  { value: "Cambria, Times New Roman, serif", label: "Cambria" },
   {
     value: "Cascadia Code, Consolas, monospace",
     label: "Cascadia Code",
   },
   { value: "Arial, sans-serif", label: "Arial" },
+  { value: "Tahoma, Arial, sans-serif", label: "Tahoma" },
   { value: "Verdana, sans-serif", label: "Verdana" },
   { value: "Trebuchet MS, sans-serif", label: "Trebuchet MS" },
   { value: "Times New Roman, serif", label: "Times New Roman" },
   { value: "Courier New, monospace", label: "Courier New" },
 ] as const;
-const FONT_SIZE_SUGGESTIONS = [8, 10, 12, 14, 16, 18, 20, 24, 28, 32, 40, 48, 64, 96, 128, 192, 256] as const;
 const SHAPE_KIND_OPTIONS = Object.freeze([
   { value: "rectangle", label: "Прямоугольник", icon: Square },
   { value: "ellipse", label: "Эллипс", icon: Circle },
@@ -150,9 +153,8 @@ const GENERIC_STROKE_WIDTH_STEP = 0.5;
 const GENERIC_OPACITY_MIN = 0.05;
 const GENERIC_OPACITY_MAX = 1;
 const GENERIC_OPACITY_STEP = 0.01;
-const FONT_SIZE_MIN = 8;
+const FONT_SIZE_MIN = 0.01;
 const FONT_SIZE_MAX = 256;
-const FONT_SIZE_STEP = 0.5;
 const PALETTE_DRAG_ACTIVATION_PX = 3;
 const PALETTE_TOUCH_SCROLL_SLOP_PX = 6;
 const PALETTE_DRAG_EDGE_PX = 28;
@@ -222,6 +224,14 @@ function rangeValue(
 
 function compactNumber(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+function normalizedFontSizeInput(value: string): number | null {
+  const parsed = Number(value.trim().replace(",", "."));
+  if (!Number.isFinite(parsed)) return null;
+  return Math.round(
+    Math.max(0.01, Math.min(FONT_SIZE_MAX, parsed)) * 100,
+  ) / 100;
 }
 
 function styleWithFontToken(
@@ -317,7 +327,7 @@ function palettePreviewStyle(
   };
 }
 
-function BoardFontFamilyControl({
+export function BoardFontFamilyControl({
   value,
   mixed,
   onCommit,
@@ -675,7 +685,6 @@ export function BoardStyleBar({
   const [paletteDropCommitGuard, setPaletteDropCommitGuard] = useState(false);
   const [paletteAnnouncement, setPaletteAnnouncement] = useState("");
   const popupId = useId();
-  const fontSizeSuggestionsId = useId();
   const colorSlots = sharedColorPalette?.slots ?? DEFAULT_STYLE_COLOR_SLOTS;
   const recentColors = sharedColorPalette?.recentColors ?? [];
   const opacity = rangeValue(
@@ -693,6 +702,7 @@ export function BoardStyleBar({
   const fontSize = mixed.has("fontSize")
     ? ""
     : String(rangeValue(values.fontSize, 20, FONT_SIZE_MIN, FONT_SIZE_MAX));
+  const [fontSizeDraft, setFontSizeDraft] = useState(fontSize);
   const openPreset = freeDrawingPalette?.presets.find(
     (preset) => preset.id === openPresetId,
   );
@@ -714,6 +724,20 @@ export function BoardStyleBar({
         ?? ["stroke", "strokeWidth", "opacity"]
       : [],
   );
+
+  useEffect(() => {
+    if (!fontSizeFocusedRef.current) setFontSizeDraft(fontSize);
+  }, [fontSize]);
+
+  const commitFontSizeDraft = useCallback((rawValue: string) => {
+    const normalized = normalizedFontSizeInput(rawValue);
+    if (normalized === null) {
+      setFontSizeDraft(fontSize);
+      return;
+    }
+    setFontSizeDraft(String(normalized));
+    onStyleChange("fontSize", normalized);
+  }, [fontSize, onStyleChange]);
   const activePalettePreview = activePalettePreset
     ? palettePreviewStyle(activePalettePreset)
     : null;
@@ -850,18 +874,21 @@ export function BoardStyleBar({
       event.stopPropagation();
       const current = mixed.has("fontSize")
         ? 20
-        : Number(fontSize) || 20;
-      const direction = event.deltaY < 0 ? 1 : -1;
+        : Number(fontSizeDraft.replace(",", ".")) || 20;
       const multiplier = event.shiftKey ? 10 : 1;
-      const next = Math.max(
-        FONT_SIZE_MIN,
+      const delta = event.deltaMode === WHEEL_DELTA_MODE_PIXEL
+        ? event.deltaY
+        : event.deltaY * (event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : 100);
+      const next = Math.round(Math.max(
+        0.01,
         Math.min(
           FONT_SIZE_MAX,
-          current + direction * FONT_SIZE_STEP * multiplier,
+          current - delta * 0.02 * multiplier,
         ),
-      );
+      ) * 100) / 100;
       if (next === current) return;
       onContinuousChangeStart?.();
+      setFontSizeDraft(String(next));
       onStyleChange("fontSize", next);
       if (fontSizeFocusedRef.current) return;
       if (fontSizeWheelTimerRef.current !== null) {
@@ -876,7 +903,7 @@ export function BoardStyleBar({
     return () => input.removeEventListener("wheel", onWheel);
   }, [
     available,
-    fontSize,
+    fontSizeDraft,
     mixed,
     onContinuousChangeEnd,
     onContinuousChangeStart,
@@ -1919,14 +1946,11 @@ export function BoardStyleBar({
         <input
           ref={fontSizeInputRef}
           className="board-stylebar__font-size"
-          type="number"
-          list={fontSizeSuggestionsId}
+          type="text"
+          inputMode="decimal"
           aria-label="Размер текста"
           title="Размер текста"
-          min={FONT_SIZE_MIN}
-          max={FONT_SIZE_MAX}
-          step={FONT_SIZE_STEP}
-          value={fontSize}
+          value={fontSizeDraft}
           placeholder="—"
           onFocus={() => {
             fontSizeFocusedRef.current = true;
@@ -1936,7 +1960,8 @@ export function BoardStyleBar({
             }
             onContinuousChangeStart?.();
           }}
-          onBlur={() => {
+          onBlur={(event) => {
+            commitFontSizeDraft(event.currentTarget.value);
             fontSizeFocusedRef.current = false;
             if (fontSizeWheelTimerRef.current !== null) {
               window.clearTimeout(fontSizeWheelTimerRef.current);
@@ -1945,24 +1970,20 @@ export function BoardStyleBar({
             onContinuousChangeEnd?.();
           }}
           onChange={(event) => {
-            const next = Number(event.currentTarget.value);
-            if (Number.isFinite(next) && event.currentTarget.value !== "") {
-              onStyleChange(
-                "fontSize",
-                Math.max(FONT_SIZE_MIN, Math.min(FONT_SIZE_MAX, next)),
-              );
+            setFontSizeDraft(event.currentTarget.value);
+          }}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              commitFontSizeDraft(event.currentTarget.value);
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              setFontSizeDraft(fontSize);
+              event.currentTarget.blur();
             }
           }}
         />
       )}
-      {available.has("fontSize") && !paletteProperties.has("fontSize") && (
-        <datalist id={fontSizeSuggestionsId}>
-          {FONT_SIZE_SUGGESTIONS.map((size) => (
-            <option key={size} value={size} />
-          ))}
-        </datalist>
-      )}
-
       {available.has("fontFamily") && !paletteProperties.has("fontFamily") && (
         <BoardFontFamilyControl
           value={values.fontFamily}
@@ -2124,10 +2145,9 @@ export function BoardStyleBar({
               <span>Размер</span>
               <input
                 type="number"
-                list={fontSizeSuggestionsId}
                 min={FONT_SIZE_MIN}
                 max={FONT_SIZE_MAX}
-                step={FONT_SIZE_STEP}
+                step="any"
                 value={openPreset.style.fontSize}
                 aria-label="Размер текста"
                 onChange={(event) => freeDrawingPalette.onChangePreset(
@@ -2142,22 +2162,21 @@ export function BoardStyleBar({
                 onWheel={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
-                  const direction = event.deltaY < 0 ? 1 : -1;
-                  const step = event.shiftKey ? 5 : FONT_SIZE_STEP;
+                  const delta = event.deltaMode === WHEEL_DELTA_MODE_PIXEL
+                    ? event.deltaY
+                    : event.deltaY * (
+                        event.deltaMode === WheelEvent.DOM_DELTA_LINE ? 16 : 100
+                      );
                   freeDrawingPalette.onChangePreset(openPreset.id, {
                     fontSize: Math.max(FONT_SIZE_MIN, Math.min(
                       FONT_SIZE_MAX,
-                      (openPreset.style.fontSize as number) + direction * step,
+                      (openPreset.style.fontSize as number)
+                        - delta * 0.02 * (event.shiftKey ? 10 : 1),
                     )),
                   });
                 }}
               />
               <output>{compactNumber(openPreset.style.fontSize)} px</output>
-              <datalist id={fontSizeSuggestionsId}>
-                {FONT_SIZE_SUGGESTIONS.map((size) => (
-                  <option key={size} value={size} />
-                ))}
-              </datalist>
             </label>
           )}
 

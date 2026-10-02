@@ -16,6 +16,7 @@ export interface CollaborativeTextareaBindingOptions {
     "undo" | "redo" | "commandBoundary"
   >;
   applyEdit(edit: CollaborativeTextEdit): void;
+  onValueChange?(): void;
 }
 
 interface TextSelection {
@@ -221,6 +222,7 @@ export class CollaborativeTextareaBinding {
         this.element.value = this.shadowValue;
         writeSelection(this.element, selection);
       }
+      this.options.onValueChange?.();
     } catch (error) {
       const selection = readSelection(this.element);
       this.shadowValue = this.text.toString();
@@ -254,6 +256,7 @@ export class CollaborativeTextareaBinding {
     if (!canPatch) this.element.value = next;
     this.shadowValue = next;
     writeSelection(this.element, translateSelection(selection, delta));
+    this.options.onValueChange?.();
   };
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {

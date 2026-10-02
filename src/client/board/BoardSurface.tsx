@@ -12,6 +12,10 @@ import {
 } from "react";
 import {
   BringToFront,
+  AlignCenter,
+  AlignLeft,
+  AlignRight,
+  Bold,
   Braces,
   Check,
   ChevronRight,
@@ -21,6 +25,7 @@ import {
   Download,
   Grid3x3,
   House,
+  Italic,
   Layers3,
   Maximize2,
   MousePointer2,
@@ -43,6 +48,7 @@ import {
   BUILTIN_OBJECT_KINDS,
   LocalUndoController,
   addBoardObject,
+  boardTextLayoutMode,
   boardFragmentImageAssets,
   createBoardFragment,
   createCodeProps,
@@ -56,6 +62,7 @@ import {
   getCollaborativeText,
   getPageObjects,
   insertBoardFragment,
+  isBoardTextLayoutMode,
   isValidZRank,
   measureBoardDocument,
   newRankAfter,
@@ -63,10 +70,14 @@ import {
   patchObjectStyles,
   patchObjectStylesByTarget,
   replaceCollaborativeTextRange,
+  replaceCollaborativeRichTextRange,
+  formatCollaborativeTextRange,
   reorderObjects,
   resolveObjectStyleDefaults,
   setObjectProperty,
   setLineObjectGeometry,
+  setObjectTransform,
+  setTextFontSizeAndTransform,
   stateVectorsEqual,
   transformObjects,
   compareBoardObjectZOrder,
@@ -87,6 +98,9 @@ import { konvaBoardRendererFactory } from "./rendering/konvaRenderer";
 import type {
   BoardCamera,
   BoardContextMenuRequest,
+  BoardCursorInputSample,
+  BoardCursorTrail,
+  BoardCursorTrailSample,
   BoardGesturePreview,
   BoardLaserClearMode,
   BoardLaserPreview,
@@ -100,16 +114,38 @@ import type {
   BoardRendererFactory,
   BoardShapeKind,
   BoardTheme,
+  BoardTextSelectionPresence,
   BoardTool,
+  BoardTransformPreview,
+} from "./rendering/types";
+import {
+  MAX_BOARD_ACCUMULATED_CURSOR_POINTS,
+  MAX_BOARD_CURSOR_TRAIL_POINTS,
 } from "./rendering/types";
 import { CollaborativeTextareaBinding } from "./collaborativeTextBinding";
+import { BoardTextPresenceLayer } from "./BoardTextPresenceOverlay";
+import {
+  CollaborativeRichTextBinding,
+  type RichTextSelectionStyle,
+} from "./collaborativeRichTextBinding";
 import type { AssetOutboxHealth } from "./assetOutbox";
 import {
+  BoardFontFamilyControl,
   BoardStyleBar,
   type BoardFontStyleToken,
   type BoardLayerDirection,
   type BoardToggleState,
 } from "./BoardStyleBar";
+import { BoardColorControl } from "./BoardColorControl";
+import {
+  BOARD_TEXT_FONT_SIZE_MAX,
+  BOARD_TEXT_FONT_SIZE_MIN,
+  BOARD_TEXT_LINE_HEIGHT,
+  BOARD_TEXT_MIN_AUTO_WIDTH,
+  BOARD_TEXT_PADDING_PX,
+  boardTextEditorStyle,
+  canonicalBoardFontStyle,
+} from "./textLayout";
 import {
   boardToolStyleKeys,
   defaultBoardToolStyle,
@@ -196,12 +232,15 @@ export interface BoardServerMetrics {
 
 export interface BoardAwarenessState {
   readonly cursor?: BoardPoint | null;
+  readonly cursorTrail?: BoardCursorTrail | null;
   readonly viewport?: BoardCamera | null;
   readonly selectionIds?: readonly string[];
   readonly activeTool?: BoardTool;
   readonly gesturePreview?: BoardGesturePreview | null;
+  readonly transformPreview?: BoardTransformPreview | null;
   readonly laser?: BoardLaserPreview | null;
   readonly laserClearMode?: BoardLaserClearMode | null;
+  readonly textSelection?: BoardTextSelectionPresence | null;
 }
 
 export interface BoardImageInsertion {
@@ -256,8 +295,34 @@ interface EditingState {
   };
 }
 
+interface LocalCursorTrailState {
+  readonly streamId: string;
+  readonly startedAt: number;
+  sampleOffset: number;
+  readonly samples: BoardCursorTrailSample[];
+}
+
+function pendingTextObjectSnapshot(
+  editing: EditingState,
+): BoardObjectSnapshot | null {
+  const draft = editing.pendingText?.draft;
+  if (!draft || draft.kind !== BUILTIN_OBJECT_KINDS.text) return null;
+  return {
+    id: editing.objectId,
+    kind: BUILTIN_OBJECT_KINDS.text,
+    version: 1,
+    transform: draft.transform,
+    zRank: "",
+    parentId: null,
+    style: draft.style ?? {},
+    props: draft.props ?? { text: "" },
+    rendering: { status: "supported" },
+  };
+}
+
 const READ_ONLY_TOOLS = new Set<BoardTool>(["select", "hand", "pen"]);
 const MAX_AWARENESS_SELECTION_IDS = 256;
+const CURSOR_TRAIL_REPAIR_WINDOW_MS = 100;
 const BOARD_THEME_STORAGE_KEY = "eduri-board-theme";
 export const BOARD_GRID_VISIBILITY_STORAGE_KEY =
   "eduri-board-grid-visible";
@@ -266,6 +331,7 @@ const LINE_PRESETS_STORAGE_KEY = "eduri-board-line-presets-v1";
 const STYLE_SETTINGS_PERSIST_DELAY_MS = 180;
 const ZOOM_STEP_FACTOR = 1.1;
 const CAMERA_CENTER_EPSILON_PX = 0.5;
+const INLINE_TEXT_FONT_WHEEL_END_MS = 180;
 type BoardToolDigit = "1" | "2" | "3" | "4" | "5" | "6" | "7";
 const LETTER_TOOL_SHORTCUTS: ReadonlyArray<
   readonly [tool: BoardTool, letter: string]
@@ -393,12 +459,6 @@ function fontStyleWithToken(
   const tokens = new Set(fontStyleTokens(value));
   if (enabled) tokens.add(token);
   else tokens.delete(token);
-  const ordered = FONT_STYLE_TOKENS.filter((candidate) => tokens.has(candidate));
-  return ordered.length > 0 ? ordered.join(" ") : "normal";
-}
-
-function canonicalFontStyle(value: unknown): string {
-  const tokens = fontStyleTokens(value);
   const ordered = FONT_STYLE_TOKENS.filter((candidate) => tokens.has(candidate));
   return ordered.length > 0 ? ordered.join(" ") : "normal";
 }
@@ -671,47 +731,74 @@ function editorStyle(
   };
 }
 
-function inlineTextEditorStyle(
-  object: BoardObjectSnapshot,
-  camera: BoardCamera,
-  theme: BoardTheme,
-): CSSProperties {
-  const [x, y, rawWidth, rawHeight, rotation] = object.transform;
-  const zoom = Number.isFinite(camera.zoom) && camera.zoom > 0 ? camera.zoom : 1;
-  const width = Math.max(1, Math.abs(rawWidth) * zoom);
-  const height = Math.max(1, Math.abs(rawHeight) * zoom);
-  const storedFill = typeof object.style.fill === "string"
-    ? object.style.fill
-    : "#17212b";
-  const color = theme === "dark" && storedFill.toLowerCase() === "#17212b"
-    ? "#e7edf5"
-    : storedFill;
+function inlineTextMinimumHeight(object: BoardObjectSnapshot): number {
   const fontSize = typeof object.style.fontSize === "number"
     && Number.isFinite(object.style.fontSize)
-    ? Math.max(8, object.style.fontSize) * zoom
-    : 20 * zoom;
-  const fontFamily = typeof object.style.fontFamily === "string"
-    ? object.style.fontFamily
-    : "Inter, Arial, sans-serif";
-  const fontStyle = typeof object.style.fontStyle === "string"
-    ? object.style.fontStyle
-    : "normal";
+    ? Math.max(BOARD_TEXT_FONT_SIZE_MIN, object.style.fontSize)
+    : 20;
+  const lineHeight = fontSize * BOARD_TEXT_LINE_HEIGHT
+    + BOARD_TEXT_PADDING_PX * 2;
+  if (boardTextLayoutMode(object.props.layoutMode) === "auto-width") {
+    return lineHeight;
+  }
+  return typeof object.props.minimumHeight === "number"
+    && Number.isFinite(object.props.minimumHeight)
+    && object.props.minimumHeight > 0
+    ? Math.max(lineHeight, object.props.minimumHeight)
+    : Math.max(lineHeight, Math.abs(object.transform[3]));
+}
 
-  return {
-    left: camera.x + x * zoom,
-    top: camera.y + y * zoom,
-    width,
-    height,
-    minHeight: height,
-    maxHeight: height,
-    color,
-    fontFamily,
-    fontSize,
-    fontStyle: fontStyle.includes("italic") ? "italic" : "normal",
-    fontWeight: fontStyle.includes("bold") ? 700 : 400,
-    opacity: typeof object.style.opacity === "number" ? object.style.opacity : 1,
-    transform: `rotate(${Number.isFinite(rotation) ? rotation : 0}rad)`,
-  };
+function measureInlineTextTransform(
+  element: HTMLElement,
+  object: BoardObjectSnapshot,
+  camera: BoardCamera,
+): AtomicTransform | null {
+  const frame = element.parentElement;
+  if (!frame) return null;
+  const zoom = Number.isFinite(camera.zoom) && camera.zoom > 0 ? camera.zoom : 1;
+  const [x, y, rawWidth, rawHeight, rotation] = object.transform;
+  const mode = boardTextLayoutMode(object.props.layoutMode);
+  const fixedWidthPx = Math.max(1, Math.abs(rawWidth) * zoom);
+
+  frame.style.width = `${mode === "fixed-width" ? fixedWidthPx : 1}px`;
+  element.style.width = mode === "fixed-width" ? "100%" : "1px";
+  element.style.height = "1px";
+  const scrollWidth = element.scrollWidth;
+  const scrollHeight = element.scrollHeight;
+  if (scrollHeight <= 0 || (mode === "auto-width" && scrollWidth <= 0)) {
+    frame.style.width = `${Math.max(1, Math.abs(rawWidth) * zoom)}px`;
+    frame.style.height = `${Math.max(1, Math.abs(rawHeight) * zoom)}px`;
+    element.style.width = "100%";
+    element.style.height = "100%";
+    return null;
+  }
+
+  const minimumHeightPx = inlineTextMinimumHeight(object) * zoom;
+  const widthPx = mode === "auto-width"
+    ? Math.max(
+        BOARD_TEXT_MIN_AUTO_WIDTH * zoom,
+        Math.ceil(scrollWidth + 1),
+      )
+    : fixedWidthPx;
+  const heightPx = Math.max(minimumHeightPx, Math.ceil(scrollHeight));
+  frame.style.width = `${widthPx}px`;
+  frame.style.height = `${heightPx}px`;
+  element.style.width = "100%";
+  element.style.height = "100%";
+  return [x, y, widthPx / zoom, heightPx / zoom, rotation];
+}
+
+function transformsNearlyEqual(
+  left: AtomicTransform,
+  right: AtomicTransform,
+): boolean {
+  return left.every((value, index) => Math.abs(value - right[index]) < 0.01);
+}
+
+function normalizedWheelDelta(event: Pick<WheelEvent, "deltaY" | "deltaMode">): number {
+  if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) return event.deltaY * 16;
+  if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) return event.deltaY * 100;
+  return event.deltaY;
 }
 
 function editingText(object: BoardObjectSnapshot | null): string {
@@ -721,6 +808,24 @@ function editingText(object: BoardObjectSnapshot | null): string {
     : typeof object.props.source === "string"
       ? object.props.source
       : "";
+}
+
+function hasVisibleTextContent(value: string): boolean {
+  return /[^\s\u200b\u200c\u200d\u2060\ufeff]/u.test(value);
+}
+
+function roundedFontSize(value: number): number {
+  return Math.round(value * 100) / 100;
+}
+
+function inlineToggleActive(
+  attributes: Readonly<Record<string, unknown>>,
+  key: "bold" | "italic",
+  baseFontStyle: unknown,
+): boolean {
+  return typeof attributes[key] === "boolean"
+    ? attributes[key] === true
+    : fontStyleTokens(baseFontStyle).has(key);
 }
 
 function imageAssetId(object: BoardObjectSnapshot): string | null {
@@ -1148,7 +1253,16 @@ function isNativeInputTarget(target: EventTarget | null): boolean {
   return target instanceof HTMLInputElement
     || target instanceof HTMLTextAreaElement
     || target instanceof HTMLSelectElement
-    || (target instanceof HTMLElement && target.isContentEditable);
+    || (
+      target instanceof HTMLElement
+      && (
+        target.isContentEditable
+        || (
+          target.hasAttribute("contenteditable")
+          && target.getAttribute("contenteditable") !== "false"
+        )
+      )
+    );
 }
 
 function nativeEventIsComposing(event: Event): boolean {
@@ -1397,7 +1511,15 @@ export function BoardSurface({
   const fileRef = useRef<HTMLInputElement | null>(null);
   const pendingImagePlacementRef = useRef<BoardInsertionTarget | null>(null);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
-  const editorCompositionTargetRef = useRef<HTMLTextAreaElement | null>(null);
+  const inlineTextEditorRef = useRef<HTMLDivElement | null>(null);
+  const [inlineTextEditorElement, setInlineTextEditorElement] =
+    useState<HTMLDivElement | null>(null);
+  const richTextBindingRef = useRef<CollaborativeRichTextBinding | null>(null);
+  const inlineFontSizeInputRef = useRef<HTMLInputElement | null>(null);
+  const editorCompositionTargetRef = useRef<HTMLElement | null>(null);
+  const inlineTextResizeFrameRef = useRef<number | null>(null);
+  const inlineTextFontWheelTimerRef = useRef<number | null>(null);
+  const inlineTextFontWheelActiveRef = useRef(false);
   const defaultClipboardRef = useRef<BoardClipboard | null>(null);
   if (defaultClipboardRef.current === null) {
     defaultClipboardRef.current = new BoardClipboard();
@@ -1415,6 +1537,7 @@ export function BoardSurface({
   });
   const pendingLiveAwareness = useRef<BoardAwarenessState>({});
   const lastCursor = useRef<BoardPoint | null>(null);
+  const localCursorTrail = useRef<LocalCursorTrailState | null>(null);
   const activeCodeRunRef = useRef<PythonRunHandle | null>(null);
   const codeRunSequenceRef = useRef(0);
   const continuousStyleEditRef = useRef<{
@@ -1464,6 +1587,8 @@ export function BoardSurface({
     readonly count: number;
   } | null>(null);
   const [tool, setTool] = useState<BoardTool>("select");
+  const toolRef = useRef<BoardTool>(tool);
+  toolRef.current = tool;
   const [shapeKind, setShapeKind] = useState<BoardShapeKind>("rectangle");
   const [toolbarPreferences, setToolbarPreferences] =
     useState<BoardToolbarPreferences>(loadBoardToolbarPreferences);
@@ -1514,6 +1639,9 @@ export function BoardSurface({
   const [selection, setSelection] = useState<readonly string[]>([]);
   const selectionRef = useRef(selection);
   const [editing, setEditing] = useState<EditingState | null>(null);
+  const [richTextSelectionStyle, setRichTextSelectionStyle] =
+    useState<RichTextSelectionStyle>({ attributes: {}, mixed: new Set() });
+  const [inlineFontSizeDraft, setInlineFontSizeDraft] = useState("20");
   const [runOutput, setRunOutput] = useState("");
   const [running, setRunning] = useState(false);
   const [metricsOpen, setMetricsOpen] = useState(false);
@@ -1795,18 +1923,7 @@ export function BoardSurface({
       ) {
         return null;
       }
-      const draft = pendingText.draft;
-      return {
-        id: editing.objectId,
-        kind: BUILTIN_OBJECT_KINDS.text,
-        version: 1,
-        transform: draft.transform,
-        zRank: "",
-        parentId: null,
-        style: draft.style ?? {},
-        props: draft.props ?? { text: "" },
-        rendering: { status: "supported" },
-      } satisfies BoardObjectSnapshot;
+      return pendingTextObjectSnapshot(editing);
     }
     const record = objects.get(editing.objectId);
     return !objects.has(editing.objectId)
@@ -1817,6 +1934,271 @@ export function BoardSurface({
     && !editing.pendingText
     ? editing.objectId
     : null;
+  const setInlineTextEditorNode = useCallback((element: HTMLDivElement | null) => {
+    inlineTextEditorRef.current = element;
+    setInlineTextEditorElement(element);
+  }, []);
+  useLayoutEffect(() => {
+    if (editing?.kind === BUILTIN_OBJECT_KINDS.text && inlineTextEditorElement) {
+      inlineTextEditorElement.focus({ preventScroll: true });
+    }
+  }, [editing?.kind, editing?.objectId, inlineTextEditorElement]);
+
+  const applyMeasuredInlineTextFrame = useCallback((
+    element: HTMLElement,
+    object: BoardObjectSnapshot,
+  ): AtomicTransform | null => {
+    const measured = measureInlineTextTransform(
+      element,
+      object,
+      rendererRef.current?.camera ?? cameraRef.current,
+    );
+    if (!measured || transformsNearlyEqual(measured, object.transform)) {
+      return measured;
+    }
+    const active = editingRef.current;
+    if (
+      !active
+      || active.objectId !== object.id
+      || active.kind !== BUILTIN_OBJECT_KINDS.text
+    ) {
+      return measured;
+    }
+    if (active.pendingText) {
+      setEditing((current) => {
+        if (
+          !current?.pendingText
+          || current.objectId !== active.objectId
+          || transformsNearlyEqual(current.pendingText.draft.transform, measured)
+        ) {
+          return current;
+        }
+        return {
+          ...current,
+          pendingText: {
+            ...current.pendingText,
+            draft: {
+              ...current.pendingText.draft,
+              transform: measured,
+            },
+          },
+        };
+      });
+      return measured;
+    }
+    const activeDocument = documentRef.current;
+    const record = getPageObjects(activeDocument).get(active.objectId);
+    if (!record || readOnlyRef.current) return measured;
+    const currentObject = boardObjectSnapshot(record, active.objectId);
+    if (!transformsNearlyEqual(currentObject.transform, measured)) {
+      setObjectTransform(
+        activeDocument,
+        active.objectId,
+        measured,
+        localOriginRef.current,
+      );
+    }
+    return measured;
+  }, []);
+
+  const activeInlineTextObject = useCallback((): BoardObjectSnapshot | null => {
+    const active = editingRef.current;
+    if (!active || active.kind !== BUILTIN_OBJECT_KINDS.text) return null;
+    if (active.pendingText) return pendingTextObjectSnapshot(active);
+    const record = getPageObjects(documentRef.current).get(active.objectId);
+    return record ? boardObjectSnapshot(record, active.objectId) : null;
+  }, []);
+
+  const scheduleInlineTextFrameMeasurement = useCallback(() => {
+    if (inlineTextResizeFrameRef.current !== null) return;
+    inlineTextResizeFrameRef.current = requestAnimationFrame(() => {
+      inlineTextResizeFrameRef.current = null;
+      const active = editingRef.current;
+      const element = inlineTextEditorRef.current;
+      if (!active || active.kind !== BUILTIN_OBJECT_KINDS.text || !element) return;
+      const object = activeInlineTextObject();
+      if (object) applyMeasuredInlineTextFrame(element, object);
+    });
+  }, [activeInlineTextObject, applyMeasuredInlineTextFrame]);
+
+  const handleInlineTextFontWheel = useCallback((event: WheelEvent) => {
+    if (
+      !event.altKey
+      || event.ctrlKey
+      || event.metaKey
+      || event.deltaY === 0
+      || readOnlyRef.current
+    ) {
+      return;
+    }
+    const active = editingRef.current;
+    if (!active || active.kind !== BUILTIN_OBJECT_KINDS.text) return;
+    const object = activeInlineTextObject();
+    if (!object) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    const currentFontSize = typeof object.style.fontSize === "number"
+      && Number.isFinite(object.style.fontSize)
+      ? Math.max(BOARD_TEXT_FONT_SIZE_MIN, object.style.fontSize)
+      : 20;
+    const nextFontSize = roundedFontSize(Math.max(
+      BOARD_TEXT_FONT_SIZE_MIN,
+      Math.min(
+        BOARD_TEXT_FONT_SIZE_MAX,
+        currentFontSize - normalizedWheelDelta(event) * 0.02,
+      ),
+    ));
+    if (Math.abs(nextFontSize - currentFontSize) < 0.001) return;
+
+    const ratio = nextFontSize / currentFontSize;
+    const [x, y, width, height, rotation] = object.transform;
+    const nextTransform: AtomicTransform = [
+      x,
+      y,
+      Math.max(1 / 64, Math.abs(width) * ratio),
+      Math.max(1 / 64, Math.abs(height) * ratio),
+      rotation,
+    ];
+    const mode = boardTextLayoutMode(object.props.layoutMode);
+    const minimumHeight = mode === "fixed-width"
+      ? inlineTextMinimumHeight(object) * ratio
+      : undefined;
+    const frame = inlineTextEditorRef.current?.parentElement;
+    const zoom = rendererRef.current?.camera.zoom ?? cameraRef.current.zoom;
+    if (frame && Number.isFinite(zoom) && zoom > 0) {
+      frame.style.width = `${nextTransform[2] * zoom}px`;
+      frame.style.height = `${nextTransform[3] * zoom}px`;
+    }
+
+    if (active.pendingText) {
+      setEditing((current) => {
+        if (!current?.pendingText || current.objectId !== active.objectId) {
+          return current;
+        }
+        return {
+          ...current,
+          pendingText: {
+            ...current.pendingText,
+            draft: {
+              ...current.pendingText.draft,
+              transform: nextTransform,
+              style: {
+                ...(current.pendingText.draft.style ?? {}),
+                fontSize: nextFontSize,
+              },
+              props: {
+                ...(current.pendingText.draft.props ?? {}),
+                ...(minimumHeight === undefined ? {} : { minimumHeight }),
+              },
+            },
+          },
+        };
+      });
+    } else {
+      if (!inlineTextFontWheelActiveRef.current) {
+        inlineTextFontWheelActiveRef.current = true;
+        undoRef.current.beginGesture();
+      }
+      setTextFontSizeAndTransform(
+        documentRef.current,
+        active.objectId,
+        nextFontSize,
+        nextTransform,
+        localOriginRef.current,
+        minimumHeight,
+      );
+    }
+    if (inlineTextFontWheelTimerRef.current !== null) {
+      window.clearTimeout(inlineTextFontWheelTimerRef.current);
+    }
+    inlineTextFontWheelTimerRef.current = window.setTimeout(() => {
+      inlineTextFontWheelTimerRef.current = null;
+      if (inlineTextFontWheelActiveRef.current) {
+        inlineTextFontWheelActiveRef.current = false;
+        undoRef.current.endGesture();
+      }
+    }, INLINE_TEXT_FONT_WHEEL_END_MS);
+    scheduleInlineTextFrameMeasurement();
+  }, [activeInlineTextObject, scheduleInlineTextFrameMeasurement]);
+
+  const applyInlineTextFormat = useCallback((
+    attributes: Readonly<Record<string, unknown>>,
+    restoreFocus = true,
+  ) => {
+    richTextBindingRef.current?.format(attributes);
+    if (restoreFocus) {
+      if (richTextBindingRef.current) richTextBindingRef.current.focus();
+      else inlineTextEditorRef.current?.focus({ preventScroll: true });
+    }
+    scheduleInlineTextFrameMeasurement();
+  }, [scheduleInlineTextFrameMeasurement]);
+
+  const commitInlineFontSize = useCallback((rawValue: string) => {
+    const parsed = Number(rawValue.trim().replace(",", "."));
+    if (!Number.isFinite(parsed)) {
+      const object = activeInlineTextObject();
+      const fallback = typeof object?.style.fontSize === "number"
+        ? object.style.fontSize
+        : 20;
+      setInlineFontSizeDraft(String(roundedFontSize(fallback)));
+      return;
+    }
+    const next = roundedFontSize(Math.max(
+      BOARD_TEXT_FONT_SIZE_MIN,
+      Math.min(BOARD_TEXT_FONT_SIZE_MAX, parsed),
+    ));
+    setInlineFontSizeDraft(String(next));
+    const binding = richTextBindingRef.current;
+    if (binding) {
+      applyInlineTextFormat({ fontSize: next });
+      return;
+    }
+    const active = editingRef.current;
+    if (!active || active.kind !== BUILTIN_OBJECT_KINDS.text) return;
+    if (active.pendingText) {
+      setEditing((current) => current?.pendingText ? {
+        ...current,
+        pendingText: {
+          ...current.pendingText,
+          draft: {
+            ...current.pendingText.draft,
+            style: {
+              ...(current.pendingText.draft.style ?? {}),
+              fontSize: next,
+            },
+          },
+        },
+      } : current);
+      return;
+    }
+    patchObjectStyles(
+      documentRef.current,
+      [active.objectId],
+      { set: { fontSize: next } },
+      localOriginRef.current,
+    );
+    undoRef.current.commandBoundary();
+    scheduleInlineTextFrameMeasurement();
+  }, [activeInlineTextObject, applyInlineTextFormat, scheduleInlineTextFrameMeasurement]);
+
+  useEffect(() => {
+    if (editing?.kind !== BUILTIN_OBJECT_KINDS.text || !selectedObject) return;
+    if (globalThis.document.activeElement === inlineFontSizeInputRef.current) return;
+    const selectedSize = richTextSelectionStyle.mixed.has("fontSize")
+      ? ""
+      : typeof richTextSelectionStyle.attributes.fontSize === "number"
+        ? richTextSelectionStyle.attributes.fontSize
+        : typeof selectedObject.style.fontSize === "number"
+          ? selectedObject.style.fontSize
+          : 20;
+    setInlineFontSizeDraft(selectedSize === "" ? "" : String(roundedFontSize(selectedSize)));
+  }, [
+    editing?.kind,
+    editing?.objectId,
+    richTextSelectionStyle,
+    selectedObject,
+  ]);
 
   const selectedObjects = useMemo(() => selection
     .filter((id) => objects.has(id))
@@ -2222,7 +2604,7 @@ export function BoardSurface({
     if (editingSelectionStyle) {
       const targets = selectionStyle.fontStyleTargets.flatMap((target) => {
         const next = fontStyleWithToken(target.value, token, enabled);
-        return next === canonicalFontStyle(target.value)
+        return next === canonicalBoardFontStyle(target.value)
           ? []
           : [{
               objectId: target.objectId,
@@ -2274,6 +2656,14 @@ export function BoardSurface({
     continuousStyleEditRef.current = { undo, captureTimeout };
   }, [editingSelectionStyle, undo]);
 
+  const beginInlineTextFormatChange = useCallback(() => {
+    if (readOnlyRef.current || continuousStyleEditRef.current !== null) return;
+    const captureTimeout = undo.manager.captureTimeout;
+    undo.beginGesture();
+    undo.manager.captureTimeout = Number.POSITIVE_INFINITY;
+    continuousStyleEditRef.current = { undo, captureTimeout };
+  }, [undo]);
+
   const endContinuousStyleChange = useCallback(() => {
     const activeEdit = continuousStyleEditRef.current;
     if (!activeEdit) return;
@@ -2324,7 +2714,23 @@ export function BoardSurface({
   const exitInlineEditingOnEscape = useCallback(() => {
     const activeEditing = editingRef.current;
     editorCompositionTargetRef.current = null;
+    if (
+      activeEditing?.kind === BUILTIN_OBJECT_KINDS.text
+      && !activeEditing.pendingText
+    ) {
+      const activeDocument = documentRef.current;
+      const record = getPageObjects(activeDocument).get(activeEditing.objectId);
+      const text = record ? getCollaborativeText(record, "text") : undefined;
+      if (text && !hasVisibleTextContent(text.toString())) {
+        deleteBoardObjects(
+          activeDocument,
+          [activeEditing.objectId],
+          localOriginRef.current,
+        );
+      }
+    }
     undoRef.current.focusBoundary();
+    onAwarenessChangeRef.current?.({ textSelection: null });
     setEditing(null);
     if (activeEditing?.kind !== BUILTIN_OBJECT_KINDS.text) return;
     if (selectionRef.current.length > 0) setSurfaceSelection([]);
@@ -2332,15 +2738,19 @@ export function BoardSurface({
   }, [setSurfaceSelection]);
 
   const chooseTool = useCallback((nextTool: BoardTool) => {
+    const currentTool = toolRef.current;
+    const resolvedTool = nextTool === "select" && currentTool === "select"
+      ? "hand"
+      : nextTool;
+    if (resolvedTool !== currentTool && editingRef.current) {
+      exitInlineEditingOnEscape();
+    }
     if (nextTool === "pen" && selectionRef.current.length > 0) {
       setSurfaceSelection([]);
     }
-    setTool((currentTool) => (
-      nextTool === "select" && currentTool === "select"
-        ? "hand"
-        : nextTool
-    ));
-  }, [setSurfaceSelection]);
+    toolRef.current = resolvedTool;
+    setTool(resolvedTool);
+  }, [exitInlineEditingOnEscape, setSurfaceSelection]);
 
   const changeToolbarPreferences = useCallback((
     preferences: BoardToolbarPreferences,
@@ -2879,16 +3289,21 @@ export function BoardSurface({
       `text:${textFingerprint(payload.text)}`,
     );
     const size = clipboardTextObjectSize(payload.text);
+    const transform = anchoredVisibleTransform(
+      insertionTarget,
+      size.width,
+      size.height,
+    );
     const insertedId = commitObjectDraftRef.current(
       target.document,
       {
         kind: BUILTIN_OBJECT_KINDS.text,
-        transform: anchoredVisibleTransform(
-          insertionTarget,
-          size.width,
-          size.height,
-        ),
-        props: { text: payload.text },
+        transform,
+        props: {
+          text: payload.text,
+          layoutMode: "fixed-width",
+          minimumHeight: transform[3],
+        },
       },
       false,
       target.operationEpoch,
@@ -3038,9 +3453,74 @@ export function BoardSurface({
     });
   }, []);
 
-  const sendCursor = useCallback((point: BoardPoint | null) => {
+  const sendCursor = useCallback((
+    point: BoardPoint | null,
+    inputSamples: readonly BoardCursorInputSample[] = [],
+  ) => {
     lastCursor.current = point;
-    scheduleLiveAwareness({ cursor: point });
+    if (!point) {
+      localCursorTrail.current = null;
+      scheduleLiveAwareness({ cursor: null, cursorTrail: null });
+      return;
+    }
+
+    const receivedAt = performance.now();
+    const sourceSamples = inputSamples.length > 0
+      ? inputSamples
+      : [{ ...point, at: receivedAt }];
+    let trail = localCursorTrail.current;
+    const firstAt = Number.isFinite(sourceSamples[0]?.at)
+      ? sourceSamples[0].at
+      : receivedAt;
+    if (!trail || firstAt - trail.startedAt > 24 * 60 * 60 * 1_000) {
+      trail = {
+        streamId: crypto.randomUUID(),
+        startedAt: firstAt,
+        sampleOffset: 0,
+        samples: [],
+      };
+      localCursorTrail.current = trail;
+    }
+
+    const appendSample = (sample: BoardCursorInputSample) => {
+      const previous = trail.samples.at(-1);
+      if (previous && previous.x === sample.x && previous.y === sample.y) return;
+      const rawElapsed = (Number.isFinite(sample.at) ? sample.at : receivedAt)
+        - trail.startedAt;
+      const elapsedMs = Math.round(Math.max(
+        previous?.elapsedMs ?? 0,
+        Math.max(0, rawElapsed),
+      ) * 10) / 10;
+      trail.samples.push({ x: sample.x, y: sample.y, elapsedMs });
+    };
+    for (const sample of sourceSamples) appendSample(sample);
+    const lastSample = trail.samples.at(-1);
+    if (!lastSample || lastSample.x !== point.x || lastSample.y !== point.y) {
+      appendSample({ ...point, at: receivedAt });
+    }
+    if (trail.samples.length > MAX_BOARD_ACCUMULATED_CURSOR_POINTS) {
+      const removeCount = trail.samples.length - MAX_BOARD_ACCUMULATED_CURSOR_POINTS;
+      trail.samples.splice(0, removeCount);
+      trail.sampleOffset += removeCount;
+    }
+
+    const newestElapsed = trail.samples.at(-1)?.elapsedMs ?? 0;
+    let packetStart = trail.samples.findIndex(
+      (sample) => sample.elapsedMs >= newestElapsed - CURSOR_TRAIL_REPAIR_WINDOW_MS,
+    );
+    if (packetStart < 0) packetStart = Math.max(0, trail.samples.length - 1);
+    packetStart = Math.max(
+      packetStart,
+      trail.samples.length - MAX_BOARD_CURSOR_TRAIL_POINTS,
+    );
+    scheduleLiveAwareness({
+      cursor: point,
+      cursorTrail: {
+        streamId: trail.streamId,
+        sampleOffset: trail.sampleOffset + packetStart,
+        samples: trail.samples.slice(packetStart),
+      },
+    });
   }, [scheduleLiveAwareness]);
 
   const scheduleCameraState = useCallback((next: BoardCamera) => {
@@ -3077,7 +3557,19 @@ export function BoardSurface({
     const id = crypto.randomUUID();
     let props = draft.props ?? {};
     if (draft.kind === BUILTIN_OBJECT_KINDS.text) {
-      props = createTextProps(typeof props.text === "string" ? props.text : "");
+      props = createTextProps(
+        typeof props.text === "string" ? props.text : "",
+        {
+          layoutMode: isBoardTextLayoutMode(props.layoutMode)
+            ? props.layoutMode
+            : undefined,
+          minimumHeight: typeof props.minimumHeight === "number"
+            && Number.isFinite(props.minimumHeight)
+            && props.minimumHeight > 0
+            ? props.minimumHeight
+            : undefined,
+        },
+      );
     } else if (draft.kind === BUILTIN_OBJECT_KINDS.code) {
       props = createCodeProps(
         typeof props.source === "string" ? props.source : "",
@@ -3170,9 +3662,10 @@ export function BoardSurface({
   const promotePendingText = useCallback((
     pendingText: NonNullable<EditingState["pendingText"]>,
     value: string,
+    measuredTransform?: AtomicTransform | null,
   ) => {
     if (
-      value.trim().length === 0
+      !hasVisibleTextContent(value)
       || promotedPendingTextRef.current.has(pendingText)
     ) {
       return;
@@ -3182,6 +3675,7 @@ export function BoardSurface({
       pendingText.document,
       {
         ...pendingText.draft,
+        transform: measuredTransform ?? pendingText.draft.transform,
         props: {
           ...(pendingText.draft.props ?? {}),
           text: value,
@@ -3243,9 +3737,13 @@ export function BoardSurface({
         scheduleCameraState(nextCamera);
         scheduleLiveAwareness({ viewport: nextCamera });
       },
-      onCursorChange: (point) => sendCursor(point),
-      onSelectionChange: (ids) => setSurfaceSelection(ids),
+      onCursorChange: (point, samples) => sendCursor(point, samples),
+      onSelectionChange: (ids) => {
+        if (editingRef.current?.kind === BUILTIN_OBJECT_KINDS.text) return;
+        setSurfaceSelection(ids);
+      },
       onCreateObject: (draft) => {
+        if (editingRef.current?.kind === BUILTIN_OBJECT_KINDS.text) return null;
         if (
           draft.kind === BUILTIN_OBJECT_KINDS.text
           && (
@@ -3258,7 +3756,10 @@ export function BoardSurface({
         }
         return commitObjectDraftRef.current(document, draft);
       },
-      onPlaceTool: placeToolAt,
+      onPlaceTool: (placementTool, point) => {
+        if (editingRef.current?.kind === BUILTIN_OBJECT_KINDS.text) return;
+        placeToolAt(placementTool, point);
+      },
       onDeleteObjects: (ids) => {
         if (readOnlyRef.current) return;
         const existingIds = [...new Set(ids)].filter((id) => objects.has(id));
@@ -3271,6 +3772,7 @@ export function BoardSurface({
         if (!readOnlyRef.current) undoRef.current.beginGesture();
       },
       onTransformCancel: () => {
+        scheduleLiveAwareness({ transformPreview: null });
         undoRef.current.endGesture();
       },
       onTransformObjects: (transforms) => {
@@ -3278,6 +3780,9 @@ export function BoardSurface({
           transformObjects(document, transforms, localOriginRef.current);
         }
         undoRef.current.endGesture();
+      },
+      onTransformPreviewChange: (preview) => {
+        scheduleLiveAwareness({ transformPreview: preview });
       },
       onEditLineGeometry: (id, geometry) => {
         if (!readOnlyRef.current && objects.has(id)) {
@@ -3513,6 +4018,7 @@ export function BoardSurface({
     closeContextMenu(false);
     setEditing(null);
     lastCursor.current = null;
+    localCursorTrail.current = null;
     lastPasteRef.current = null;
     rendererRef.current?.setSelection([]);
     setSelection([]);
@@ -3698,12 +4204,18 @@ export function BoardSurface({
       if (event.key !== "Alt") return;
       const surface = surfaceRef.current;
       const activeElement = globalThis.document.activeElement;
+      const textEditing = editingRef.current?.kind === BUILTIN_OBJECT_KINDS.text;
       if (
         !surface
         || !activeElement
         || !surface.contains(activeElement)
-        || isNativeInputTarget(event.target)
-        || isNativeInputTarget(activeElement)
+        || (
+          !textEditing
+          && (
+            isNativeInputTarget(event.target)
+            || isNativeInputTarget(activeElement)
+          )
+        )
       ) return;
       suppressedAltKeysRef.current.add(event.code);
       event.preventDefault();
@@ -3930,10 +4442,8 @@ export function BoardSurface({
   useEffect(() => {
     const element = editorRef.current;
     if (readOnly || !editing || !element) return;
-    if (editing.pendingText) return;
-    const property = editing.kind === BUILTIN_OBJECT_KINDS.text
-      ? "text"
-      : "source";
+    if (editing.pendingText || editing.kind === BUILTIN_OBJECT_KINDS.text) return;
+    const property = "source";
     const record = objects.get(editing.objectId);
     const text = record ? getCollaborativeText(record, property) : undefined;
     if (!text) return;
@@ -3953,9 +4463,111 @@ export function BoardSurface({
           localOrigin,
         );
       },
+      onValueChange: () => {
+        const object = activeInlineTextObject();
+        if (object) applyMeasuredInlineTextFrame(element, object);
+      },
     });
     return () => binding.dispose();
   }, [
+    document,
+    activeInlineTextObject,
+    applyMeasuredInlineTextFrame,
+    editing?.kind,
+    editing?.objectId,
+    editing?.pendingText,
+    localOrigin,
+    objects,
+    readOnly,
+    undo,
+  ]);
+
+  useEffect(() => {
+    const element = inlineTextEditorRef.current;
+    if (
+      readOnly
+      || !editing
+      || editing.kind !== BUILTIN_OBJECT_KINDS.text
+      || editing.pendingText
+      || !element
+    ) {
+      richTextBindingRef.current = null;
+      return;
+    }
+    const record = objects.get(editing.objectId);
+    const text = record ? getCollaborativeText(record, "text") : undefined;
+    if (!text) return;
+    const binding = new CollaborativeRichTextBinding({
+      element,
+      text,
+      localOrigin,
+      undo,
+      inheritedAttributes: () => {
+        const object = activeInlineTextObject();
+        const tokens = fontStyleTokens(object?.style.fontStyle);
+        return {
+          bold: tokens.has("bold"),
+          italic: tokens.has("italic"),
+        };
+      },
+      applyEdit: ({ index, deleteLength, insert, attributes }) => {
+        replaceCollaborativeRichTextRange(
+          document,
+          editing.objectId,
+          "text",
+          index,
+          deleteLength,
+          insert,
+          attributes,
+          localOrigin,
+        );
+      },
+      applyFormat: (index, length, attributes) => {
+        formatCollaborativeTextRange(
+          document,
+          editing.objectId,
+          "text",
+          index,
+          length,
+          attributes,
+          localOrigin,
+        );
+        if (continuousStyleEditRef.current === null) undo.commandBoundary();
+      },
+      onValueChange: () => {
+        const object = activeInlineTextObject();
+        if (object) applyMeasuredInlineTextFrame(element, object);
+      },
+      onSelectionChange: (selection, style) => {
+        setRichTextSelectionStyle(style);
+        try {
+          onAwarenessChangeRef.current?.({
+            textSelection: {
+              objectId: editing.objectId,
+              anchor: Array.from(Y.encodeRelativePosition(
+                Y.createRelativePositionFromTypeIndex(text, selection.anchor),
+              )),
+              head: Array.from(Y.encodeRelativePosition(
+                Y.createRelativePositionFromTypeIndex(text, selection.head),
+              )),
+            },
+          });
+        } catch {
+          onAwarenessChangeRef.current?.({ textSelection: null });
+        }
+      },
+    });
+    richTextBindingRef.current = binding;
+    return () => {
+      if (richTextBindingRef.current === binding) {
+        richTextBindingRef.current = null;
+      }
+      binding.dispose();
+      onAwarenessChangeRef.current?.({ textSelection: null });
+    };
+  }, [
+    activeInlineTextObject,
+    applyMeasuredInlineTextFrame,
     document,
     editing?.kind,
     editing?.objectId,
@@ -3965,6 +4577,52 @@ export function BoardSurface({
     readOnly,
     undo,
   ]);
+
+  useLayoutEffect(() => {
+    const element = inlineTextEditorRef.current;
+    if (
+      !element
+      || !editing
+      || editing.kind !== BUILTIN_OBJECT_KINDS.text
+      || !selectedObject
+    ) {
+      return;
+    }
+    applyMeasuredInlineTextFrame(element, selectedObject);
+  }, [
+    applyMeasuredInlineTextFrame,
+    camera,
+    editing,
+    revision,
+    selectedObject,
+  ]);
+
+  useEffect(() => {
+    const surface = surfaceRef.current;
+    if (!surface || editing?.kind !== BUILTIN_OBJECT_KINDS.text) return;
+    surface.addEventListener("wheel", handleInlineTextFontWheel, {
+      capture: true,
+      passive: false,
+    });
+    return () => surface.removeEventListener("wheel", handleInlineTextFontWheel, {
+      capture: true,
+    });
+  }, [editing?.kind, editing?.objectId, handleInlineTextFontWheel]);
+
+  useEffect(() => () => {
+    if (inlineTextResizeFrameRef.current !== null) {
+      cancelAnimationFrame(inlineTextResizeFrameRef.current);
+      inlineTextResizeFrameRef.current = null;
+    }
+    if (inlineTextFontWheelTimerRef.current !== null) {
+      window.clearTimeout(inlineTextFontWheelTimerRef.current);
+      inlineTextFontWheelTimerRef.current = null;
+    }
+    if (inlineTextFontWheelActiveRef.current) {
+      inlineTextFontWheelActiveRef.current = false;
+      undoRef.current.endGesture();
+    }
+  }, []);
 
   const runCode = async () => {
     if (
@@ -4274,6 +4932,13 @@ export function BoardSurface({
       }}
     >
       <div ref={hostRef} className="board-v2__canvas" />
+      <BoardTextPresenceLayer
+        document={document}
+        objects={objects}
+        presences={presences}
+        camera={camera}
+        theme={theme}
+      />
       {contextMenu && (
         <BoardContextMenu
           x={contextMenu.screen.x}
@@ -4286,7 +4951,13 @@ export function BoardSurface({
       <BoardToolbar
         activeTool={tool}
         penLaserActive={penLaserActive}
-        modifierHints={editing === null && contextMenu === null ? modifierHints : []}
+        modifierHints={contextMenu !== null
+          ? []
+          : editing?.kind === BUILTIN_OBJECT_KINDS.text
+            ? ["text-exit", "text-font-size"]
+            : editing === null
+              ? modifierHints
+              : []}
         readOnly={readOnly}
         imageAvailable={Boolean(insertImage)}
         preferences={toolbarPreferences}
@@ -4562,10 +5233,14 @@ export function BoardSurface({
       {!readOnly && editing && selectedObject && (
         <div
           className={editing.kind === BUILTIN_OBJECT_KINDS.text
-            ? "board-v2__editor board-v2__editor--inline-text"
+            ? `board-v2__editor board-v2__editor--inline-text${
+                boardTextLayoutMode(selectedObject.props.layoutMode) === "auto-width"
+                  ? " board-v2__editor--auto-width"
+                  : ""
+              }`
             : `board-v2__editor board-v2__editor--${editing.kind === BUILTIN_OBJECT_KINDS.code ? "code" : "text"}`}
           style={editing.kind === BUILTIN_OBJECT_KINDS.text
-            ? inlineTextEditorStyle(
+            ? boardTextEditorStyle(
                 selectedObject,
                 rendererRef.current?.camera ?? camera,
                 theme,
@@ -4583,21 +5258,212 @@ export function BoardSurface({
               <button type="button" disabled={running || readOnly} onClick={() => void runCode()}><Braces size={15} />{running ? "Выполняем" : "Запустить"}</button>
             </div>
           )}
+          {editing.kind === BUILTIN_OBJECT_KINDS.text ? (
+            <>
+              <div
+                className="board-v2__text-formatbar"
+                role="toolbar"
+                aria-label="Форматирование текста"
+              >
+                <BoardFontFamilyControl
+                  value={typeof richTextSelectionStyle.attributes.fontFamily === "string"
+                    ? richTextSelectionStyle.attributes.fontFamily
+                    : selectedObject.style.fontFamily}
+                  mixed={richTextSelectionStyle.mixed.has("fontFamily")}
+                  onCommit={(fontFamily) => applyInlineTextFormat({ fontFamily })}
+                />
+                <input
+                  ref={inlineFontSizeInputRef}
+                  className="board-v2__text-font-size"
+                  type="text"
+                  inputMode="decimal"
+                  aria-label="Размер шрифта"
+                  title="Размер шрифта"
+                  value={inlineFontSizeDraft}
+                  onChange={(event) => setInlineFontSizeDraft(event.currentTarget.value)}
+                  onBlur={(event) => commitInlineFontSize(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      event.currentTarget.blur();
+                    }
+                  }}
+                />
+                <BoardColorControl
+                  property="fill"
+                  label="Цвет текста"
+                  showPropertyIcon={false}
+                  current={typeof richTextSelectionStyle.attributes.color === "string"
+                    ? richTextSelectionStyle.attributes.color
+                    : typeof selectedObject.style.fill === "string"
+                      ? selectedObject.style.fill
+                      : "#17212b"}
+                  mixed={richTextSelectionStyle.mixed.has("color")}
+                  allowTransparent={false}
+                  paletteSlots={styleColorPalette.slots}
+                  recentColors={styleColorPalette.recentColors}
+                  onApply={(color) => applyInlineTextFormat({ color }, false)}
+                  onCommitColor={rememberStyleColor}
+                  onChangePaletteSlot={updateStyleColorSlot}
+                  onAddPaletteSlot={addStyleColorSlot}
+                  onDeletePaletteSlot={removeStyleColorSlot}
+                  onMovePaletteSlot={reorderStyleColorSlot}
+                  onContinuousChangeStart={beginInlineTextFormatChange}
+                  onContinuousChangeEnd={endContinuousStyleChange}
+                />
+                <button
+                  type="button"
+                  aria-label="Полужирный"
+                  aria-keyshortcuts="Control+B Meta+B"
+                  title="Полужирный"
+                  aria-pressed={richTextSelectionStyle.mixed.has("bold")
+                    ? "mixed"
+                    : inlineToggleActive(
+                    richTextSelectionStyle.attributes,
+                    "bold",
+                    selectedObject.style.fontStyle,
+                  )}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => applyInlineTextFormat({
+                    bold: inlineToggleActive(
+                      richTextSelectionStyle.attributes,
+                      "bold",
+                      selectedObject.style.fontStyle,
+                    ) ? false : true,
+                  })}
+                ><Bold size={15} /></button>
+                <button
+                  type="button"
+                  aria-label="Курсив"
+                  aria-keyshortcuts="Control+I Meta+I"
+                  title="Курсив"
+                  aria-pressed={richTextSelectionStyle.mixed.has("italic")
+                    ? "mixed"
+                    : inlineToggleActive(
+                    richTextSelectionStyle.attributes,
+                    "italic",
+                    selectedObject.style.fontStyle,
+                  )}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => applyInlineTextFormat({
+                    italic: inlineToggleActive(
+                      richTextSelectionStyle.attributes,
+                      "italic",
+                      selectedObject.style.fontStyle,
+                    ) ? false : true,
+                  })}
+                ><Italic size={15} /></button>
+                {(["left", "center", "right"] as const).map((alignment) => {
+                  const Icon = alignment === "left"
+                    ? AlignLeft
+                    : alignment === "center"
+                      ? AlignCenter
+                      : AlignRight;
+                  const label = alignment === "left"
+                    ? "По левому краю"
+                    : alignment === "center"
+                      ? "По центру"
+                      : "По правому краю";
+                  const active = (selectedObject.props.textAlign ?? "left") === alignment;
+                  return (
+                    <button
+                      key={alignment}
+                      type="button"
+                      aria-label={label}
+                      title={label}
+                      aria-pressed={active}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => {
+                        if (!editing.pendingText) {
+                          setObjectProperty(
+                            documentRef.current,
+                            editing.objectId,
+                            "textAlign",
+                            alignment,
+                            localOriginRef.current,
+                          );
+                          undoRef.current.commandBoundary();
+                        }
+                        if (richTextBindingRef.current) richTextBindingRef.current.focus();
+                        else inlineTextEditorRef.current?.focus({ preventScroll: true });
+                      }}
+                    ><Icon size={15} /></button>
+                  );
+                })}
+              </div>
+              <div
+                ref={setInlineTextEditorNode}
+                className="board-v2__text-contenteditable"
+                contentEditable
+                suppressContentEditableWarning
+                autoFocus
+                spellCheck
+                role="textbox"
+                aria-label="Редактировать текст"
+                aria-multiline="true"
+                onCompositionStart={(event) => {
+                  editorCompositionTargetRef.current = event.currentTarget;
+                }}
+                onInput={(event) => {
+                  const pendingText = editingRef.current?.pendingText;
+                  const activeText = activeInlineTextObject();
+                  const measuredTransform = activeText
+                    ? applyMeasuredInlineTextFrame(event.currentTarget, activeText)
+                    : null;
+                  if (
+                    !pendingText
+                    || editorCompositionTargetRef.current === event.currentTarget
+                    || nativeEventIsComposing(event.nativeEvent)
+                  ) return;
+                  promotePendingText(
+                    pendingText,
+                    event.currentTarget.textContent ?? "",
+                    measuredTransform,
+                  );
+                }}
+                onCompositionEnd={(event) => {
+                  editorCompositionTargetRef.current = null;
+                  const pendingText = editingRef.current?.pendingText;
+                  if (!pendingText) return;
+                  const activeText = activeInlineTextObject();
+                  const measuredTransform = activeText
+                    ? applyMeasuredInlineTextFrame(event.currentTarget, activeText)
+                    : null;
+                  promotePendingText(
+                    pendingText,
+                    event.currentTarget.textContent ?? "",
+                    measuredTransform,
+                  );
+                }}
+                onKeyDown={(event) => {
+                  if (
+                    editorCompositionTargetRef.current === event.currentTarget
+                    || nativeEventIsComposing(event.nativeEvent)
+                    || event.keyCode === 229
+                  ) return;
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    exitInlineEditingOnEscape();
+                  }
+                }}
+              />
+            </>
+          ) : (
           <textarea
             ref={editorRef}
             autoFocus
             readOnly={readOnly}
-            wrap={editing.kind === BUILTIN_OBJECT_KINDS.text ? "soft" : undefined}
-            spellCheck={editing.kind === BUILTIN_OBJECT_KINDS.text}
-            aria-label={editing.kind === BUILTIN_OBJECT_KINDS.text
-              ? "Редактировать текст"
-              : undefined}
             defaultValue={editingText(selectedObject)}
             onCompositionStart={(event) => {
               editorCompositionTargetRef.current = event.currentTarget;
             }}
             onInput={(event) => {
-              const pendingText = editing.pendingText;
+              const activeEditing = editingRef.current;
+              const pendingText = activeEditing?.pendingText;
+              const activeText = activeInlineTextObject();
+              const measuredTransform = activeText
+                ? applyMeasuredInlineTextFrame(event.currentTarget, activeText)
+                : null;
               if (
                 !pendingText
                 || editorCompositionTargetRef.current === event.currentTarget
@@ -4605,13 +5471,25 @@ export function BoardSurface({
               ) {
                 return;
               }
-              promotePendingText(pendingText, event.currentTarget.value);
+              promotePendingText(
+                pendingText,
+                event.currentTarget.value,
+                measuredTransform,
+              );
             }}
             onCompositionEnd={(event) => {
               editorCompositionTargetRef.current = null;
-              const pendingText = editing.pendingText;
+              const pendingText = editingRef.current?.pendingText;
               if (!pendingText) return;
-              promotePendingText(pendingText, event.currentTarget.value);
+              const activeText = activeInlineTextObject();
+              const measuredTransform = activeText
+                ? applyMeasuredInlineTextFrame(event.currentTarget, activeText)
+                : null;
+              promotePendingText(
+                pendingText,
+                event.currentTarget.value,
+                measuredTransform,
+              );
             }}
             onBlur={(event) => {
               const nextTarget = event.relatedTarget;
@@ -4635,20 +5513,9 @@ export function BoardSurface({
                 event.preventDefault();
                 exitInlineEditingOnEscape();
               }
-              if (
-                event.key === "Enter"
-                && editing.kind === BUILTIN_OBJECT_KINDS.text
-                && !event.shiftKey
-                && !event.ctrlKey
-                && !event.metaKey
-                && !event.altKey
-              ) {
-                event.preventDefault();
-                undo.focusBoundary();
-                setEditing(null);
-              }
             }}
           />
+          )}
           {editing.kind === BUILTIN_OBJECT_KINDS.code && runOutput && <pre>{runOutput}</pre>}
         </div>
       )}

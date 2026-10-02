@@ -90,8 +90,10 @@ import type {
 import {
   MAX_BOARD_GESTURE_PREVIEW_POINTS,
   MAX_BOARD_LASER_POINTS,
+  sanitizeBoardCursorTrail,
   sanitizeBoardGesturePreviewStyle,
   sanitizeBoardLaserPreview,
+  sanitizeBoardTransformPreview,
 } from "./rendering/types";
 import { boardObjectSnapshot } from "./rendering/objectSnapshot";
 import type { LessonSummary } from "../../shared/types";
@@ -781,6 +783,9 @@ function remotePresences(
     const activeTool = typeof state.activeTool === "string" && BOARD_TOOLS.has(state.activeTool as BoardTool)
       ? state.activeTool as BoardTool
       : undefined;
+    const transformPreview = sanitizeBoardTransformPreview(
+      state.transformPreview,
+    );
     const laserClearMode = state.laserClearMode === "fade"
       || state.laserClearMode === "immediate"
       ? state.laserClearMode as BoardLaserClearMode
@@ -790,19 +795,47 @@ function remotePresences(
           .filter((value): value is string => typeof value === "string")
           .slice(0, 256)
       : [];
+    const rawTextSelection = state.textSelection;
+    const textSelectionRecord = rawTextSelection
+      && typeof rawTextSelection === "object"
+      && !Array.isArray(rawTextSelection)
+      ? rawTextSelection as Record<string, unknown>
+      : null;
+    const textSelection = textSelectionRecord
+      && typeof textSelectionRecord.objectId === "string"
+      && textSelectionRecord.objectId.length > 0
+      && textSelectionRecord.objectId.length <= 96
+      && Array.isArray(textSelectionRecord.anchor)
+      && Array.isArray(textSelectionRecord.head)
+      && textSelectionRecord.anchor.length > 0
+      && textSelectionRecord.anchor.length <= 128
+      && textSelectionRecord.head.length > 0
+      && textSelectionRecord.head.length <= 128
+      && [...textSelectionRecord.anchor, ...textSelectionRecord.head].every(
+        (byte) => Number.isSafeInteger(byte) && byte >= 0 && byte <= 255,
+      )
+        ? {
+            objectId: textSelectionRecord.objectId,
+            anchor: textSelectionRecord.anchor as number[],
+            head: textSelectionRecord.head as number[],
+          }
+        : undefined;
     result.push({
       clientId,
       userId: state.userId,
       displayName: state.displayName,
       color: state.color,
       cursor: finitePoint(state.cursor),
+      cursorTrail: sanitizeBoardCursorTrail(state.cursorTrail),
       viewport: finiteViewport(state.viewport),
       selectionIds,
+      textSelection,
       activeTool,
       gesturePreview:
         gesturePreview && gesturePreview.points.length > 0
           ? gesturePreview
           : undefined,
+      transformPreview,
       laser: laserPreview,
       laserClearMode,
     });
@@ -1039,6 +1072,7 @@ function ActiveCollaborativeBoard({
       : undefined;
     session.provider.setPresence({
       cursor: "cursor" in change ? change.cursor ?? null : undefined,
+      cursorTrail: "cursorTrail" in change ? change.cursorTrail ?? null : undefined,
       viewport: "viewport" in change ? change.viewport ?? null : undefined,
       activeTool: "activeTool" in change ? change.activeTool ?? null : undefined,
       laserPointer: "laser" in change
@@ -1081,7 +1115,17 @@ function ActiveCollaborativeBoard({
                   : {}),
               }
             : null
+          : "transformPreview" in change && change.transformPreview
+            ? null
+            : undefined,
+      transformPreview: "transformPreview" in change
+        ? change.transformPreview ?? null
+        : laserPreview || ("gesturePreview" in change && change.gesturePreview)
+          ? null
           : undefined,
+      textSelection: "textSelection" in change
+        ? change.textSelection ?? null
+        : undefined,
       pageId: session.bootstrap.pageId,
     });
   }, [session]);

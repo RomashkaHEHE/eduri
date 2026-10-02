@@ -43,7 +43,20 @@ function snapshotValue(value: unknown, ancestors = new Set<object>()): unknown {
 }
 
 function mapSnapshot(map: Y.Map<unknown>): Readonly<Record<string, unknown>> {
-  return Object.fromEntries([...map.entries()].map(([key, value]) => [key, snapshotValue(value)]));
+  const entries: Array<readonly [string, unknown]> = [];
+  for (const [key, value] of map.entries()) {
+    entries.push([key, snapshotValue(value)]);
+    if (value instanceof Y.Text && key === "text") {
+      entries.push(["textRuns", value.toDelta().map((operation: {
+        readonly insert: string | object;
+        readonly attributes?: Readonly<Record<string, unknown>>;
+      }) => ({
+        insert: typeof operation.insert === "string" ? operation.insert : "",
+        ...(operation.attributes ? { attributes: snapshotValue(operation.attributes) } : {}),
+      }))]);
+    }
+  }
+  return Object.fromEntries(entries);
 }
 
 function fallbackId(value: unknown, objectIdHint?: string): string {

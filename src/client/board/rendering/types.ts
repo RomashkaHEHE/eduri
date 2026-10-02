@@ -38,11 +38,27 @@ export type BoardModifierHintAction =
   | "eraser-restore"
   | "rotation-snap"
   | "line-edit-points"
-  | "line-delete-point";
+  | "line-delete-point"
+  | "text-exit"
+  | "text-font-size";
 
 export interface BoardPoint {
   readonly x: number;
   readonly y: number;
+}
+
+export interface BoardCursorTrailSample extends BoardPoint {
+  readonly elapsedMs: number;
+}
+
+export interface BoardCursorInputSample extends BoardPoint {
+  readonly at: number;
+}
+
+export interface BoardCursorTrail {
+  readonly streamId: string;
+  readonly sampleOffset: number;
+  readonly samples: readonly BoardCursorTrailSample[];
 }
 
 export type BoardGesturePreviewTool =
@@ -68,12 +84,237 @@ export interface BoardGesturePreview {
   readonly committedObjectId?: string;
 }
 
+export interface BoardTransformPreviewEntry {
+  readonly objectId: string;
+  readonly transform: AtomicTransform;
+}
+
+export interface BoardTransformPreview {
+  readonly streamId: string;
+  readonly transforms: readonly BoardTransformPreviewEntry[];
+  readonly committed?: boolean;
+}
+
 // These cap one rolling awareness packet, not the complete remote gesture.
 export const MAX_BOARD_GESTURE_PREVIEW_POINTS = 256;
+export const MAX_BOARD_TRANSFORM_PREVIEW_OBJECTS = 96;
 export const MAX_BOARD_LASER_STROKES = 16;
 export const MAX_BOARD_LASER_POINTS = 160;
+export const MAX_BOARD_CURSOR_TRAIL_POINTS = 48;
+export const MAX_BOARD_ACCUMULATED_CURSOR_POINTS = 1_024;
 export const MAX_BOARD_ACCUMULATED_PREVIEW_POINTS = 131_072;
 export const MAX_BOARD_ACCUMULATED_LASER_STROKES = 1_024;
+const MAX_BOARD_PREVIEW_ID_CODE_UNITS = 96;
+const MAX_BOARD_CURSOR_STREAM_ELAPSED_MS = 24 * 60 * 60 * 1_000;
+
+export function sanitizeBoardCursorTrail(
+  value: unknown,
+): BoardCursorTrail | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.streamId !== "string"
+    || record.streamId.length === 0
+    || record.streamId.length > MAX_BOARD_PREVIEW_ID_CODE_UNITS
+    || !Number.isSafeInteger(record.sampleOffset)
+    || (record.sampleOffset as number) < 0
+  ) {
+    return undefined;
+  }
+
+  let samples: BoardCursorTrailSample[];
+  if (Array.isArray(record.samples)) {
+    if (
+      record.samples.length === 0
+      || record.samples.length > MAX_BOARD_CURSOR_TRAIL_POINTS
+    ) {
+      return undefined;
+    }
+    samples = [];
+    for (const rawSample of record.samples) {
+      if (!rawSample || typeof rawSample !== "object" || Array.isArray(rawSample)) {
+        return undefined;
+      }
+      const sample = rawSample as Record<string, unknown>;
+      if (
+        typeof sample.x !== "number"
+        || !Number.isFinite(sample.x)
+        || typeof sample.y !== "number"
+        || !Number.isFinite(sample.y)
+        || typeof sample.elapsedMs !== "number"
+        || !Number.isFinite(sample.elapsedMs)
+      ) {
+        return undefined;
+      }
+      samples.push({ x: sample.x, y: sample.y, elapsedMs: sample.elapsedMs });
+    }
+  } else {
+    const points = record.points;
+    const elapsedMs = record.elapsedMs;
+    if (
+      !Array.isArray(points)
+      || !Array.isArray(elapsedMs)
+      || elapsedMs.length === 0
+      || elapsedMs.length > MAX_BOARD_CURSOR_TRAIL_POINTS
+      || points.length !== elapsedMs.length * 2
+    ) {
+      return undefined;
+    }
+    samples = [];
+    for (let index = 0; index < elapsedMs.length; index += 1) {
+      const x = points[index * 2];
+      const y = points[index * 2 + 1];
+      const at = elapsedMs[index];
+      if (
+        typeof x !== "number"
+        || !Number.isFinite(x)
+        || typeof y !== "number"
+        || !Number.isFinite(y)
+        || typeof at !== "number"
+        || !Number.isFinite(at)
+      ) {
+        return undefined;
+      }
+      samples.push({ x, y, elapsedMs: at });
+    }
+  }
+
+  let previousElapsed = -1;
+  for (const sample of samples) {
+    if (
+      sample.elapsedMs < 0
+      || sample.elapsedMs > MAX_BOARD_CURSOR_STREAM_ELAPSED_MS
+      || sample.elapsedMs < previousElapsed
+    ) {
+      return undefined;
+    }
+    previousElapsed = sample.elapsedMs;
+  }
+  const sampleOffset = record.sampleOffset as number;
+  if (sampleOffset > Number.MAX_SAFE_INTEGER - samples.length) return undefined;
+  return {
+    streamId: record.streamId,
+    sampleOffset,
+    samples,
+  };
+}
+
+export function compactBoardCursorTrail(
+  trail: BoardCursorTrail,
+): Readonly<Record<string, unknown>> {
+  return {
+    streamId: trail.streamId,
+    sampleOffset: trail.sampleOffset,
+    points: trail.samples.flatMap((sample) => [sample.x, sample.y]),
+    elapsedMs: trail.samples.map((sample) => sample.elapsedMs),
+  };
+}
+
+export function sanitizeBoardTransformPreview(
+  value: unknown,
+): BoardTransformPreview | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const candidate = value as Partial<BoardTransformPreview>;
+  if (
+    typeof candidate.streamId !== "string"
+    || candidate.streamId.length === 0
+    || candidate.streamId.length > MAX_BOARD_PREVIEW_ID_CODE_UNITS
+    || (candidate.committed !== undefined && typeof candidate.committed !== "boolean")
+  ) {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  const compactObjectIds = record.objectIds;
+  const compactValues = record.values;
+  if (Array.isArray(compactObjectIds) || Array.isArray(compactValues)) {
+    if (
+      !Array.isArray(compactObjectIds)
+      || !Array.isArray(compactValues)
+      || compactObjectIds.length === 0
+      || compactObjectIds.length > MAX_BOARD_TRANSFORM_PREVIEW_OBJECTS
+      || compactValues.length !== compactObjectIds.length * 5
+    ) {
+      return undefined;
+    }
+    const transforms: BoardTransformPreviewEntry[] = [];
+    const objectIds = new Set<string>();
+    for (let index = 0; index < compactObjectIds.length; index += 1) {
+      const objectId = compactObjectIds[index];
+      const transform = compactValues.slice(index * 5, index * 5 + 5);
+      if (
+        typeof objectId !== "string"
+        || objectId.length === 0
+        || objectId.length > MAX_BOARD_PREVIEW_ID_CODE_UNITS
+        || objectIds.has(objectId)
+        || transform.some((component) =>
+          typeof component !== "number" || !Number.isFinite(component))
+      ) {
+        return undefined;
+      }
+      objectIds.add(objectId);
+      transforms.push({
+        objectId,
+        transform: transform as unknown as AtomicTransform,
+      });
+    }
+    return {
+      streamId: candidate.streamId,
+      transforms,
+      ...(candidate.committed ? { committed: true } : {}),
+    };
+  }
+
+  if (
+    !Array.isArray(candidate.transforms)
+    || candidate.transforms.length === 0
+    || candidate.transforms.length > MAX_BOARD_TRANSFORM_PREVIEW_OBJECTS
+  ) {
+    return undefined;
+  }
+  const objectIds = new Set<string>();
+  const transforms: BoardTransformPreviewEntry[] = [];
+  for (const rawEntry of candidate.transforms) {
+    if (!rawEntry || typeof rawEntry !== "object" || Array.isArray(rawEntry)) {
+      return undefined;
+    }
+    const entry = rawEntry as Partial<BoardTransformPreviewEntry>;
+    if (
+      typeof entry.objectId !== "string"
+      || entry.objectId.length === 0
+      || entry.objectId.length > MAX_BOARD_PREVIEW_ID_CODE_UNITS
+      || objectIds.has(entry.objectId)
+      || !Array.isArray(entry.transform)
+      || entry.transform.length !== 5
+      || entry.transform.some((component) =>
+        typeof component !== "number" || !Number.isFinite(component))
+    ) {
+      return undefined;
+    }
+    objectIds.add(entry.objectId);
+    transforms.push({
+      objectId: entry.objectId,
+      transform: [...entry.transform] as unknown as AtomicTransform,
+    });
+  }
+
+  return {
+    streamId: candidate.streamId,
+    transforms,
+    ...(candidate.committed ? { committed: true } : {}),
+  };
+}
+
+export function compactBoardTransformPreview(
+  preview: BoardTransformPreview,
+): Readonly<Record<string, unknown>> {
+  return {
+    streamId: preview.streamId,
+    objectIds: preview.transforms.map((entry) => entry.objectId),
+    values: preview.transforms.flatMap((entry) => entry.transform),
+    ...(preview.committed ? { committed: true } : {}),
+  };
+}
 
 export interface BoardLaserStroke {
   readonly points: readonly BoardPoint[];
@@ -278,16 +519,25 @@ export interface BoardObjectSnapshot {
   readonly rendering?: BoardObjectRenderingEnvelope;
 }
 
+export interface BoardTextSelectionPresence {
+  readonly objectId: string;
+  readonly anchor: readonly number[];
+  readonly head: readonly number[];
+}
+
 export interface BoardPresence {
   readonly clientId: number;
   readonly userId: string;
   readonly displayName: string;
   readonly color: string;
   readonly cursor?: BoardPoint;
+  readonly cursorTrail?: BoardCursorTrail;
   readonly viewport?: BoardCamera;
   readonly selectionIds: readonly string[];
+  readonly textSelection?: BoardTextSelectionPresence;
   readonly activeTool?: BoardTool;
   readonly gesturePreview?: BoardGesturePreview;
+  readonly transformPreview?: BoardTransformPreview;
   readonly laser?: BoardLaserPreview;
   readonly laserClearMode?: BoardLaserClearMode;
 }
@@ -307,7 +557,10 @@ export interface BoardContextMenuRequest {
 
 export interface BoardRendererCallbacks {
   onCameraChange(camera: BoardCamera): void;
-  onCursorChange(point: BoardPoint | null): void;
+  onCursorChange(
+    point: BoardPoint | null,
+    samples?: readonly BoardCursorInputSample[],
+  ): void;
   onSelectionChange(ids: readonly string[]): void;
   onContextMenu(request: BoardContextMenuRequest): void;
   onCreateObject(draft: BoardObjectDraft): string | null | void;
@@ -316,6 +569,7 @@ export interface BoardRendererCallbacks {
   onTransformStart(): void;
   onTransformCancel(): void;
   onTransformObjects(transforms: ReadonlyMap<string, AtomicTransform>): void;
+  onTransformPreviewChange?(preview: BoardTransformPreview | null): void;
   onEditLineGeometry?(id: string, geometry: BoardLineObjectGeometry): void;
   onEditObject(id: string): void;
   onLaserChange(

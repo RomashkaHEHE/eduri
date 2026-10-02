@@ -36,9 +36,11 @@ import {
   type BoardSocketCloseEvent,
 } from "./networkProvider.js";
 import {
+  MAX_BOARD_CURSOR_TRAIL_POINTS,
   MAX_BOARD_GESTURE_PREVIEW_POINTS,
   MAX_BOARD_LASER_POINTS,
   MAX_BOARD_LASER_STROKES,
+  MAX_BOARD_TRANSFORM_PREVIEW_OBJECTS,
 } from "./rendering/types.js";
 
 const scope = {
@@ -2662,6 +2664,47 @@ describe("BoardNetworkProvider CRDT sync and awareness", () => {
     await harness.provider.stop();
   });
 
+  it("keeps a compact timed cursor repair trail in one rate-limited awareness state", async () => {
+    const harness = createHarness();
+    await bringOnline(harness);
+    harness.timers.advance(0);
+    await settle();
+    const samples = [
+      { x: 10, y: 20, elapsedMs: 0 },
+      { x: 18, y: 26, elapsedMs: 8.2 },
+      { x: 24, y: 36, elapsedMs: 16.4 },
+    ];
+
+    harness.provider.setPresence({
+      cursor: { x: 24, y: 36 },
+      cursorTrail: {
+        streamId: "cursor-stream-1",
+        sampleOffset: 42,
+        samples,
+      },
+    });
+    expect(harness.provider.awareness.getLocalState()).toMatchObject({
+      cursor: { x: 24, y: 36 },
+      cursorTrail: {
+        streamId: "cursor-stream-1",
+        sampleOffset: 42,
+        points: [10, 20, 18, 26, 24, 36],
+        elapsedMs: [0, 8.2, 16.4],
+      },
+    });
+    expect(() => harness.provider.setPresence({
+      cursorTrail: {
+        streamId: "cursor-stream-too-large",
+        sampleOffset: 0,
+        samples: Array.from(
+          { length: MAX_BOARD_CURSOR_TRAIL_POINTS + 1 },
+          (_, index) => ({ x: index, y: index, elapsedMs: index }),
+        ),
+      },
+    })).toThrow(/cursorTrail is invalid/u);
+    await harness.provider.stop();
+  });
+
   it("transfers, validates, and clears segmented laser awareness", async () => {
     const sender = createHarness();
     const receiver = createHarness();
@@ -2955,6 +2998,141 @@ describe("BoardNetworkProvider CRDT sync and awareness", () => {
       ?.gesturePreview as Record<string, unknown> | undefined;
     expect(legacyPreview).toMatchObject({ kind: "pen", points });
     expect(legacyPreview).not.toHaveProperty("style");
+
+    await sender.provider.stop();
+    await receiver.provider.stop();
+  });
+
+  it("validates and transfers bounded live transform previews", async () => {
+    const sender = createHarness();
+    const receiver = createHarness();
+    const senderSocket = await bringOnline(sender, 77);
+    const receiverSocket = await bringOnline(receiver, 78);
+    sender.timers.advance(0);
+    receiver.timers.advance(0);
+    await settle();
+    const baseline = sentFrames(senderSocket).length;
+    const transformPreview = {
+      streamId: "transform-stream-1",
+      transforms: [{
+        objectId: "00000000-0000-4000-8000-000000000401",
+        transform: [40, 50, 120, 80, 0.25] as const,
+      }],
+    };
+    const compactTransformPreview = {
+      streamId: transformPreview.streamId,
+      objectIds: [transformPreview.transforms[0].objectId],
+      values: [...transformPreview.transforms[0].transform],
+    };
+
+    expect(() => sender.provider.setPresence({ transformPreview })).not.toThrow();
+    expect(() => sender.provider.setPresence({
+      transformPreview: {
+        streamId: "transform-stream-duplicate",
+        transforms: [
+          transformPreview.transforms[0],
+          transformPreview.transforms[0],
+        ],
+      },
+    })).toThrow(/transformPreview is invalid/u);
+    expect(() => sender.provider.setPresence({
+      transformPreview: {
+        streamId: "transform-stream-too-large",
+        transforms: Array.from(
+          { length: MAX_BOARD_TRANSFORM_PREVIEW_OBJECTS + 1 },
+          (_, index) => ({
+            objectId: `object-${index}`,
+            transform: [index, 0, 10, 10, 0] as const,
+          }),
+        ),
+      },
+    })).toThrow(/transformPreview is invalid/u);
+
+    sender.timers.advance(40);
+    await settle();
+    const previewFrame = sentFrames(senderSocket).slice(baseline)
+      .filter((frame) => frame.type === BoardMessageType.AWARENESS)
+      .at(-1);
+    expect(previewFrame?.type).toBe(BoardMessageType.AWARENESS);
+    if (previewFrame?.type !== BoardMessageType.AWARENESS) {
+      throw new Error("Expected transform-preview AWARENESS frame");
+    }
+    receiverSocket.receive(previewFrame);
+    expect(receiver.provider.awareness.getStates().get(77)).toMatchObject({
+      transformPreview: compactTransformPreview,
+    });
+
+    sender.provider.setPresence({
+      transformPreview: { ...transformPreview, committed: true },
+    });
+    sender.timers.advance(40);
+    await settle();
+    const committedFrame = sentFrames(senderSocket).slice(baseline)
+      .filter((frame) => frame.type === BoardMessageType.AWARENESS)
+      .at(-1);
+    expect(committedFrame?.type).toBe(BoardMessageType.AWARENESS);
+    if (committedFrame?.type !== BoardMessageType.AWARENESS) {
+      throw new Error("Expected committed transform-preview AWARENESS frame");
+    }
+    receiverSocket.receive(committedFrame);
+    expect(receiver.provider.awareness.getStates().get(77)).toMatchObject({
+      transformPreview: { ...compactTransformPreview, committed: true },
+    });
+
+    await sender.provider.stop();
+    await receiver.provider.stop();
+  });
+  it("validates and transfers collaborative text selections", async () => {
+    const sender = createHarness();
+    const receiver = createHarness();
+    const senderSocket = await bringOnline(sender, 77);
+    const receiverSocket = await bringOnline(receiver, 78);
+    sender.timers.advance(0);
+    receiver.timers.advance(0);
+    await settle();
+    const selection = {
+      objectId: "00000000-0000-4000-8000-000000000501",
+      anchor: [1, 2, 3],
+      head: [4, 5, 6],
+    };
+
+    expect(() => sender.provider.setPresence({ textSelection: selection }))
+      .not.toThrow();
+    expect(() => sender.provider.setPresence({
+      textSelection: { ...selection, anchor: [] },
+    })).toThrow(/1-128 bytes/u);
+    expect(() => sender.provider.setPresence({
+      textSelection: { ...selection, head: [256] },
+    })).toThrow(/1-128 bytes/u);
+    expect(() => sender.provider.setPresence({
+      textSelection: { ...selection, objectId: "x".repeat(97) },
+    })).toThrow(/objectId is invalid/u);
+
+    sender.timers.advance(40);
+    await settle();
+    const frame = sentFrames(senderSocket)
+      .filter((candidate) => candidate.type === BoardMessageType.AWARENESS)
+      .at(-1);
+    expect(frame?.type).toBe(BoardMessageType.AWARENESS);
+    if (frame?.type !== BoardMessageType.AWARENESS) {
+      throw new Error("Expected text-selection AWARENESS frame");
+    }
+    receiverSocket.receive(frame);
+    expect(receiver.provider.awareness.getStates().get(77)).toMatchObject({
+      textSelection: selection,
+    });
+
+    sender.provider.setPresence({ textSelection: null });
+    sender.timers.advance(40);
+    await settle();
+    const cleared = sentFrames(senderSocket)
+      .filter((candidate) => candidate.type === BoardMessageType.AWARENESS)
+      .at(-1);
+    if (cleared?.type !== BoardMessageType.AWARENESS) {
+      throw new Error("Expected cleared text-selection AWARENESS frame");
+    }
+    receiverSocket.receive(cleared);
+    expect(receiver.provider.awareness.getStates().get(77)?.textSelection).toBeNull();
 
     await sender.provider.stop();
     await receiver.provider.stop();

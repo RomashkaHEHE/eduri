@@ -861,7 +861,116 @@ describe("BoardSurface placement tools", () => {
 });
 
 describe("BoardSurface text draft lifecycle", () => {
-  it("discards a blank new textbox on Escape, Enter, or blur without history", async () => {
+  it("shows remote Text carets without opening the local editor and reveals names only on hover", async () => {
+    const context = createBoardContext(PAGE_ONE);
+    contexts.push(context);
+    addText(context, TEXT_ONE, "a0", "normal");
+    const text = getCollaborativeText(
+      getPageObjects(context.document).get(TEXT_ONE)!,
+      "text",
+    )!;
+    const relative = (index: number) => Array.from(Y.encodeRelativePosition(
+      Y.createRelativePositionFromTypeIndex(text, index),
+    ));
+    const presence: BoardPresence = {
+      clientId: 42,
+      userId: "remote-user",
+      displayName: "Remote Writer",
+      color: "#d33f49",
+      selectionIds: [],
+      textSelection: {
+        objectId: TEXT_ONE,
+        anchor: relative(2),
+        head: relative(2),
+      },
+    };
+    const rangeRectDescriptor = Object.getOwnPropertyDescriptor(
+      Range.prototype,
+      "getBoundingClientRect",
+    );
+    const rangeRectsDescriptor = Object.getOwnPropertyDescriptor(
+      Range.prototype,
+      "getClientRects",
+    );
+    const matchMediaDescriptor = Object.getOwnPropertyDescriptor(window, "matchMedia");
+    Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+      configurable: true,
+      value: () => new DOMRect(110, 120, 0, 25),
+    });
+    Object.defineProperty(Range.prototype, "getClientRects", {
+      configurable: true,
+      value: () => [],
+    });
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: () => ({
+        matches: true,
+        addEventListener: () => undefined,
+        removeEventListener: () => undefined,
+      }),
+    });
+    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function getRect(this: HTMLElement) {
+        if (this.classList.contains("board-v2")) return new DOMRect(0, 0, 800, 600);
+        if (this.classList.contains("board-v2__text-contenteditable")) {
+          return new DOMRect(10, 20, 120, 40);
+        }
+        return new DOMRect();
+      });
+
+    try {
+      const factory = new FakeRendererFactory();
+      await act(async () => {
+        root?.render(createElement(BoardSurface, surfaceProps(context, factory, {
+          presences: [presence],
+        })));
+      });
+
+      expect(container?.querySelector(".board-v2__editor--inline-text")).toBeNull();
+      expect(container?.querySelector(
+        `[data-board-text-presence-mirror="${TEXT_ONE}"]`,
+      )).not.toBeNull();
+      const caret = container?.querySelector<HTMLElement>(
+        '[data-board-text-remote-caret="true"]',
+      );
+      expect(caret).not.toBeNull();
+      expect(caret?.classList.contains("is-hovered")).toBe(false);
+      expect(caret?.textContent).toBe("Remote Writer");
+
+      await act(async () => container?.querySelector(".board-v2")?.dispatchEvent(
+        new MouseEvent("pointermove", {
+          bubbles: true,
+          clientX: 110,
+          clientY: 125,
+        }),
+      ));
+      expect(caret?.classList.contains("is-hovered")).toBe(true);
+
+      await act(async () => container?.querySelector(".board-v2")?.dispatchEvent(
+        new MouseEvent("pointerleave", { bubbles: true }),
+      ));
+      expect(caret?.classList.contains("is-hovered")).toBe(false);
+    } finally {
+      rectSpy.mockRestore();
+      if (rangeRectDescriptor) {
+        Object.defineProperty(Range.prototype, "getBoundingClientRect", rangeRectDescriptor);
+      } else {
+        delete (Range.prototype as Partial<Range>).getBoundingClientRect;
+      }
+      if (rangeRectsDescriptor) {
+        Object.defineProperty(Range.prototype, "getClientRects", rangeRectsDescriptor);
+      } else {
+        delete (Range.prototype as Partial<Range>).getClientRects;
+      }
+      if (matchMediaDescriptor) {
+        Object.defineProperty(window, "matchMedia", matchMediaDescriptor);
+      } else {
+        delete (window as Partial<Window>).matchMedia;
+      }
+    }
+  });
+
+  it("keeps a blank draft through Enter and blur, then discards it on Escape", async () => {
     const context = createBoardContext(PAGE_ONE);
     contexts.push(context);
     const factory = new FakeRendererFactory();
@@ -874,41 +983,63 @@ describe("BoardSurface text draft lifecycle", () => {
     const outside = document.createElement("button");
     document.body.append(outside);
 
-    const closeDraft = async (mode: "Escape" | "Enter" | "blur") => {
+    try {
       await act(async () => renderer.callbacks.onCreateObject(emptyTextDraft()));
-      const textarea = container?.querySelector<HTMLTextAreaElement>("textarea");
+      const textarea = container?.querySelector<HTMLDivElement>(".board-v2__text-contenteditable");
       expect(textarea).not.toBeNull();
       expect(getPageObjects(context.document).size).toBe(0);
-      expect(renderer.selection).toEqual([]);
-      expect(renderer.inlineEditingObjectId).toBeNull();
+
+      const enter = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        code: "Enter",
+        key: "Enter",
+      });
+      await act(async () => textarea?.dispatchEvent(enter));
+      expect(enter.defaultPrevented).toBe(false);
+      expect(container?.querySelector(".board-v2__text-contenteditable")).toBe(textarea);
 
       await act(async () => {
-        if (mode === "blur") {
-          textarea?.focus();
-          outside.focus();
-          return;
-        }
-        textarea?.dispatchEvent(new KeyboardEvent("keydown", {
-          bubbles: true,
-          cancelable: true,
-          code: mode,
-          key: mode,
-        }));
+        textarea?.focus();
+        outside.focus();
       });
+      expect(container?.querySelector(".board-v2__text-contenteditable")).toBe(textarea);
 
-      expect(container?.querySelector("textarea")).toBeNull();
+      await act(async () => textarea?.dispatchEvent(new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        code: "Escape",
+        key: "Escape",
+      })));
+      expect(container?.querySelector(".board-v2__text-contenteditable")).toBeNull();
       expect(getPageObjects(context.document).size).toBe(0);
       expect(context.undo.canUndo).toBe(false);
       expect(context.undo.canRedo).toBe(false);
-    };
-
-    try {
-      await closeDraft("Escape");
-      await closeDraft("Enter");
-      await closeDraft("blur");
     } finally {
       outside.remove();
     }
+  });
+
+  it("closes a blank draft only after the user changes tools", async () => {
+    const context = createBoardContext(PAGE_ONE);
+    contexts.push(context);
+    const factory = new FakeRendererFactory();
+    await act(async () => {
+      root?.render(createElement(BoardSurface, surfaceProps(context, factory)));
+    });
+    await act(async () => factory.instances[0].callbacks.onCreateObject({
+      ...emptyTextDraft(),
+      props: { text: "", layoutMode: "auto-width" },
+    }));
+    expect(container?.querySelector(".board-v2__text-contenteditable")).not.toBeNull();
+
+    const drawing = container?.querySelector<HTMLButtonElement>(
+      'button[aria-label="Рисование"]',
+    );
+    await act(async () => drawing?.click());
+    expect(container?.querySelector(".board-v2__text-contenteditable")).toBeNull();
+    expect(factory.instances[0].tool).toBe("pen");
+    expect(getPageObjects(context.document).size).toBe(0);
   });
 
   it("promotes first text input and exits to board shortcuts without an empty undo state", async () => {
@@ -923,14 +1054,13 @@ describe("BoardSurface text draft lifecycle", () => {
     const renderer = factory.instances[0];
 
     await act(async () => renderer.callbacks.onCreateObject(emptyTextDraft()));
-    const textarea = container?.querySelector<HTMLTextAreaElement>("textarea");
+    const textarea = container?.querySelector<HTMLDivElement>(".board-v2__text-contenteditable");
     expect(textarea).not.toBeNull();
     expect(getPageObjects(context.document).size).toBe(0);
 
     await act(async () => {
       if (!textarea) return;
-      textarea.value = "П";
-      textarea.setSelectionRange(1, 1);
+      textarea.textContent = "П";
       textarea.dispatchEvent(new InputEvent("input", {
         bubbles: true,
         data: "П",
@@ -945,11 +1075,10 @@ describe("BoardSurface text draft lifecycle", () => {
     expect(renderer.inlineEditingObjectId).toBe(objectId);
 
     const promotedTextarea =
-      container?.querySelector<HTMLTextAreaElement>("textarea");
+      container?.querySelector<HTMLDivElement>(".board-v2__text-contenteditable");
     await act(async () => {
       if (!promotedTextarea) return;
-      promotedTextarea.value = "Привет";
-      promotedTextarea.setSelectionRange(6, 6);
+      promotedTextarea.textContent = "Привет";
       promotedTextarea.dispatchEvent(new InputEvent("input", {
         bubbles: true,
         data: "ривет",
@@ -968,7 +1097,7 @@ describe("BoardSurface text draft lifecycle", () => {
         key: "Escape",
       }));
     });
-    expect(container?.querySelector("textarea")).toBeNull();
+    expect(container?.querySelector(".board-v2__text-contenteditable")).toBeNull();
     expect(renderer.selection).toEqual([]);
     expect(document.activeElement).toBe(board);
 
@@ -1007,6 +1136,216 @@ describe("BoardSurface text draft lifecycle", () => {
     expect(getCollaborativeText(restored!, "text")?.toString()).toBe("Привет");
   });
 
+  it("keeps plain Enter native and resizes click-created text in both axes", async () => {
+    const context = createBoardContext(PAGE_ONE);
+    contexts.push(context);
+    const factory = new FakeRendererFactory();
+    await act(async () => {
+      root?.render(createElement(BoardSurface, surfaceProps(context, factory)));
+    });
+    await act(async () => factory.instances[0].callbacks.onCreateObject({
+      kind: BUILTIN_OBJECT_KINDS.text,
+      transform: [40, 60, 20, 29, 0],
+      style: { fontSize: 20 },
+      props: { text: "", layoutMode: "auto-width" },
+    }));
+    const textarea = container?.querySelector<HTMLDivElement>(".board-v2__text-contenteditable");
+    expect(textarea?.closest(".board-v2__editor--auto-width")).not.toBeNull();
+    let measuredWidth = 136;
+    let measuredHeight = 54;
+    Object.defineProperties(textarea!, {
+      scrollWidth: { configurable: true, get: () => measuredWidth },
+      scrollHeight: { configurable: true, get: () => measuredHeight },
+    });
+
+    const enter = new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      key: "Enter",
+      code: "Enter",
+    });
+    await act(async () => textarea?.dispatchEvent(enter));
+    expect(enter.defaultPrevented).toBe(false);
+    expect(container?.querySelector(".board-v2__text-contenteditable")).toBe(textarea);
+
+    await act(async () => {
+      if (!textarea) return;
+      textarea.textContent = "Первая\nвторая";
+      textarea.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        inputType: "insertLineBreak",
+      }));
+    });
+    const [id, record] = [...getPageObjects(context.document).entries()][0];
+    expect(getCollaborativeText(record, "text")?.toString()).toBe("Первая\nвторая");
+    expect(readBoardObject(record).transform).toEqual([40, 60, 137, 54, 0]);
+
+    measuredWidth = 72;
+    measuredHeight = 29;
+    const promoted = container?.querySelector<HTMLDivElement>(".board-v2__text-contenteditable");
+    Object.defineProperties(promoted!, {
+      scrollWidth: { configurable: true, get: () => measuredWidth },
+      scrollHeight: { configurable: true, get: () => measuredHeight },
+    });
+    expect(promoted?.scrollWidth).toBe(72);
+    expect(promoted?.scrollHeight).toBe(29);
+    await act(async () => {
+      if (!promoted) return;
+      promoted.textContent = "короче";
+      promoted.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        inputType: "deleteContentBackward",
+      }));
+    });
+    expect(getCollaborativeText(
+      getPageObjects(context.document).get(id)!,
+      "text",
+    )?.toString()).toBe("короче");
+    expect(readBoardObject(getPageObjects(context.document).get(id)!).transform)
+      .toEqual([40, 60, 73, 29, 0]);
+  });
+
+  it("keeps dragged text width fixed and grows or shrinks only to its minimum height", async () => {
+    const context = createBoardContext(PAGE_ONE);
+    contexts.push(context);
+    const factory = new FakeRendererFactory();
+    await act(async () => {
+      root?.render(createElement(BoardSurface, surfaceProps(context, factory)));
+    });
+    await act(async () => factory.instances[0].callbacks.onCreateObject({
+      kind: BUILTIN_OBJECT_KINDS.text,
+      transform: [30, 40, 180, 60, 0],
+      style: { fontSize: 20 },
+      props: {
+        text: "",
+        layoutMode: "fixed-width",
+        minimumHeight: 60,
+      },
+    }));
+    const textarea = container?.querySelector<HTMLDivElement>(".board-v2__text-contenteditable");
+    expect(textarea?.closest(".board-v2__editor--auto-width")).toBeNull();
+    let measuredHeight = 142;
+    Object.defineProperties(textarea!, {
+      scrollWidth: { configurable: true, get: () => 400 },
+      scrollHeight: { configurable: true, get: () => measuredHeight },
+    });
+    await act(async () => {
+      if (!textarea) return;
+      textarea.textContent = "Длинный текст для нескольких строк";
+      textarea.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    });
+    const [id, record] = [...getPageObjects(context.document).entries()][0];
+    expect(readBoardObject(record).transform).toEqual([30, 40, 180, 142, 0]);
+
+    measuredHeight = 24;
+    const promoted = container?.querySelector<HTMLDivElement>(".board-v2__text-contenteditable");
+    Object.defineProperty(promoted!, "scrollHeight", {
+      configurable: true,
+      get: () => measuredHeight,
+    });
+    expect(promoted?.scrollHeight).toBe(24);
+    await act(async () => {
+      if (!promoted) return;
+      promoted.textContent = "Коротко";
+      promoted.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    });
+    expect(readBoardObject(getPageObjects(context.document).get(id)!).transform)
+      .toEqual([30, 40, 180, 60, 0]);
+  });
+
+  it("shows text editing hints and resizes font continuously with Alt+wheel", async () => {
+    const context = createBoardContext(PAGE_ONE);
+    contexts.push(context);
+    addBoardObject(context.document, {
+      id: TEXT_ONE,
+      kind: BUILTIN_OBJECT_KINDS.text,
+      version: 1,
+      transform: [10, 20, 100, 40, 0],
+      zRank: "a",
+      style: { fontSize: 20 },
+      props: createTextProps("Текст", { layoutMode: "auto-width" }),
+    }, context.origin);
+    context.undo.clear();
+    const factory = new FakeRendererFactory();
+    await act(async () => {
+      root?.render(createElement(BoardSurface, surfaceProps(context, factory)));
+    });
+    await act(async () => factory.instances[0].callbacks.onEditObject(TEXT_ONE));
+    expect(container?.textContent).toContain("закончить текст");
+    expect(container?.textContent).toContain("размер текста");
+    expect([
+      ...(container?.querySelectorAll<HTMLElement>(
+        ".board-modifier-hints__item",
+      ) ?? []),
+    ].map((item) => item.textContent)).toEqual([
+      "Escзакончить текст",
+      "Alt + Scrollразмер текста",
+    ]);
+    const emptyBoardArea = container?.querySelector<HTMLDivElement>(".board-v2__canvas");
+    const wheel = new WheelEvent("wheel", {
+      bubbles: true,
+      cancelable: true,
+      altKey: true,
+      deltaY: -100,
+      deltaMode: WheelEvent.DOM_DELTA_PIXEL,
+    });
+    await act(async () => emptyBoardArea?.dispatchEvent(wheel));
+    const object = readBoardObject(getPageObjects(context.document).get(TEXT_ONE)!);
+    expect(wheel.defaultPrevented).toBe(true);
+    expect(object.style.get("fontSize")).toBe(22);
+    expect(object.transform[0]).toBe(10);
+    expect(object.transform[1]).toBe(20);
+    expect(object.transform[2]).toBeCloseTo(110);
+    expect(object.transform[3]).toBeCloseTo(44);
+    expect(object.transform[4]).toBe(0);
+
+    const fontSizeInput = container?.querySelector<HTMLInputElement>(
+      ".board-v2__text-font-size",
+    );
+    const editor = container?.querySelector<HTMLDivElement>(
+      ".board-v2__text-contenteditable",
+    );
+    expect(fontSizeInput?.type).toBe("text");
+    expect(fontSizeInput?.hasAttribute("min")).toBe(false);
+    expect(fontSizeInput?.hasAttribute("max")).toBe(false);
+    expect(fontSizeInput?.hasAttribute("step")).toBe(false);
+    await act(async () => {
+      if (!fontSizeInput) return;
+      fontSizeInput.focus();
+      fontSizeInput.value = "-";
+      fontSizeInput.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    });
+    expect(fontSizeInput?.value).toBe("-");
+    expect(object.style.get("fontSize")).toBe(22);
+
+    await act(async () => {
+      if (!fontSizeInput) return;
+      fontSizeInput.value = "12,345";
+      fontSizeInput.dispatchEvent(new InputEvent("input", { bubbles: true }));
+    });
+    await act(async () => {
+      if (!fontSizeInput) return;
+      fontSizeInput.blur();
+    });
+    expect(fontSizeInput?.value).toBe("12.35");
+    expect(document.activeElement).toBe(editor);
+    const insertion = new InputEvent("beforeinput", {
+      bubbles: true,
+      cancelable: true,
+      data: "X",
+      inputType: "insertText",
+    });
+    await act(async () => editor?.dispatchEvent(insertion));
+    expect(insertion.defaultPrevented).toBe(true);
+    expect(getCollaborativeText(
+      getPageObjects(context.document).get(TEXT_ONE)!,
+      "text",
+    )?.toDelta()).toEqual([
+      { insert: "Текст" },
+      { insert: "X", attributes: { fontSize: 12.35 } },
+    ]);
+  });
+
   it("keeps modified Enter inside a blank provisional editor", async () => {
     const context = createBoardContext(PAGE_ONE);
     contexts.push(context);
@@ -1019,7 +1358,7 @@ describe("BoardSurface text draft lifecycle", () => {
     await act(async () => {
       factory.instances[0].callbacks.onCreateObject(emptyTextDraft());
     });
-    const textarea = container?.querySelector<HTMLTextAreaElement>("textarea");
+    const textarea = container?.querySelector<HTMLDivElement>(".board-v2__text-contenteditable");
     expect(textarea).not.toBeNull();
 
     for (const modifiers of [
@@ -1036,7 +1375,7 @@ describe("BoardSurface text draft lifecycle", () => {
           ...modifiers,
         }));
       });
-      expect(container?.querySelector("textarea")).toBe(textarea);
+      expect(container?.querySelector(".board-v2__text-contenteditable")).toBe(textarea);
     }
     expect(getPageObjects(context.document).size).toBe(0);
     expect(context.undo.canUndo).toBe(false);
@@ -1061,12 +1400,12 @@ describe("BoardSurface text draft lifecycle", () => {
         },
       });
     });
-    const textarea = container?.querySelector<HTMLTextAreaElement>("textarea");
+    const textarea = container?.querySelector<HTMLDivElement>(".board-v2__text-contenteditable");
     expect(textarea).not.toBeNull();
 
     await act(async () => {
       if (!textarea) return;
-      textarea.value = " \n\t";
+      textarea.textContent = " \n\t";
       textarea.dispatchEvent(new InputEvent("input", {
         bubbles: true,
         data: " \n\t",
@@ -1075,11 +1414,11 @@ describe("BoardSurface text draft lifecycle", () => {
     });
     expect(getPageObjects(context.document).size).toBe(0);
     expect(context.undo.canUndo).toBe(false);
-    expect(container?.querySelector("textarea")).toBe(textarea);
+    expect(container?.querySelector(".board-v2__text-contenteditable")).toBe(textarea);
 
     await act(async () => {
       if (!textarea) return;
-      textarea.value = " \n\tX ";
+      textarea.textContent = " \n\tX ";
       textarea.dispatchEvent(new InputEvent("input", {
         bubbles: true,
         data: "X ",
@@ -1112,10 +1451,10 @@ describe("BoardSurface text draft lifecycle", () => {
 
     const renderer = factory.instances[0];
     await act(async () => renderer.callbacks.onCreateObject(emptyTextDraft()));
-    const textarea = container?.querySelector<HTMLTextAreaElement>("textarea");
+    const textarea = container?.querySelector<HTMLDivElement>(".board-v2__text-contenteditable");
     await act(async () => {
       if (!textarea) return;
-      textarea.value = "X";
+      textarea.textContent = "X";
       textarea.dispatchEvent(new InputEvent("input", {
         bubbles: true,
         data: "X",
@@ -1126,7 +1465,7 @@ describe("BoardSurface text draft lifecycle", () => {
     expect(container?.querySelector(".board-v2__stylebar")).toBeNull();
 
     const promotedTextarea =
-      container?.querySelector<HTMLTextAreaElement>("textarea");
+      container?.querySelector<HTMLDivElement>(".board-v2__text-contenteditable");
     const undoEvent = new KeyboardEvent("keydown", {
       bubbles: true,
       cancelable: true,
@@ -1138,9 +1477,43 @@ describe("BoardSurface text draft lifecycle", () => {
 
     expect(undoEvent.defaultPrevented).toBe(true);
     expect(getPageObjects(context.document).size).toBe(0);
-    expect(container?.querySelector("textarea")).toBeNull();
+    expect(container?.querySelector(".board-v2__text-contenteditable")).toBeNull();
     expect(container?.querySelector(".board-v2__stylebar")).not.toBeNull();
     expect(renderer.selection).toEqual([]);
+  });
+
+  it("removes a whitespace-only Text object when editing finishes", async () => {
+    const context = createBoardContext(PAGE_ONE);
+    contexts.push(context);
+    addText(context, TEXT_ONE, "a0", "normal");
+    context.undo.clear();
+    const factory = new FakeRendererFactory();
+    await act(async () => {
+      root?.render(createElement(BoardSurface, surfaceProps(context, factory)));
+    });
+    await act(async () => factory.instances[0].callbacks.onEditObject(TEXT_ONE));
+    const editor = container?.querySelector<HTMLDivElement>(
+      ".board-v2__text-contenteditable",
+    );
+    await act(async () => {
+      if (!editor) return;
+      editor.textContent = " \n\t\u200b";
+      editor.dispatchEvent(new InputEvent("input", {
+        bubbles: true,
+        inputType: "insertText",
+      }));
+    });
+    expect(getPageObjects(context.document).has(TEXT_ONE)).toBe(true);
+
+    await act(async () => editor?.dispatchEvent(new KeyboardEvent("keydown", {
+      bubbles: true,
+      cancelable: true,
+      code: "Escape",
+      key: "Escape",
+    })));
+
+    expect(getPageObjects(context.document).has(TEXT_ONE)).toBe(false);
+    expect(container?.querySelector(".board-v2__text-contenteditable")).toBeNull();
   });
 
   it("waits for IME composition to finish before promoting the text draft", async () => {
@@ -1155,7 +1528,7 @@ describe("BoardSurface text draft lifecycle", () => {
     await act(async () => {
       factory.instances[0].callbacks.onCreateObject(emptyTextDraft());
     });
-    const textarea = container?.querySelector<HTMLTextAreaElement>("textarea");
+    const textarea = container?.querySelector<HTMLDivElement>(".board-v2__text-contenteditable");
     expect(textarea).not.toBeNull();
 
     await act(async () => {
@@ -1164,7 +1537,7 @@ describe("BoardSurface text draft lifecycle", () => {
         bubbles: true,
         data: "",
       }));
-      textarea.value = "т";
+      textarea.textContent = "т";
       textarea.dispatchEvent(new Event("input", { bubbles: true }));
 
       const composingEnter = new KeyboardEvent("keydown", {
@@ -1189,11 +1562,11 @@ describe("BoardSurface text draft lifecycle", () => {
     });
     expect(getPageObjects(context.document).size).toBe(0);
     expect(context.undo.canUndo).toBe(false);
-    expect(container?.querySelector("textarea")).toBe(textarea);
+    expect(container?.querySelector(".board-v2__text-contenteditable")).toBe(textarea);
 
     await act(async () => {
       if (!textarea) return;
-      textarea.value = "текст";
+      textarea.textContent = "текст";
       textarea.dispatchEvent(new CompositionEvent("compositionend", {
         bubbles: true,
         data: "текст",
@@ -1209,7 +1582,7 @@ describe("BoardSurface text draft lifecycle", () => {
     expect(getPageObjects(context.document).size).toBe(1);
     expect(getCollaborativeText(record, "text")?.toString()).toBe("текст");
     expect(document.activeElement).toBe(
-      container?.querySelector<HTMLTextAreaElement>("textarea"),
+      container?.querySelector<HTMLDivElement>(".board-v2__text-contenteditable"),
     );
   });
 
@@ -1225,14 +1598,14 @@ describe("BoardSurface text draft lifecycle", () => {
     await act(async () => {
       factory.instances[0].callbacks.onCreateObject(emptyTextDraft());
     });
-    expect(container?.querySelector("textarea")).not.toBeNull();
+    expect(container?.querySelector(".board-v2__text-contenteditable")).not.toBeNull();
 
     await act(async () => {
       root?.render(createElement(BoardSurface, surfaceProps(first, factory, {
         readOnly: true,
       })));
     });
-    expect(container?.querySelector("textarea")).toBeNull();
+    expect(container?.querySelector(".board-v2__text-contenteditable")).toBeNull();
     expect(getPageObjects(first.document).size).toBe(0);
 
     await act(async () => {
@@ -1241,12 +1614,12 @@ describe("BoardSurface text draft lifecycle", () => {
     await act(async () => {
       factory.instances.at(-1)?.callbacks.onCreateObject(emptyTextDraft());
     });
-    expect(container?.querySelector("textarea")).not.toBeNull();
+    expect(container?.querySelector(".board-v2__text-contenteditable")).not.toBeNull();
 
     await act(async () => {
       root?.render(createElement(BoardSurface, surfaceProps(second, factory)));
     });
-    expect(container?.querySelector("textarea")).toBeNull();
+    expect(container?.querySelector(".board-v2__text-contenteditable")).toBeNull();
     expect(getPageObjects(first.document).size).toBe(0);
     expect(getPageObjects(second.document).size).toBe(0);
   });
@@ -1889,7 +2262,7 @@ describe("BoardSurface clipboard", () => {
     expect(context.undo.canUndo).toBe(false);
   });
 
-  it("keeps native paste inside an inline text editor", async () => {
+  it("routes paste to the collaborative inline text editor", async () => {
     const context = createBoardContext(PAGE_ONE);
     contexts.push(context);
     addText(context, TEXT_ONE, "a0", "normal");
@@ -1911,8 +2284,8 @@ describe("BoardSurface clipboard", () => {
         key: "Enter",
       }));
     });
-    const editor = container?.querySelector<HTMLTextAreaElement>(
-      ".board-v2__editor textarea",
+    const editor = container?.querySelector<HTMLDivElement>(
+      ".board-v2__text-contenteditable",
     );
     expect(editor).not.toBeNull();
     editor?.focus();
@@ -1920,10 +2293,14 @@ describe("BoardSurface clipboard", () => {
     data.setData("text/plain", "native editor paste");
 
     const event = dispatchClipboardEvent("paste", data, editor!);
-    expect(event.defaultPrevented).toBe(false);
+    expect(event.defaultPrevented).toBe(true);
     await act(async () => Promise.resolve());
     expect(getPageObjects(context.document).size).toBe(1);
-    expect(context.undo.canUndo).toBe(false);
+    expect(getCollaborativeText(
+      getPageObjects(context.document).get(TEXT_ONE)!,
+      "text",
+    )?.toString()).toBe("Текстnative editor paste");
+    expect(context.undo.canUndo).toBe(true);
   });
 
   it("exits ordinary text editing to unselected board shortcuts on Escape", async () => {
@@ -1959,11 +2336,11 @@ describe("BoardSurface clipboard", () => {
     const overlay = container?.querySelector<HTMLElement>(
       ".board-v2__editor--inline-text",
     );
-    const editor = overlay?.querySelector<HTMLTextAreaElement>("textarea");
+    const editor = overlay?.querySelector<HTMLDivElement>(".board-v2__text-contenteditable");
     const board = container?.querySelector<HTMLElement>(".board-v2");
     expect(overlay).not.toBeNull();
     expect(editor?.getAttribute("aria-label")).toBe("Редактировать текст");
-    expect(editor?.getAttribute("wrap")).toBe("soft");
+    expect(overlay?.classList.contains("board-v2__editor--auto-width")).toBe(false);
     expect(overlay?.style.left).toBe("52px");
     expect(overlay?.style.top).toBe("19px");
     expect(overlay?.style.width).toBe("270px");
@@ -1974,7 +2351,12 @@ describe("BoardSurface clipboard", () => {
     expect(overlay?.style.transform).toBe(`rotate(${Math.PI / 6}rad)`);
     expect(factory.instances[0].inlineEditingObjectId).toBe(TEXT_ONE);
     expect(overlay?.querySelector(".board-v2__editor-head")).toBeNull();
-    expect(overlay?.querySelector("button")).toBeNull();
+    expect(overlay?.querySelector(".board-v2__text-formatbar")).not.toBeNull();
+    expect(overlay?.querySelector('input[type="color"]')).toBeNull();
+    expect(overlay?.querySelector('[role="combobox"][aria-label="Шрифт"]'))
+      .not.toBeNull();
+    expect(overlay?.querySelector('.board-color-control__trigger[aria-label^="Цвет текста:"]'))
+      .not.toBeNull();
     expect(overlay?.querySelector("pre")).toBeNull();
     expect(container?.querySelector(".board-v2__editor--code")).toBeNull();
     expect(factory.instances[0].selection).toEqual([TEXT_ONE]);
@@ -3418,7 +3800,14 @@ describe("BoardSurface style and layer controls", () => {
       'button[role="combobox"][aria-label="Шрифт"]',
     );
     await act(async () => {
-      if (fontSize) setRangeValue(fontSize, "38");
+      if (fontSize) {
+        setRangeValue(fontSize, "38");
+        fontSize.dispatchEvent(new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          key: "Enter",
+        }));
+      }
       fontFamily?.click();
     });
     const georgiaOption = [...document.body.querySelectorAll<HTMLButtonElement>(
@@ -3791,6 +4180,49 @@ describe("BoardSurface style and layer controls", () => {
     });
     expect(endGesture).toHaveBeenCalledOnce();
     expect(context.undo.canUndo).toBe(false);
+  });
+
+  it("publishes live transform previews without durable writes and clears them on cancel", async () => {
+    const context = createBoardContext(PAGE_ONE);
+    contexts.push(context);
+    const factory = new FakeRendererFactory();
+    const awarenessChanges = vi.fn();
+    const documentUpdates = vi.fn();
+    context.document.on("update", documentUpdates);
+
+    await act(async () => {
+      root?.render(createElement(BoardSurface, surfaceProps(context, factory, {
+        onAwarenessChange: awarenessChanges,
+      })));
+    });
+    const renderer = factory.instances[0];
+    awarenessChanges.mockClear();
+    documentUpdates.mockClear();
+    const preview = {
+      streamId: "transform-stream-1",
+      transforms: [{
+        objectId: RECTANGLE_ONE,
+        transform: [70, 80, 120, 80, 0] as const,
+      }],
+    } as const;
+
+    await act(async () => {
+      renderer.callbacks.onTransformPreviewChange?.(preview);
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
+    expect(awarenessChanges).toHaveBeenLastCalledWith({
+      transformPreview: preview,
+    });
+    expect(documentUpdates).not.toHaveBeenCalled();
+
+    await act(async () => {
+      renderer.callbacks.onTransformCancel();
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
+    expect(awarenessChanges).toHaveBeenLastCalledWith({
+      transformPreview: null,
+    });
+    expect(documentUpdates).not.toHaveBeenCalled();
   });
 
   it("closes an opacity gesture when read-only hides the style bar", async () => {
@@ -4211,7 +4643,7 @@ describe("BoardSurface theme and standard controls", () => {
     expect(context.undo.canUndo).toBe(false);
   });
 
-  it("keeps Alt scoped across focus changes and exempts native editing and AltGraph", async () => {
+  it("keeps Alt scoped across focus changes and captures it during Text editing", async () => {
     const context = createBoardContext(PAGE_ONE);
     contexts.push(context);
     const factory = new FakeRendererFactory();
@@ -4273,7 +4705,7 @@ describe("BoardSurface theme and standard controls", () => {
     await act(async () => {
       factory.instances[0].callbacks.onCreateObject(emptyTextDraft());
     });
-    const editor = container?.querySelector<HTMLTextAreaElement>("textarea");
+    const editor = container?.querySelector<HTMLDivElement>(".board-v2__text-contenteditable");
     expect(editor).not.toBeNull();
     editor?.focus();
     for (const type of ["keydown", "keyup"] as const) {
@@ -4284,9 +4716,33 @@ describe("BoardSurface theme and standard controls", () => {
         key: "Alt",
         altKey: type === "keydown",
       });
-      expect(editor?.dispatchEvent(editorAlt), type).toBe(true);
-      expect(editorAlt.defaultPrevented, type).toBe(false);
+      expect(editor?.dispatchEvent(editorAlt), type).toBe(false);
+      expect(editorAlt.defaultPrevented, type).toBe(true);
     }
+
+    const colorTrigger = container?.querySelector<HTMLButtonElement>(
+      '.board-v2__text-formatbar .board-color-control__trigger',
+    );
+    await act(async () => colorTrigger?.click());
+    const colorPopover = container?.querySelector<HTMLElement>(
+      ".board-color-control__popover",
+    );
+    expect(colorPopover).not.toBeNull();
+    colorPopover?.focus();
+    for (const type of ["keydown", "keyup"] as const) {
+      const popoverAlt = new KeyboardEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        code: "AltRight",
+        key: "Alt",
+        altKey: type === "keydown",
+      });
+      expect(colorPopover?.dispatchEvent(popoverAlt), type).toBe(false);
+      expect(popoverAlt.defaultPrevented, type).toBe(true);
+    }
+    await act(async () => container?.querySelector<HTMLButtonElement>(
+      ".board-color-control__close",
+    )?.click());
 
     expect(factory.instances[0].tool).toBe("select");
     expect(context.undo.canUndo).toBe(false);
@@ -5031,6 +5487,59 @@ describe("BoardSurface theme and standard controls", () => {
 
     expect(onAwarenessChange).toHaveBeenCalledTimes(1);
     expect(onAwarenessChange).toHaveBeenCalledWith({ viewport: nextCamera });
+  });
+
+  it("preserves timed cursor samples while coalescing awareness to one frame", async () => {
+    const context = createBoardContext(PAGE_ONE);
+    contexts.push(context);
+    const factory = new FakeRendererFactory();
+    const onAwarenessChange = vi.fn();
+
+    await act(async () => {
+      root?.render(createElement(BoardSurface, surfaceProps(context, factory, {
+        onAwarenessChange,
+      })));
+    });
+    onAwarenessChange.mockClear();
+    const renderer = factory.instances[0];
+    await act(async () => {
+      renderer.callbacks.onCursorChange(
+        { x: 20, y: 10 },
+        [
+          { x: 0, y: 10, at: 1_000 },
+          { x: 10, y: 18, at: 1_008 },
+          { x: 20, y: 10, at: 1_016 },
+        ],
+      );
+      renderer.callbacks.onCursorChange(
+        { x: 30, y: 2 },
+        [{ x: 30, y: 2, at: 1_024 }],
+      );
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
+
+    expect(onAwarenessChange).toHaveBeenCalledTimes(1);
+    const published = onAwarenessChange.mock.calls[0][0];
+    expect(published.cursor).toEqual({ x: 30, y: 2 });
+    expect(published.cursorTrail).toMatchObject({
+      sampleOffset: 0,
+      samples: [
+        { x: 0, y: 10, elapsedMs: 0 },
+        { x: 10, y: 18, elapsedMs: 8 },
+        { x: 20, y: 10, elapsedMs: 16 },
+        { x: 30, y: 2, elapsedMs: 24 },
+      ],
+    });
+    expect(published.cursorTrail.streamId).toMatch(/^[0-9a-f-]{36}$/u);
+
+    await act(async () => {
+      renderer.callbacks.onCursorChange(null);
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    });
+    expect(onAwarenessChange).toHaveBeenLastCalledWith({
+      cursor: null,
+      cursorTrail: null,
+    });
   });
 
   it("clamps toolbar zoom to 2%-2000% without moving the viewport-center anchor", async () => {

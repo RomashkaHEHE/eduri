@@ -2230,9 +2230,9 @@ non-Select tool; those nested states can require multiple presses.
   repair tail: up to 48 real samples covering approximately the newest 100 ms.
   Overlap repairs a skipped/coalesced packet without raising the packet rate;
   receivers deduplicate samples by stream ID and monotonic sample offset.
-- Remote clients play the confirmed sender timeline through an adaptive 48-140
-  ms jitter buffer. They estimate minimum transit offset and filtered excess
-  jitter, never move the playback clock backwards, and catch up at no more than
+- Outside drawing, remote clients play the confirmed sender timeline through
+  an adaptive 48-140 ms jitter buffer. They estimate minimum transit offset and
+  filtered excess jitter, never move the playback clock backwards, and catch up at no more than
   1.25x after an underrun. A newly arrived packet after a stop cannot move the
   cursor in the same render call. Timed samples are joined with bounded cubic
   Hermite segments whose velocities come from adjacent real samples; every
@@ -2259,6 +2259,19 @@ non-Select tool; those nested states can require multiple presses.
   exactly the inverse of sender zoom with no additional cursor-size limits across the supported
   2%-2000% board zoom range; the name label stays readable at a constant screen
   size.
+- During remote Drawing/highlighting and a laser stroke, the cursor hotspot
+  follows the visible stroke head in the same animation frame, including a
+  moved stroke's world offset. It does not replay a separate delayed cursor
+  path behind the ink. Received freehand/laser suffixes reveal their confirmed
+  vertices in order up to the animated head, without painting future vertices
+  ahead of it or drawing a backwards bridge. Shape/Line/Arrow previews likewise
+  use the current drawing endpoint. Confirmed cursor history is consumed while a drawing
+  preview owns the pointer, so finishing, cancelling, or replacing the preview
+  with its durable object does not rewind the cursor, regardless of whether
+  the object or final awareness arrives first. Moving an unfinished stroke
+  keeps the actual pointer if it differs from the head; a retained laser
+  allows ordinary cursor movement between strokes. Free cursor motion retains
+  its timed smoothing. Packet rate, CRDT, undo, and durable geometry are unchanged.
 - Remote selections outline visible selected objects. Presence selection is
   capped at 256 IDs and is not the participant's complete local selection.
 - In-progress freehand/shapes and Drawing's temporary laser session are

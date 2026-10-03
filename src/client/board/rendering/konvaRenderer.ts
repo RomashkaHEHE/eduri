@@ -400,6 +400,12 @@ interface RemotePointMotion {
   readonly from: BoardPoint;
   readonly target: BoardPoint;
   readonly startedAt: number;
+  readonly path: readonly {
+    readonly point: BoardPoint;
+    readonly distance: number;
+    readonly flatIndex: number;
+  }[];
+  readonly pathLength: number;
 }
 
 interface RemoteTransformMotion {
@@ -1945,7 +1951,7 @@ function remoteCursorStreamSample(
 function interpolateRemotePoint(
   motion: RemotePointMotion,
   time: number,
-): { readonly point: BoardPoint; readonly complete: boolean } {
+): { readonly point: BoardPoint; readonly complete: boolean; readonly flatIndex: number } {
   const progress = Math.max(
     0,
     Math.min(
@@ -1954,13 +1960,52 @@ function interpolateRemotePoint(
     ),
   );
   const eased = 1 - (1 - progress) ** 3;
+  const travelled = motion.pathLength * eased;
+  let low = 0;
+  let high = motion.path.length - 1;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (motion.path[middle].distance < travelled) low = middle + 1;
+    else high = middle;
+  }
+  const station = motion.path[low];
+  const previous = low > 0 ? motion.path[low - 1] : null;
+  const from = previous?.point ?? motion.from;
+  const previousDistance = previous?.distance ?? 0;
+  const segmentLength = station.distance - previousDistance;
+  const fraction = segmentLength > 0 ? (travelled - previousDistance) / segmentLength : 1;
   return {
     point: {
-      x: motion.from.x + (motion.target.x - motion.from.x) * eased,
-      y: motion.from.y + (motion.target.y - motion.from.y) * eased,
+      x: from.x + (station.point.x - from.x) * fraction,
+      y: from.y + (station.point.y - from.y) * fraction,
     },
     complete: progress >= 1,
+    flatIndex: station.flatIndex,
   };
+}
+
+function renderRemoteHeadMotion(
+  line: Konva.Line,
+  targetFlatPoints: readonly number[],
+  motion: RemotePointMotion,
+  animationTime: number,
+): boolean {
+  const interpolated = interpolateRemotePoint(motion, animationTime);
+  if (interpolated.complete) {
+    line.points([...targetFlatPoints]);
+    return true;
+  }
+  const rendered = line.points();
+  const previousHeadIndex = Math.max(0, rendered.length - 2);
+  rendered.length = interpolated.flatIndex + 2;
+  // Reveal only confirmed vertices reached by this frame's head. Future
+  // vertices must not appear ahead of the cursor or make a backwards bridge.
+  for (let index = previousHeadIndex; index < interpolated.flatIndex; index += 1) {
+    rendered[index] = targetFlatPoints[index];
+  }
+  rendered[interpolated.flatIndex] = interpolated.point.x;
+  rendered[interpolated.flatIndex + 1] = interpolated.point.y;
+  return false;
 }
 
 function equalAtomicTransforms(
@@ -6605,22 +6650,30 @@ export class KonvaBoardRenderer implements BoardRenderer {
       x: targetFlatPoints[targetFlatPoints.length - 2],
       y: targetFlatPoints[targetFlatPoints.length - 1],
     };
-    if (
-      from.x === target.x
-      && from.y === target.y
-    ) {
+    const startIndex = Math.min(currentFlatPoints.length - 2, targetFlatPoints.length - 2);
+    const path: Array<RemotePointMotion["path"][number]> = [];
+    let pathLength = 0;
+    let previous = from;
+    for (let index = startIndex; index < targetFlatPoints.length; index += 2) {
+      const point = { x: targetFlatPoints[index], y: targetFlatPoints[index + 1] };
+      pathLength += distance(previous, point);
+      path.push({ point, distance: pathLength, flatIndex: index });
+      previous = point;
+    }
+    if (pathLength === 0) {
       line.points([...targetFlatPoints]);
       return null;
     }
-    const rendered = [...targetFlatPoints];
-    rendered[rendered.length - 2] = from.x;
-    rendered[rendered.length - 1] = from.y;
+    const rendered = targetFlatPoints.slice(0, startIndex);
+    rendered.push(from.x, from.y);
     line.points(rendered);
     this.schedulePresenceAnimation();
     return {
       from,
       target,
       startedAt: performance.now(),
+      path,
+      pathLength,
     };
   }
 
@@ -7007,6 +7060,46 @@ export class KonvaBoardRenderer implements BoardRenderer {
     });
   }
 
+  private gestureCursorPoint(
+    entry: PresenceRenderEntry,
+    presence: BoardPresence,
+  ): BoardPoint | null {
+    if (!presence.cursor) return null;
+    const gesture = presence.gesturePreview;
+    if (entry.gesturePreview && gesture) {
+      const end = entry.gesturePoints?.at(-1);
+      const offset = gesture.offset && isFinitePoint(gesture.offset)
+        ? gesture.offset : { x: 0, y: 0 };
+      // Moving an unfinished stroke can put the real pointer away from its
+      // endpoint. Only bind the hotspot when the sender is drawing at the head.
+      if (!end || distance(presence.cursor, {
+        x: end.x + offset.x, y: end.y + offset.y,
+      }) > 0.01) return null;
+      if (
+        (gesture.kind === "pen" || gesture.kind === "highlighter")
+        && entry.gesturePreview instanceof Konva.Line
+      ) {
+        const points = entry.gesturePreview.points();
+        if (points.length < 2) return null;
+        return {
+          x: points[points.length - 2] + offset.x,
+          y: points[points.length - 1] + offset.y,
+        };
+      }
+      return presence.cursor;
+    }
+    const laser = this.remoteLaserTrails.get(presence.clientId);
+    const end = laser?.strokes.at(-1)?.points.at(-1);
+    const line = entry.laser?.getChildren().at(-1);
+    // A retained laser session also permits free cursor movement between strokes.
+    if (!laser?.active || !end || distance(presence.cursor, end) > 0.01
+      || !(line instanceof Konva.Line)) return null;
+    const points = line.points();
+    return points.length >= 2 ? {
+      x: points[points.length - 2], y: points[points.length - 1],
+    } : null;
+  }
+
   private renderPresence(animationTime = performance.now()): void {
     if (this.destroyed) return;
     if (this.presenceExpiryTimer !== null) window.clearTimeout(this.presenceExpiryTimer);
@@ -7024,63 +7117,17 @@ export class KonvaBoardRenderer implements BoardRenderer {
       if (!entry) continue;
       const cursorMotion = this.cursorMotions.get(presence.clientId);
       const remoteCursorStream = this.remoteCursorStreams.get(presence.clientId);
-      const streamedCursor = remoteCursorStream
-        ? remoteCursorStreamSample(remoteCursorStream, animationTime)
-        : null;
-      const cursorPoint = streamedCursor?.point
-        ?? (cursorMotion
-          ? cursorMotionSample(cursorMotion, animationTime).point
-          : presence.cursor);
-      if (streamedCursor?.pending) animationPending = true;
-      if (
-        !remoteCursorStream
-        && cursorMotion
-        && animationTime < cursorMotion.startedAt + cursorMotion.durationMs
-      ) {
-        animationPending = true;
-      }
-      if (entry.cursor) {
-        entry.cursor.visible(Boolean(cursorPoint));
-        if (cursorPoint) entry.cursor.position(cursorPoint);
-      }
       if (
         entry.gestureHeadMotion
         && entry.gesturePreview instanceof Konva.Line
         && entry.gestureFlatPoints
       ) {
-        const interpolated = interpolateRemotePoint(
-          entry.gestureHeadMotion,
-          animationTime,
-        );
-        if (interpolated.complete) {
-          entry.gesturePreview.points([...entry.gestureFlatPoints]);
+        if (renderRemoteHeadMotion(
+          entry.gesturePreview, entry.gestureFlatPoints, entry.gestureHeadMotion, animationTime,
+        )) {
           entry.gestureHeadMotion = null;
         } else {
-          const rendered = entry.gesturePreview.points();
-          rendered[rendered.length - 2] = interpolated.point.x;
-          rendered[rendered.length - 1] = interpolated.point.y;
           animationPending = true;
-        }
-      }
-      if (entry.cursorLabel) {
-        const labelLastMovedAt = remoteCursorStream?.lastMovedAt
-          ?? cursorMotion?.lastMovedAt;
-        const labelDeadline = labelLastMovedAt !== undefined
-          ? labelLastMovedAt + REMOTE_CURSOR_LABEL_IDLE_MS
-          : Number.POSITIVE_INFINITY;
-        const interacting = Boolean(
-          entry.gesturePreview?.visible()
-          || presence.laser,
-        );
-        const labelVisible = Boolean(
-          cursorPoint
-          && !interacting
-          && entry.cursorText?.text()
-          && now >= labelDeadline,
-        );
-        entry.cursorLabel.visible(labelVisible);
-        if (cursorPoint && !interacting && now < labelDeadline) {
-          nextExpiry = Math.min(nextExpiry, labelDeadline);
         }
       }
       const laser = this.remoteLaserTrails.get(presence.clientId);
@@ -7095,17 +7142,11 @@ export class KonvaBoardRenderer implements BoardRenderer {
             const stroke = laser.strokes[index];
             const line = children[index];
             if (!stroke.headMotion || !(line instanceof Konva.Line)) continue;
-            const interpolated = interpolateRemotePoint(
-              stroke.headMotion,
-              animationTime,
-            );
-            if (interpolated.complete) {
-              line.points([...stroke.targetFlatPoints]);
+            if (renderRemoteHeadMotion(
+              line, stroke.targetFlatPoints, stroke.headMotion, animationTime,
+            )) {
               stroke.headMotion = null;
             } else {
-              const rendered = line.points();
-              rendered[rendered.length - 2] = interpolated.point.x;
-              rendered[rendered.length - 1] = interpolated.point.y;
               animationPending = true;
             }
           }
@@ -7123,6 +7164,50 @@ export class KonvaBoardRenderer implements BoardRenderer {
                 0,
                 Math.min(1, (laser.expiresAt - now) / LASER_FADE_MS),
               ));
+        }
+      }
+      // Render the hotspot from the same already-animated head as the ink.
+      // Consume its cursor history even after CRDT retirement, so ending or
+      // cancelling the preview cannot replay the older jitter-buffered path.
+      const gestureCursor = this.gestureCursorPoint(entry, presence);
+      const gestureOwnsCursor = Boolean(presence.gesturePreview || gestureCursor);
+      if (gestureOwnsCursor) {
+        if (remoteCursorStream) {
+          remoteCursorStream.playbackElapsedMs = remoteCursorStream.samples.at(-1)!.elapsedMs;
+          remoteCursorStream.lastRenderAt = animationTime;
+        }
+        if (cursorMotion && cursorMotion.durationMs !== 0) {
+          this.cursorMotions.set(presence.clientId, { ...cursorMotion, durationMs: 0 });
+        }
+      }
+      const streamedCursor = remoteCursorStream && !gestureOwnsCursor
+        ? remoteCursorStreamSample(remoteCursorStream, animationTime)
+        : null;
+      const cursorPoint = gestureOwnsCursor
+        ? gestureCursor ?? presence.cursor
+        : streamedCursor?.point ?? (cursorMotion
+          ? cursorMotionSample(cursorMotion, animationTime).point
+          : presence.cursor);
+      if (streamedCursor?.pending || (
+        !gestureOwnsCursor && !remoteCursorStream && cursorMotion
+        && animationTime < cursorMotion.startedAt + cursorMotion.durationMs
+      )) animationPending = true;
+      if (entry.cursor) {
+        entry.cursor.visible(Boolean(cursorPoint));
+        if (cursorPoint) entry.cursor.position(cursorPoint);
+      }
+      if (entry.cursorLabel) {
+        const labelLastMovedAt = remoteCursorStream?.lastMovedAt
+          ?? cursorMotion?.lastMovedAt;
+        const labelDeadline = labelLastMovedAt !== undefined
+          ? labelLastMovedAt + REMOTE_CURSOR_LABEL_IDLE_MS
+          : Number.POSITIVE_INFINITY;
+        const interacting = Boolean(presence.gesturePreview || presence.laser);
+        entry.cursorLabel.visible(Boolean(
+          cursorPoint && !interacting && entry.cursorText?.text() && now >= labelDeadline,
+        ));
+        if (cursorPoint && !interacting && now < labelDeadline) {
+          nextExpiry = Math.min(nextExpiry, labelDeadline);
         }
       }
     }

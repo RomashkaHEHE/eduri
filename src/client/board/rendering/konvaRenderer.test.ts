@@ -7434,6 +7434,239 @@ describe("Konva pointer gesture input", () => {
 });
 
 describe("Konva remote gesture previews", () => {
+  it.each(["pen", "highlighter"] as const)(
+    "keeps a timed remote cursor on the animated %s head at every zoom",
+    (kind) => {
+      let animationTime = 20_000;
+      const performanceNow = vi.spyOn(performance, "now")
+        .mockImplementation(() => animationTime);
+      const { renderer, internals } = rendererHarness();
+      const presence = {
+        clientId: 930, userId: "drawing-user", displayName: "Drawing",
+        color: "#0a7f59", selectionIds: [],
+      };
+      const packet = (points: BoardPoint[], offset = { x: 0, y: 0 }) => ({
+        ...presence,
+        cursor: {
+          x: points.at(-1)!.x + offset.x, y: points.at(-1)!.y + offset.y,
+        },
+        cursorTrail: {
+          streamId: "drawing-cursor", sampleOffset: 0,
+          samples: points.map((point, index) => ({
+            x: point.x + offset.x, y: point.y + offset.y, elapsedMs: index * 20,
+          })),
+        },
+        gesturePreview: { kind, streamId: "drawing-ink", pointOffset: 0, points, offset },
+      });
+      try {
+        const start = [{ x: 0, y: 0 }, { x: 40, y: 10 }];
+        renderer.setPresence([packet(start)]);
+        const entry = internals.presenceRenderEntries.get(presence.clientId)!;
+        const line = entry.gesturePreview as Konva.Line;
+        expect(entry.cursor!.position()).toEqual(start.at(-1));
+        animationTime += 40;
+        // Includes a repaired intermediate sample, rather than just the endpoint.
+        const next = [...start, { x: 70, y: 50 }, { x: 120, y: 30 }];
+        const offset = { x: 30, y: -20 };
+        renderer.setPresence([packet(next, offset)]);
+        expect(entry.gesturePreview).toBe(line);
+        const frameStartedAt = animationTime;
+        for (const [elapsed, zoom] of [[0, 0.02], [8, 1], [20, 20], [40, 0.02], [57, 1]]) {
+          animationTime = frameStartedAt + elapsed;
+          renderer.setCamera({ x: 100, y: 60, zoom });
+          internals.renderPresence(animationTime);
+          const head = line.points().slice(-2);
+          expect(entry.cursor!.position()).toEqual({
+            x: head[0] + offset.x, y: head[1] + offset.y,
+          });
+        }
+        expect(entry.cursor!.position()).toEqual({ x: 150, y: 10 });
+        animationTime += 80;
+        renderer.setPresence([{ ...packet(next, offset), gesturePreview: undefined }]);
+        expect(entry.gesturePreview).toBeNull();
+        // There must be no replay of the cursor's earlier buffered path on release.
+        for (const elapsed of [0, 16, 200]) {
+          internals.renderPresence(animationTime + elapsed);
+          expect(entry.cursor!.position()).toEqual({ x: 150, y: 10 });
+        }
+        renderer.setPresence([]);
+        expect(internals.presenceRenderEntries.size).toBe(0);
+      } finally {
+        renderer.destroy();
+        performanceNow.mockRestore();
+      }
+    },
+  );
+
+  it.each(["object-first", "awareness-first", "bulk"])(
+    "does not rewind a legacy cursor when committed ink arrives %s",
+    (order) => {
+      let animationTime = 30_000;
+      const performanceNow = vi.spyOn(performance, "now")
+        .mockImplementation(() => animationTime);
+      const { renderer, internals } = rendererHarness();
+      const presence = {
+        clientId: 931, userId: "commit-user", displayName: "Commit",
+        color: "#0a7f59", selectionIds: [],
+      };
+      const start = { x: 20, y: 30 };
+      const end = { x: 90, y: 80 };
+      const streamId = "committed-ink";
+      const id = "00000000-0000-4000-8000-000000000931";
+      const preview = {
+        kind: "pen" as const, streamId, pointOffset: 0, points: [start, end],
+      };
+      try {
+        renderer.setPresence([{ ...presence, cursor: start }]);
+        animationTime += 40;
+        renderer.setPresence([{ ...presence, cursor: end, gesturePreview: preview }]);
+        const entry = internals.presenceRenderEntries.get(presence.clientId)!;
+        expect(entry.cursor!.position()).toEqual(end);
+        const object = snapshot({
+          id, kind: BUILTIN_OBJECT_KINDS.stroke, transform: [20, 30, 70, 50, 0],
+          props: {
+            sourceGestureStreamId: streamId,
+            points: encodeStrokePoints([
+              { x: 0, y: 0, pressure: 0.5 }, { x: 70, y: 50, pressure: 0.5 },
+            ]),
+          },
+        });
+        const finalPresence = {
+          ...presence, cursor: end, gesturePreview: { ...preview, committedObjectId: id },
+        };
+        if (order === "awareness-first") renderer.setPresence([finalPresence]);
+        if (order === "bulk") renderer.setObjects([object]);
+        else renderer.setObject(object);
+        if (order !== "awareness-first") renderer.setPresence([finalPresence]);
+        expect(entry.gesturePreview).toBeNull();
+        renderer.setPresence([{ ...presence, cursor: end }]);
+        internals.renderPresence(animationTime + 16);
+        expect(entry.cursor!.position()).toEqual(end);
+      } finally {
+        renderer.destroy();
+        performanceNow.mockRestore();
+      }
+    },
+  );
+
+  it.each(["pen", "laser"] as const)(
+    "reveals a received %s suffix in order without ink ahead of the cursor",
+    (kind) => {
+      let animationTime = 35_000;
+      const performanceNow = vi.spyOn(performance, "now")
+        .mockImplementation(() => animationTime);
+      const { renderer, internals } = rendererHarness();
+      const presence = {
+        clientId: 934, userId: "path-user", displayName: "Path",
+        color: "#0a7f59", selectionIds: [],
+      };
+      const packet = (points: BoardPoint[]) => ({
+        ...presence, cursor: points.at(-1)!,
+        ...(kind === "pen" ? {
+          gesturePreview: { kind, streamId: "ordered-ink", pointOffset: 0, points },
+        } : {
+          laser: {
+            sessionId: "ordered-laser",
+            strokes: [{ streamId: "ordered-ink", pointOffset: 0, points }],
+          },
+        }),
+      });
+      try {
+        const start = [{ x: 0, y: 10 }, { x: 40, y: 10 }];
+        renderer.setPresence([packet(start)]);
+        const entry = internals.presenceRenderEntries.get(presence.clientId)!;
+        const line = (kind === "pen"
+          ? entry.gesturePreview : entry.laser!.getChildren()[0]) as Konva.Line;
+        animationTime += 40;
+        const next = [...start, { x: 40, y: 100 }, { x: 140, y: 100 }];
+        renderer.setPresence([packet(next)]);
+        expect(line.points()).toEqual([0, 10, 40, 10]);
+        internals.renderPresence(animationTime + 8);
+        expect(line.points()).toHaveLength(6);
+        expect(line.points().slice(0, 4)).toEqual([0, 10, 40, 10]);
+        expect(entry.cursor!.x()).toBe(40);
+        expect(entry.cursor!.y()).toBeGreaterThan(10);
+        expect(entry.cursor!.y()).toBeLessThan(100);
+        animationTime += 28;
+        internals.renderPresence(animationTime);
+        expect(line.points().slice(0, 6)).toEqual([0, 10, 40, 10, 40, 100]);
+        expect(entry.cursor!.x()).toBeGreaterThan(40);
+        expect(entry.cursor!.y()).toBe(100);
+        const beforeRetarget = entry.cursor!.position();
+        const finalPoints = [...next, { x: 140, y: 160 }];
+        renderer.setPresence([packet(finalPoints)]);
+        expect(entry.cursor!.position()).toEqual(beforeRetarget);
+        for (const elapsed of [8, 28, 57]) {
+          internals.renderPresence(animationTime + elapsed);
+          const head = line.points().slice(-2);
+          expect(entry.cursor!.position()).toEqual({ x: head[0], y: head[1] });
+        }
+        expect(line.points()).toEqual(finalPoints.flatMap((point) => [point.x, point.y]));
+      } finally {
+        renderer.destroy();
+        performanceNow.mockRestore();
+      }
+    },
+  );
+
+  it("preserves the real pointer while moving an unfinished stroke", () => {
+    const { renderer, internals } = rendererHarness();
+    const cursor = { x: 60, y: 40 };
+    renderer.setPresence([{
+      clientId: 932, userId: "move-user", displayName: "Move",
+      color: "#0a7f59", selectionIds: [], cursor,
+      gesturePreview: {
+        kind: "pen", streamId: "moved-ink", pointOffset: 0,
+        points: [{ x: 0, y: 0 }, { x: 120, y: 30 }], offset: { x: 30, y: 20 },
+      },
+    }]);
+    expect(internals.presenceRenderEntries.get(932)!.cursor!.position()).toEqual(cursor);
+    renderer.destroy();
+  });
+
+  it("shares laser head animation but leaves the pointer free between retained strokes", () => {
+    let animationTime = 40_000;
+    const performanceNow = vi.spyOn(performance, "now")
+      .mockImplementation(() => animationTime);
+    const { renderer, internals } = rendererHarness();
+    const presence = {
+      clientId: 933, userId: "laser-user", displayName: "Laser",
+      color: "#0a7f59", selectionIds: [],
+    };
+    const packet = (end: BoardPoint) => ({
+      ...presence, cursor: end,
+      laser: {
+        sessionId: "laser-session",
+        strokes: [{ streamId: "laser-stroke", pointOffset: 0, points: [{ x: 0, y: 0 }, end] }],
+      },
+    });
+    try {
+      renderer.setPresence([packet({ x: 40, y: 10 })]);
+      animationTime += 40;
+      renderer.setPresence([packet({ x: 100, y: 80 })]);
+      const entry = internals.presenceRenderEntries.get(presence.clientId)!;
+      const line = entry.laser!.getChildren()[0] as Konva.Line;
+      for (const elapsed of [0, 8, 28, 57]) {
+        internals.renderPresence(animationTime + elapsed);
+        const head = line.points().slice(-2);
+        expect(entry.cursor!.position()).toEqual({ x: head[0], y: head[1] });
+      }
+      animationTime += 80;
+      const hover = { x: 160, y: 100 };
+      renderer.setPresence([{ ...packet({ x: 100, y: 80 }), cursor: hover }]);
+      animationTime += 100;
+      internals.renderPresence(animationTime);
+      expect(entry.cursor!.position()).toEqual(hover);
+      expect(line.points().slice(-2)).toEqual([100, 80]);
+      renderer.setPresence([{ ...presence, cursor: hover, laserClearMode: "immediate" }]);
+      expect(entry.laser!.visible()).toBe(false);
+      expect(entry.cursor!.position()).toEqual(hover);
+    } finally {
+      renderer.destroy();
+      performanceNow.mockRestore();
+    }
+  });
+
   it("shows an idle-only remote name and a theme-aware modern cursor", () => {
     vi.useFakeTimers();
     vi.setSystemTime(10_000);
@@ -7807,7 +8040,7 @@ describe("Konva remote gesture previews", () => {
     expect(entry.gesturePoints?.[0]).toEqual(allPoints[0]);
     expect(entry.gesturePoints?.at(-1)).toEqual(allPoints.at(-1));
     expect(entry.gestureStreamNextOffset).toBe(allPoints.length);
-    expect(line.points()).toHaveLength(allPoints.length * 2);
+    expect(line.points().length).toBeLessThanOrEqual(allPoints.length * 2);
     expect(line.position()).toEqual({ x: 30, y: 20 });
 
     const revisedEnd = { x: 500, y: 70 };
@@ -7957,10 +8190,10 @@ describe("Konva remote gesture previews", () => {
 
     expect(entry.gesturePoints).toHaveLength(allPoints.length);
     expect(entry.gesturePoints?.at(-1)).toEqual(allPoints.at(-1));
-    expect(line.points()).toHaveLength(allPoints.length * 2);
     internals.renderPresence(
       performance.now() + REMOTE_GESTURE_INTERPOLATION_MS + 1,
     );
+    expect(line.points()).toHaveLength(allPoints.length * 2);
     const writesAfterGrowth = pointsWrite.mock.calls.length;
     renderer.setPresence([{
       ...presence,
@@ -8072,7 +8305,7 @@ describe("Konva remote gesture previews", () => {
     expect(trail.sessionId).toBe("laser-session-1");
     expect(trail.strokes[0].points).toHaveLength(points.length);
     expect(trail.strokes[0].points.at(-1)).toEqual(points.at(-1));
-    expect(line.points()).toHaveLength(points.length * 2);
+    expect(line.points().length).toBeLessThanOrEqual(points.length * 2);
     const laserHeadMotion = trail.strokes[0].headMotion!;
     internals.renderPresence(
       laserHeadMotion.startedAt + REMOTE_GESTURE_INTERPOLATION_MS / 2,
@@ -8083,6 +8316,7 @@ describe("Konva remote gesture previews", () => {
     internals.renderPresence(
       laserHeadMotion.startedAt + REMOTE_GESTURE_INTERPOLATION_MS + 1,
     );
+    expect(line.points()).toHaveLength(points.length * 2);
     expect(line.points().slice(-2)).toEqual([
       points.at(-1)!.x,
       points.at(-1)!.y,

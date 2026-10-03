@@ -1253,13 +1253,27 @@ durable board object.
 
 Awareness transport remains rate-limited; visual frame rate is decoupled from
 packet rate. For streamed pen/highlighter and laser paths, the web renderer
-retargets the currently visible head toward each received endpoint with a 56 ms
-cubic ease-out driven by its existing presence RAF. Animation owns a separate
-Konva coordinate array and mutates only its final pair per frame; canonical
-accumulated points, stream offsets, and durable geometry are never interpolated
-or rebuilt. A genuine stream gap renders the new window directly instead of
+retargets the currently visible head through each received suffix with a 56 ms
+cubic ease-out driven by its existing presence RAF. Distance-indexed confirmed
+vertices are revealed in order up to that frame's head, rather than painting
+future vertices and pulling the final endpoint backwards over them. Animation
+owns a separate Konva coordinate array, appends only newly reached vertices,
+and updates its final pair; canonical accumulated points, stream offsets, and
+durable geometry are never interpolated or rebuilt. A genuine stream gap
+renders the new window directly instead of
 animating an invented bridge, and a new laser session never interpolates from
 the previous session.
+
+During remote drawing, the cursor hotspot uses that same rendered head after
+its frame interpolation, including the unfinished stroke's world offset. It
+does not independently replay the slower cursor jitter buffer over the ink.
+The receiver consumes confirmed cursor history while a drawing preview owns
+the pointer, including a committed preview already retired by its CRDT object,
+so release, cancellation, or either awareness/document arrival order cannot
+rewind the cursor to older input. Moving an unfinished stroke preserves the
+actual pointer when it differs from the endpoint; a retained laser likewise
+allows independent pointer movement between strokes. These changes are local
+presentation only and do not alter awareness payloads or durable geometry.
 
 Releasing `Alt` after pointer-up clears laser awareness and fades the complete
 retained local session together over 300 ms. An `Alt` release during an active
@@ -1785,7 +1799,8 @@ the tail nor its sender-relative timestamps are durable or authoritative state.
 
 The web receiver maps the sender-relative timeline onto its monotonic clock,
 tracks a slowly drifting minimum transit offset and filtered positive jitter,
-and plays confirmed samples through an adaptive 48-140 ms jitter buffer. Its
+and, outside drawing, plays confirmed samples through an adaptive 48-140 ms
+jitter buffer. Its
 playhead is monotonic, starts a late post-underrun packet without a same-call
 position jump, and catches up at no more than 1.25x. Piecewise cubic Hermite
 motion derives endpoint velocities from adjacent timed samples and bounds both
